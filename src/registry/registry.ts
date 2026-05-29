@@ -4,7 +4,7 @@ import type { ZoteusConfig } from '../config.js';
 import type { Capabilities } from '../router/capabilities.js';
 import type { LibraryRouter } from '../router/library-router.js';
 import type { SchemaService } from '../schema/schema-service.js';
-import type { WebApiClient } from '../api/web-client.js';
+import type { WebApiClient, LibraryRef } from '../api/web-client.js';
 import type { LocalApiClient } from '../api/local-client.js';
 import type { Logger } from '../lib/logger.js';
 import { ZoteroApiError } from '../api/errors.js';
@@ -49,6 +49,25 @@ export interface ToolDefinition {
 /** Build a successful result that mirrors structured data into a text block. */
 export function ok(structured: Record<string, unknown>, summary: string): ToolHandlerResult {
   return { content: [{ type: 'text', text: summary }], structuredContent: structured };
+}
+
+/**
+ * Resolve the library a WRITE should target. Writes only go to the cloud Web API
+ * (the local API is read-only), so this throws a friendly error when no API key is
+ * configured. The thrown message is surfaced to the model as an isError result.
+ */
+export function requireCloudLibrary(
+  ctx: ToolContext,
+  args?: { library_type?: 'user' | 'group'; library_id?: number },
+): LibraryRef {
+  if (args?.library_id) return { type: args.library_type ?? 'group', id: args.library_id };
+  const cloud = ctx.capabilities.cloud;
+  if (!cloud) {
+    throw new Error(
+      'This operation writes to Zotero and requires a cloud API key (set ZOTERO_API_KEY). The desktop local API is read-only.',
+    );
+  }
+  return { type: 'user', id: cloud.userID };
 }
 
 export function registerAllTools(

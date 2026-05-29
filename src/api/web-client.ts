@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { RateLimitedFetcher } from './http.js';
 import { ZoteroApiError, actionableMessage } from './errors.js';
 import type { Logger } from '../lib/logger.js';
@@ -19,6 +20,13 @@ export interface ListResult<T = any> {
   data: T[];
   totalResults: number;
   lastModifiedVersion: number;
+}
+
+export interface WriteResult {
+  successful: Array<{ index: number; key: string; version?: number }>;
+  unchanged: string[];
+  failed: Array<{ index: number; key?: string; code: number; message: string }>;
+  newLibraryVersion: number;
 }
 
 export interface ItemQuery {
@@ -181,6 +189,177 @@ export class WebApiClient {
     );
     return this.toListResult(json, headers);
   }
+
+  async listSearches(lib: LibraryRef): Promise<ListResult> {
+    const { json, headers } = await this.getJson(this.prefix(lib) + '/searches');
+    return this.toListResult(json, headers);
+  }
+
+  // ---- Writes ----
+
+  /** Read the library's current version (used as a precondition for deletes/mixed writes). */
+  async currentLibraryVersion(lib: LibraryRef): Promise<number> {
+    const { headers } = await this.getJson(this.prefix(lib) + '/items', this.buildQuery({ limit: 1 }));
+    return numOrUndef(headers.get('last-modified-version')) ?? 0;
+  }
+
+  /** Create/update items (batch POST /items). Objects with key+version update; without key create. */
+  async writeItems(
+    lib: LibraryRef,
+    objects: any[],
+    opts: { libraryVersion?: number } = {},
+  ): Promise<WriteResult> {
+    return this.postArray(this.prefix(lib) + '/items', objects, opts.libraryVersion);
+  }
+
+  async writeCollections(
+    lib: LibraryRef,
+    objects: any[],
+    opts: { libraryVersion?: number } = {},
+  ): Promise<WriteResult> {
+    return this.postArray(this.prefix(lib) + '/collections', objects, opts.libraryVersion);
+  }
+
+  async writeSearches(
+    lib: LibraryRef,
+    objects: any[],
+    opts: { libraryVersion?: number } = {},
+  ): Promise<WriteResult> {
+    return this.postArray(this.prefix(lib) + '/searches', objects, opts.libraryVersion);
+  }
+
+  /** Partial single-item update (PATCH). Returns the new library version. 412 on stale version. */
+  async patchItem(lib: LibraryRef, key: string, patch: Record<string, unknown>, version: number): Promise<number> {
+    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}`, {
+      method: 'PATCH',
+      headers: {
+        ...this.headers(),
+        'Content-Type': 'application/json',
+        'If-Unmodified-Since-Version': String(version),
+      },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new ZoteroApiError({
+        status: res.status,
+        message: actionableMessage(res.status, body, res.headers),
+        currentVersion: numOrUndef(res.headers.get('last-modified-version')),
+        body,
+      });
+    }
+    return numOrUndef(res.headers.get('last-modified-version')) ?? version;
+  }
+
+  async deleteItems(lib: LibraryRef, keys: string[], libraryVersion: number): Promise<void> {
+    await this.deleteByKeys(this.prefix(lib) + '/items', 'itemKey', keys, libraryVersion);
+  }
+
+  async deleteCollections(lib: LibraryRef, keys: string[], libraryVersion: number): Promise<void> {
+    await this.deleteByKeys(this.prefix(lib) + '/collections', 'collectionKey', keys, libraryVersion);
+  }
+
+  async deleteSearches(lib: LibraryRef, keys: string[], libraryVersion: number): Promise<void> {
+    await this.deleteByKeys(this.prefix(lib) + '/searches', 'searchKey', keys, libraryVersion);
+  }
+
+  private writeToken(): string {
+    return randomBytes(16).toString('hex');
+  }
+
+  private async postArray(path: string, objects: any[], libraryVersion?: number): Promise<WriteResult> {
+    const merged: WriteResult = {
+      successful: [],
+      unchanged: [],
+      failed: [],
+      newLibraryVersion: libraryVersion ?? 0,
+    };
+    let currentVersion = libraryVersion ?? 0;
+    let offset = 0;
+    for (const c of chunk(objects, 50)) {
+      const headers: Record<string, string> = { ...this.headers(), 'Content-Type': 'application/json' };
+      const withVersion = c.filter((o) => o && typeof o.version === 'number').length;
+      if (withVersion === c.length && c.length > 0) {
+        // all updates: per-object version provides concurrency; no extra header needed
+      } else if (withVersion === 0) {
+        headers['Zotero-Write-Token'] = this.writeToken();
+      } else {
+        headers['If-Unmodified-Since-Version'] = String(currentVersion);
+      }
+      const res = await this.fetcher.fetch(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(c),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new ZoteroApiError({
+          status: res.status,
+          message: actionableMessage(res.status, body, res.headers),
+          currentVersion: numOrUndef(res.headers.get('last-modified-version')),
+          body,
+        });
+      }
+      const json = await res.json();
+      this.mergeWriteBody(merged, json, offset);
+      const newV = numOrUndef(res.headers.get('last-modified-version'));
+      if (newV !== undefined) currentVersion = newV;
+      merged.newLibraryVersion = currentVersion;
+      offset += c.length;
+    }
+    return merged;
+  }
+
+  private mergeWriteBody(merged: WriteResult, json: any, offset: number): void {
+    for (const [idx, obj] of Object.entries<any>(json.successful ?? {})) {
+      merged.successful.push({ index: offset + Number(idx), key: obj.key, version: obj.version });
+    }
+    for (const [idx, key] of Object.entries<any>(json.success ?? {})) {
+      const index = offset + Number(idx);
+      if (!merged.successful.some((s) => s.index === index)) {
+        merged.successful.push({ index, key: String(key) });
+      }
+    }
+    for (const key of Object.values<any>(json.unchanged ?? {})) merged.unchanged.push(String(key));
+    for (const [idx, info] of Object.entries<any>(json.failed ?? {})) {
+      merged.failed.push({
+        index: offset + Number(idx),
+        key: info.key,
+        code: info.code,
+        message: info.message,
+      });
+    }
+  }
+
+  private async deleteByKeys(
+    path: string,
+    keyParam: string,
+    keys: string[],
+    libraryVersion: number,
+  ): Promise<void> {
+    for (const c of chunk(keys, 50)) {
+      const url = `${this.baseUrl}${path}?${keyParam}=${c.map(encodeURIComponent).join(',')}`;
+      const res = await this.fetcher.fetch(url, {
+        method: 'DELETE',
+        headers: { ...this.headers(), 'If-Unmodified-Since-Version': String(libraryVersion) },
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new ZoteroApiError({
+          status: res.status,
+          message: actionableMessage(res.status, body, res.headers),
+          currentVersion: numOrUndef(res.headers.get('last-modified-version')),
+          body,
+        });
+      }
+    }
+  }
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
 }
 
 function numOrUndef(v: string | null): number | undefined {

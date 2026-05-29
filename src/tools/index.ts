@@ -3,5 +3,26 @@ import whoami from './whoami.js';
 import searchItems from './search-items.js';
 import getItem from './get-item.js';
 import schemaTool from './schema.js';
+import createItems from './create-items.js';
+import updateItem from './update-item.js';
+import trashItems from './trash-items.js';
+import deleteItems from './delete-items.js';
+import manageCollections from './manage-collections.js';
+import manageTags from './manage-tags.js';
+import savedSearches from './saved-searches.js';
 
-export const tools: ToolDefinition[] = [whoami, searchItems, getItem, schemaTool];
+export const tools: ToolDefinition[] = [
+  // Read
+  whoami,
+  searchItems,
+  getItem,
+  schemaTool,
+  // Write (M3)
+  createItems,
+  updateItem,
+  trashItems,
+  deleteItems,
+  manageCollections,
+  manageTags,
+  savedSearches,
+];

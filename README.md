@@ -92,7 +92,7 @@ Active development. Milestones:
 - [x] **0** Scaffold + CI
 - [x] **1** Zotero API clients (cloud + local) + capability probe
 - [x] **2** MCP core + read tools + resources (stdio)
-- [ ] **3** Safe writes
+- [x] **3** Safe writes
 - [ ] **4** Files / full-text / sync / groups / export
 - [ ] **5** Citation pipeline (add-by-identifier + CSL formatting)
 - [ ] **6** Hybrid semantic search

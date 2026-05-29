@@ -1,4 +1,5 @@
 import type { WebApiClient } from '../api/web-client.js';
+import { validateItem, type ValidationResult } from './validate.js';
 
 export interface ZoteroSchema {
   version: number;
@@ -39,5 +40,9 @@ export class SchemaService {
   async itemTypeNames(): Promise<string[]> {
     const schema = await this.getSchema();
     return schema.itemTypes.map((t) => t.itemType);
+  }
+
+  async validateItem(item: any): Promise<ValidationResult> {
+    return validateItem(await this.getSchema(), item);
   }
 }
