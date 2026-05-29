@@ -24,7 +24,7 @@ export interface BuiltServer {
   ctx: ToolContext;
 }
 
-const VERSION = '0.8.1';
+const VERSION = '0.8.2';
 
 export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const logger = createLogger(config.logLevel);
@@ -46,8 +46,15 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   await loadIndex(search, join(config.dataDir, 'search-index.json')).catch(() => false);
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
+  // In read-only mode, expose only tools that don't mutate the library (plus the
+  // local index builder, which only touches local files). Safe for public/tunnel exposure.
+  const activeTools = config.readOnly
+    ? tools.filter((t) => t.annotations?.readOnlyHint === true || t.name === 'zotero_index')
+    : tools;
+  if (config.readOnly) logger.info(`Read-only mode: exposing ${activeTools.length}/${tools.length} tools.`);
+
   const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, search, scholar, logger };
-  ctx.toolCatalog = tools.map((t) => ({ name: t.name, title: t.title, description: t.description, deferLoading: t.deferLoading }));
+  ctx.toolCatalog = activeTools.map((t) => ({ name: t.name, title: t.title, description: t.description, deferLoading: t.deferLoading }));
 
   const server = new McpServer(
     { name: 'zoteus', version: VERSION },
@@ -62,7 +69,7 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
     },
   );
 
-  registerAllTools(server, tools, ctx);
+  registerAllTools(server, activeTools, ctx);
   registerResources(server, ctx);
   registerPrompts(server);
 

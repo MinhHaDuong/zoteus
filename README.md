@@ -77,6 +77,21 @@ zoteus --http --port 3939        # serves MCP at http://127.0.0.1:3939/mcp
 
 Runs on a trusted network or behind your own auth proxy (OAuth is on the roadmap). **Claude Desktop one-click:** build the [Desktop Extension](./dxt/manifest.json) (`dist/` + `dxt/manifest.json`) and double-click the `.dxt`.
 
+**Claude.ai (web) — custom connector**
+
+claude.ai connects to remote MCP servers from the cloud, so it needs a **public HTTPS URL** (not `localhost`) and, for secure access, **OAuth 2.1 + PKCE** ([docs](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)). A static API key or `Authorization` header cannot be entered in the connector UI.
+
+- **Status:** Zoteus serves the right transport (Streamable HTTP) but does **not yet implement OAuth**, so it is not a turn-key claude.ai connector. OAuth support is tracked on the roadmap.
+- **Quick personal test (no OAuth):** expose the local server with a tunnel and paste the resulting URL into *Settings → Connectors → Add custom connector*:
+
+  ```bash
+  zoteus --http --host 127.0.0.1 --port 3939
+  ngrok http 3939          # → https://<id>.ngrok-free.app  (use URL + "/mcp")
+  ```
+
+  ⚠️ This endpoint is **unauthenticated** — anyone with the URL can use your library (including writes). Only do this briefly, keep `ZOTEUS_ALLOW_DELETE=false`, prefer `ZOTEUS_READ_ONLY=true` if you only need reads, and stop the tunnel when done.
+- **Proper deployment:** host behind HTTPS with OAuth (roadmap) — see [`docs/configuration.md`](./docs/configuration.md).
+
 ## ⚙️ Configuration
 
 | Variable | Default | Purpose |

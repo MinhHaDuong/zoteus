@@ -13,6 +13,7 @@ export interface ZoteusConfig {
   dataDir: string;
   contactEmail?: string;
   allowDelete: boolean;
+  readOnly: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -35,6 +36,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTEUS_DATA_DIR: z.string().optional(),
     ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
     ZOTEUS_ALLOW_DELETE: bool(false),
+    ZOTEUS_READ_ONLY: bool(false),
     ZOTEUS_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   });
 
@@ -54,6 +56,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     dataDir: parsed.ZOTEUS_DATA_DIR ?? defaultDataDir(env),
     contactEmail: parsed.ZOTEUS_CONTACT_EMAIL,
     allowDelete: parsed.ZOTEUS_ALLOW_DELETE,
+    readOnly: parsed.ZOTEUS_READ_ONLY,
     logLevel: parsed.ZOTEUS_LOG_LEVEL,
   };
 }

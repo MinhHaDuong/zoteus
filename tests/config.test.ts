@@ -11,6 +11,7 @@ describe('loadConfig', () => {
     expect(cfg.translationServerUrl).toBe('http://127.0.0.1:1969');
     expect(cfg.embeddings).toBe('local');
     expect(cfg.allowDelete).toBe(false);
+    expect(cfg.readOnly).toBe(false);
     expect(cfg.scholarProviders).toEqual(['openalex']);
     expect(typeof cfg.dataDir).toBe('string');
   });
