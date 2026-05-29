@@ -1,6 +1,6 @@
 {
   "name": "@oscardvs/zoteus",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "The everything Zotero MCP server — complete Zotero Web API v3 + desktop local API for Claude and any MCP client.",
   "keywords": [
     "zotero",
@@ -43,8 +43,10 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "gen:codex": "tsx scripts/generate-codex.ts",
-    "inspector": "npx @modelcontextprotocol/inspector npx tsx src/index.ts"
+    "inspector": "npx @modelcontextprotocol/inspector npx tsx src/index.ts",
+    "prepublishOnly": "npm run build"
   },
+  "mcpName": "io.github.oscardvs/zoteus",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "citeproc": "^2.4.63",

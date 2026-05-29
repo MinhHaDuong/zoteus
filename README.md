@@ -7,7 +7,7 @@
 A TypeScript [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents (Claude Code, Claude Desktop, and any MCP client) complete, **safe** access to your [Zotero](https://www.zotero.org) library: search, read, write, cite, import-by-DOI, semantic search, and a scholarly-context graph — local-first and privacy-preserving.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-2ea44f.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#-status--roadmap)
+[![Status](https://img.shields.io/badge/status-feature--complete-brightgreen.svg)](#-status--roadmap)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![Made for Zotero](https://img.shields.io/badge/Zotero-Web%20API%20v3%20%2B%20Local%20API-CC2936.svg)](https://www.zotero.org/support/dev/web_api/v3/basics)
 
@@ -43,7 +43,7 @@ There are several Zotero MCP servers. Zoteus is the one that combines **everythi
 
 ## 🚀 Quickstart
 
-> Zoteus is in active development. Install instructions below are the target UX and will work as milestones land — see the [roadmap](#-status--roadmap).
+> Zoteus is feature-complete. The `npx`/registry commands below work once it's published to npm; until then, clone the repo and run `npm install && npm run build`, then point your client at `node /path/to/zoteus/dist/index.js`.
 
 **Claude Code**
 
@@ -69,6 +69,14 @@ claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscar
 
 Get a Zotero API key at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). For local-API reads, enable **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** in the desktop app.
 
+**Remote / team (Streamable HTTP)**
+
+```bash
+zoteus --http --port 3939        # serves MCP at http://127.0.0.1:3939/mcp
+```
+
+Runs on a trusted network or behind your own auth proxy (OAuth is on the roadmap). **Claude Desktop one-click:** build the [Desktop Extension](./dxt/manifest.json) (`dist/` + `dxt/manifest.json`) and double-click the `.dxt`.
+
 ## ⚙️ Configuration
 
 | Variable | Default | Purpose |
@@ -83,11 +91,22 @@ Full table in [`docs/configuration.md`](./docs/configuration.md).
 
 ## 📚 Documentation
 
-The complete design lives in [`docs/superpowers/specs/2026-05-29-zoteus-design.md`](./docs/superpowers/specs/2026-05-29-zoteus-design.md). Per-topic guides (architecture, tool reference, resources, prompts, citation pipeline, semantic search, scholarly context, code-execution, security) land under [`docs/`](./docs) as features ship.
+- [Architecture](./docs/architecture.md) · [Configuration](./docs/configuration.md)
+- [Writing (safe writes)](./docs/writing.md) · [Files, full-text & sync](./docs/files-and-sync.md)
+- [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md)
+- [Prompts](./docs/prompts.md) · [Code execution with MCP](./docs/code-execution.md)
+- Full design spec: [`docs/superpowers/specs/2026-05-29-zoteus-design.md`](./docs/superpowers/specs/2026-05-29-zoteus-design.md)
+
+### Publishing (maintainers)
+
+```bash
+npm run build && npm publish --access public   # npm
+# MCP registry: edit server.json, then `mcp-publisher login github && mcp-publisher publish`
+```
 
 ## 🗺️ Status & roadmap
 
-Active development. Milestones:
+**Feature-complete** — all 10 milestones implemented, 24 tools, 7 prompts, ~120 tests, CI green. (`npm publish` to make it installable for everyone is the only remaining step.)
 
 - [x] **0** Scaffold + CI
 - [x] **1** Zotero API clients (cloud + local) + capability probe
@@ -98,7 +117,7 @@ Active development. Milestones:
 - [x] **6** Hybrid semantic search
 - [x] **7** Scholarly-context graph
 - [x] **8** Code-execution layer + Prompts
-- [ ] **9** HTTP transport + DXT + MCP registry + docs polish
+- [x] **9** HTTP transport + DXT + MCP registry + docs polish
 
 ## 🤝 Contributing
 

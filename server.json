@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.oscardvs/zoteus",
+  "description": "The everything Zotero MCP server — Web API v3 + desktop local API: search, safe writes, attachments, citations, semantic search, and a scholarly-context graph.",
+  "version": "0.8.0",
+  "repository": {
+    "url": "https://github.com/oscardvs/zoteus",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registry_type": "npm",
+      "identifier": "@oscardvs/zoteus",
+      "version": "0.8.0",
+      "transport": { "type": "stdio" },
+      "environment_variables": [
+        {
+          "name": "ZOTERO_API_KEY",
+          "description": "Zotero API key (writes/sync/groups; optional for local-only reads).",
+          "is_secret": true,
+          "is_required": false
+        },
+        {
+          "name": "ZOTEUS_LOCAL",
+          "description": "Use the Zotero desktop local API: auto | on | off.",
+          "is_required": false
+        },
+        {
+          "name": "ZOTEUS_ALLOW_DELETE",
+          "description": "Set to true to enable permanent deletion (off by default).",
+          "is_required": false
+        }
+      ]
+    }
+  ]
+}

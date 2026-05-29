@@ -1,0 +1,42 @@
+{
+  "dxt_version": "0.1",
+  "name": "zoteus",
+  "display_name": "Zoteus — Zotero MCP",
+  "version": "0.8.0",
+  "description": "The everything Zotero MCP server: search, safe writes, citations, semantic search, and a scholarly-context graph for your Zotero library.",
+  "long_description": "Zoteus gives Claude complete, safe access to your Zotero library via the Web API v3 and the desktop local API — items, collections, tags, attachments, full-text, sync, groups, add-by-DOI/ISBN/PMID/arXiv, CSL bibliography formatting, hybrid semantic search, and an OpenAlex/Crossref scholarly graph.",
+  "author": {
+    "name": "Oscar Devos",
+    "url": "https://github.com/oscardvs"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/oscardvs/zoteus",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/oscardvs/zoteus"
+  },
+  "keywords": ["zotero", "mcp", "citations", "bibliography", "research", "reference-manager"],
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "ZOTERO_API_KEY": "${user_config.api_key}",
+        "ZOTEUS_LOCAL": "auto"
+      }
+    }
+  },
+  "user_config": {
+    "api_key": {
+      "type": "string",
+      "title": "Zotero API Key",
+      "description": "Create one at https://www.zotero.org/settings/keys. Optional if you only read your local Zotero 7+ library, but required for writes, sync, and group libraries.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools_generated": true
+}

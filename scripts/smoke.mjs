@@ -31,7 +31,7 @@ console.log('schema:', schema.content?.[0]?.text);
 
 await client.close();
 const okWho = typeof who.content?.[0]?.text === 'string';
-const okTools = tools.length === 4;
+const okTools = tools.length >= 20 && tools.some((t) => t.name === 'zotero_search_items');
 if (!okWho || !okTools) {
   console.error('SMOKE FAILED');
   process.exit(1);
