@@ -18,4 +18,22 @@ d('Zoteus e2e (live Zotero API)', () => {
     expect(result.data.length).toBeGreaterThan(0);
     expect(result.data.length).toBeLessThanOrEqual(3);
   }, 30_000);
+
+  it('exercises groups, export, and sync delta (read-only)', async () => {
+    const config = loadConfig(process.env);
+    const { ctx } = await buildServer(config);
+    const lib = ctx.router.defaultLibrary();
+
+    // groups (may be empty, but must not error)
+    const groups = await ctx.web.listGroups(ctx.router.whoami()!.userID);
+    expect(Array.isArray(groups.data)).toBe(true);
+
+    // export one item as BibTeX
+    const bib = await ctx.web.exportItems(lib, { format: 'bibtex', limit: 1 });
+    expect(typeof bib).toBe('string');
+
+    // sync delta from version 0 returns a key->version map for items
+    const versions = await ctx.web.versions(lib, 'items', 0);
+    expect(Object.keys(versions).length).toBeGreaterThan(0);
+  }, 30_000);
 });

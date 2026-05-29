@@ -10,6 +10,11 @@ import deleteItems from './delete-items.js';
 import manageCollections from './manage-collections.js';
 import manageTags from './manage-tags.js';
 import savedSearches from './saved-searches.js';
+import groups from './groups.js';
+import exportTool from './export.js';
+import fulltext from './fulltext.js';
+import sync from './sync.js';
+import attachment from './attachment.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -25,4 +30,10 @@ export const tools: ToolDefinition[] = [
   manageCollections,
   manageTags,
   savedSearches,
+  // Files / sync / groups / export (M4)
+  groups,
+  exportTool,
+  fulltext,
+  sync,
+  attachment,
 ];

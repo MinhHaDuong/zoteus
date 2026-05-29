@@ -93,7 +93,7 @@ Active development. Milestones:
 - [x] **1** Zotero API clients (cloud + local) + capability probe
 - [x] **2** MCP core + read tools + resources (stdio)
 - [x] **3** Safe writes
-- [ ] **4** Files / full-text / sync / groups / export
+- [x] **4** Files / full-text / sync / groups / export
 - [ ] **5** Citation pipeline (add-by-identifier + CSL formatting)
 - [ ] **6** Hybrid semantic search
 - [ ] **7** Scholarly-context graph

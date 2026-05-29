@@ -1,9 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { writeFile, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadConfig } from '../../src/config.js';
 import { buildServer } from '../../src/server.js';
 import createItems from '../../src/tools/create-items.js';
 import updateItem from '../../src/tools/update-item.js';
 import trashItems from '../../src/tools/trash-items.js';
+import { uploadFile, downloadFile } from '../../src/api/attachments.js';
 
 // Double-gated: only runs with BOTH a real key AND an explicit opt-in, so normal
 // `npm test` and CI never mutate the real library. Self-cleaning (permanently
@@ -51,4 +55,32 @@ d('Zoteus e2e writes (live, self-cleaning)', () => {
       }
     }
   }, 60_000);
+
+  it('uploads and downloads an attachment file via the full protocol (self-cleaning)', async () => {
+    const config = loadConfig(process.env);
+    const { ctx } = await buildServer(config);
+    const lib = ctx.router.defaultLibrary();
+    const src = join(tmpdir(), `zoteus-e2e-${process.pid}.txt`);
+    const content = `ZOTEUS_E2E attachment ${new Date().toISOString()}`;
+    await writeFile(src, content);
+    let key: string | undefined;
+    try {
+      const up = await uploadFile(ctx.web, lib, { filePath: src, title: 'ZOTEUS_E2E attachment' });
+      key = up.key;
+      expect(key).toBeTruthy();
+      expect(up.exists).toBe(false);
+
+      const dst = join(tmpdir(), `zoteus-e2e-dl-${process.pid}.txt`);
+      const dl = await downloadFile(ctx.web, lib, key, dst);
+      expect(dl.bytes).toBe(Buffer.byteLength(content));
+      expect(await readFile(dst, 'utf8')).toBe(content);
+      await rm(dst).catch(() => undefined);
+    } finally {
+      if (key) {
+        const v = await ctx.web.currentLibraryVersion(lib);
+        await ctx.web.deleteItems(lib, [key], v);
+      }
+      await rm(src).catch(() => undefined);
+    }
+  }, 90_000);
 });

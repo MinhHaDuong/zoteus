@@ -62,19 +62,24 @@ async function connect() {
 }
 
 describe('Zoteus server (in-process)', () => {
-  it('lists all eleven tools', async () => {
+  it('lists all sixteen tools', async () => {
     const { client } = await connect();
     const { tools: listed } = await client.listTools();
     const names = listed.map((t) => t.name).sort();
     expect(names).toEqual([
+      'zotero_attachment',
       'zotero_create_items',
       'zotero_delete_items',
+      'zotero_export',
+      'zotero_fulltext',
       'zotero_get_item',
+      'zotero_groups',
       'zotero_manage_collections',
       'zotero_manage_tags',
       'zotero_saved_searches',
       'zotero_schema',
       'zotero_search_items',
+      'zotero_sync',
       'zotero_trash_items',
       'zotero_update_item',
       'zotero_whoami',

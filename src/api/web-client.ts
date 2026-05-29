@@ -195,6 +195,173 @@ export class WebApiClient {
     return this.toListResult(json, headers);
   }
 
+  async listGroups(userID: number): Promise<ListResult> {
+    const { json, headers } = await this.getJson(`/users/${userID}/groups`);
+    return this.toListResult(json, headers);
+  }
+
+  private async getRaw(path: string, query = ''): Promise<{ text: string; headers: Headers }> {
+    const res = await this.fetcher.fetch(`${this.baseUrl}${path}${query}`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new ZoteroApiError({
+        status: res.status,
+        message: actionableMessage(res.status, body, res.headers),
+        body,
+      });
+    }
+    return { text: await res.text(), headers: res.headers };
+  }
+
+  /** Export items in a bibliographic format (bibtex/ris/csljson/csv/mods/tei/...). Returns raw text. */
+  async exportItems(
+    lib: LibraryRef,
+    params: { format: string; itemKey?: string[]; collectionKey?: string; q?: string; itemType?: string; limit?: number },
+  ): Promise<string> {
+    const segment = params.collectionKey ? `/collections/${params.collectionKey}/items` : '/items';
+    const query = this.buildQuery({
+      format: params.format,
+      itemKey: params.itemKey?.join(','),
+      q: params.q,
+      itemType: params.itemType,
+      limit: params.limit ?? 50,
+    });
+    const { text } = await this.getRaw(this.prefix(lib) + segment, query);
+    return text;
+  }
+
+  // ---- Full text ----
+
+  async getFullText(lib: LibraryRef, key: string): Promise<any | null> {
+    try {
+      const { json } = await this.getJson(this.prefix(lib) + `/items/${key}/fulltext`);
+      return json;
+    } catch (e) {
+      if (e instanceof ZoteroApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  async setFullText(
+    lib: LibraryRef,
+    key: string,
+    body: { content: string; indexedChars?: number; totalChars?: number; indexedPages?: number; totalPages?: number },
+  ): Promise<void> {
+    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/fulltext`, {
+      method: 'PUT',
+      headers: { ...this.headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const b = await res.text().catch(() => '');
+      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+    }
+  }
+
+  async fullTextSince(lib: LibraryRef, since: number): Promise<Record<string, number>> {
+    const { json } = await this.getJson(this.prefix(lib) + '/fulltext', this.buildQuery({ since }));
+    return json;
+  }
+
+  // ---- Sync delta ----
+
+  async versions(
+    lib: LibraryRef,
+    type: 'items' | 'collections' | 'searches' | 'tags',
+    since?: number,
+  ): Promise<Record<string, number>> {
+    const { json } = await this.getJson(this.prefix(lib) + `/${type}`, this.buildQuery({ format: 'versions', since }));
+    return json;
+  }
+
+  async deleted(lib: LibraryRef, since: number): Promise<Record<string, string[]>> {
+    const { json } = await this.getJson(this.prefix(lib) + '/deleted', this.buildQuery({ since }));
+    return json;
+  }
+
+  // ---- File storage (low-level; orchestrated by api/attachments.ts) ----
+
+  async requestUpload(
+    lib: LibraryRef,
+    key: string,
+    info: { md5: string; filename: string; filesize: number; mtime: number; replaceMd5?: string },
+  ): Promise<any> {
+    const headers: Record<string, string> = {
+      ...this.headers(),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (info.replaceMd5) headers['If-Match'] = info.replaceMd5;
+    else headers['If-None-Match'] = '*';
+    const body = new URLSearchParams({
+      md5: info.md5,
+      filename: info.filename,
+      filesize: String(info.filesize),
+      mtime: String(info.mtime),
+    }).toString();
+    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/file`, {
+      method: 'POST',
+      headers,
+      body,
+    });
+    if (!res.ok) {
+      const b = await res.text().catch(() => '');
+      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+    }
+    return res.json();
+  }
+
+  async uploadBytes(url: string, contentType: string, body: Uint8Array): Promise<void> {
+    const res = await this.fetcher.fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType },
+      body,
+    });
+    if (res.status !== 201 && !res.ok) {
+      const b = await res.text().catch(() => '');
+      throw new ZoteroApiError({ status: res.status, message: `File storage upload failed (${res.status}). ${b.slice(0, 200)}` });
+    }
+  }
+
+  async registerUpload(lib: LibraryRef, key: string, uploadKey: string, replaceMd5?: string): Promise<void> {
+    const headers: Record<string, string> = {
+      ...this.headers(),
+      'Content-Type': 'application/x-www-form-urlencoded',
+    };
+    if (replaceMd5) headers['If-Match'] = replaceMd5;
+    else headers['If-None-Match'] = '*';
+    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/file`, {
+      method: 'POST',
+      headers,
+      body: `upload=${encodeURIComponent(uploadKey)}`,
+    });
+    if (!res.ok) {
+      const b = await res.text().catch(() => '');
+      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+    }
+  }
+
+  async downloadFileBytes(
+    lib: LibraryRef,
+    key: string,
+  ): Promise<{ bytes: Uint8Array; contentType?: string; etag?: string }> {
+    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/file`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!res.ok) {
+      const b = await res.text().catch(() => '');
+      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+    }
+    return {
+      bytes: new Uint8Array(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type') ?? undefined,
+      etag: res.headers.get('etag') ?? undefined,
+    };
+  }
+
   // ---- Writes ----
 
   /** Read the library's current version (used as a precondition for deletes/mixed writes). */
