@@ -24,7 +24,7 @@ export interface BuiltServer {
   ctx: ToolContext;
 }
 
-const VERSION = '0.8.2';
+const VERSION = '0.9.0';
 
 export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const logger = createLogger(config.logLevel);

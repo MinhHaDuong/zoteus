@@ -1,65 +1,89 @@
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
+import express from 'express';
+import cors from 'cors';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Logger } from '../lib/logger.js';
+import type { BuiltOAuth } from '../auth/router.js';
 
 export interface HttpOptions {
   port?: number;
   host?: string;
   path?: string;
   logger?: Logger;
+  /** When provided, OAuth endpoints are mounted and /mcp requires a bearer token. */
+  oauth?: BuiltOAuth;
+  enableDnsRebindingProtection?: boolean;
+  allowedHosts?: string[];
+  /** Permit binding a non-loopback host without OAuth (escape hatch; default false). */
+  allowInsecureBind?: boolean;
 }
 
-async function readBody(req: http.IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  for await (const c of req) chunks.push(c as Buffer);
-  const raw = Buffer.concat(chunks).toString('utf8');
-  if (!raw) return undefined;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return undefined;
-  }
-}
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 /**
- * Start the server on a Streamable HTTP transport (stateless, JSON responses).
- * Binds to 127.0.0.1 by default for safety. OAuth is intentionally out of scope
- * for v1 — run this only on trusted networks or behind your own auth proxy.
- * Resolves with the HTTP server (its address().port is useful when port=0).
+ * Start the MCP server on a Streamable HTTP transport (stateless JSON responses)
+ * via Express. When `oauth` is provided, the OAuth 2.1 metadata/DCR/token/authorize
+ * endpoints are mounted and `/mcp` is protected by bearer-token auth; otherwise
+ * `/mcp` is unauthenticated and must stay on loopback. Resolves with the underlying
+ * http.Server (its address().port is useful when port=0).
  */
 export async function startHttp(server: McpServer, opts: HttpOptions = {}): Promise<http.Server> {
   const host = opts.host ?? '127.0.0.1';
   const path = opts.path ?? '/mcp';
+
+  // Safety: never expose an unauthenticated MCP endpoint on a non-loopback interface.
+  if (!opts.oauth && !opts.allowInsecureBind && !LOOPBACK.has(host)) {
+    throw new Error(
+      `Refusing to bind ${host} without OAuth: an unauthenticated MCP endpoint must stay on loopback. ` +
+        `Enable OAuth (ZOTEUS_OAUTH_ENABLED=true) or set ZOTEUS_ALLOW_INSECURE_HTTP=true to override.`,
+    );
+  }
+
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => randomUUID(),
     enableJsonResponse: true,
+    enableDnsRebindingProtection: opts.enableDnsRebindingProtection ?? false,
+    allowedHosts: opts.allowedHosts,
   });
   await server.connect(transport);
 
-  const httpServer = http.createServer((req, res) => {
-    if (!req.url || !req.url.startsWith(path)) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: `Not found. MCP endpoint is ${path}.` }));
-      return;
-    }
-    const handle = async () => {
-      const body = req.method === 'POST' ? await readBody(req) : undefined;
-      await transport.handleRequest(req as any, res, body);
-    };
-    handle().catch((err) => {
-      opts.logger?.error('HTTP request failed:', err instanceof Error ? err.message : String(err));
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Internal error' }));
-      }
-    });
-  });
+  const app = express();
+  app.disable('x-powered-by');
 
-  await new Promise<void>((resolve) => httpServer.listen(opts.port ?? 0, host, resolve));
+  if (opts.oauth) opts.oauth.mount(app);
+
+  const guards = opts.oauth
+    ? [requireBearerAuth({ verifier: opts.oauth.provider, resourceMetadataUrl: opts.oauth.resourceMetadataUrl })]
+    : [];
+
+  const handle = async (req: express.Request, res: express.Response): Promise<void> => {
+    await transport.handleRequest(req, res, req.method === 'POST' ? req.body : undefined);
+  };
+  const wrap = (req: express.Request, res: express.Response): void => {
+    handle(req, res).catch((err) => {
+      opts.logger?.error('HTTP request failed:', err instanceof Error ? err.message : String(err));
+      if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    });
+  };
+
+  // CORS for web-based MCP clients + OPTIONS preflight (before bearer auth so
+  // preflight is not rejected). The SDK already CORS-enables its own routes.
+  app.use(path, cors());
+  app.post(path, ...guards, express.json({ limit: '8mb' }), wrap);
+  app.get(path, ...guards, wrap);
+  app.delete(path, ...guards, wrap);
+  app.use((_req, res) => res.status(404).json({ error: `Not found. MCP endpoint is ${path}.` }));
+
+  const httpServer = await new Promise<http.Server>((resolve) => {
+    const s = app.listen(opts.port ?? 0, host, () => resolve(s));
+  });
   const address = httpServer.address();
   const port = typeof address === 'object' && address ? address.port : opts.port;
-  opts.logger?.info(`Zoteus MCP server listening on http://${host}:${port}${path}`);
+  opts.logger?.info(
+    `Zoteus MCP server listening on http://${host}:${port}${path}${opts.oauth ? ' (OAuth 2.1 enabled)' : ''}`,
+  );
   return httpServer;
 }

@@ -14,7 +14,24 @@ Zoteus is configured via environment variables (see [`.env.example`](../.env.exa
 | `ZOTEUS_DATA_DIR` | OS data dir | Index + caches location. |
 | `ZOTEUS_CONTACT_EMAIL` | — | Polite-pool contact for external scholarly APIs. |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent delete (later milestone). |
+| `ZOTEUS_READ_ONLY` | `false` | Expose only non-mutating tools. Recommended for public/remote endpoints. |
 | `ZOTEUS_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` (stderr only — stdout carries the JSON-RPC stream). |
+
+## Remote OAuth (claude.ai web connector)
+
+Turn the Streamable HTTP `/mcp` endpoint into an OAuth 2.1 + PKCE protected resource so it can be added as a claude.ai custom connector. See [`remote-oauth.md`](./remote-oauth.md) for the full walkthrough.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ZOTEUS_OAUTH_ENABLED` | `false` | Enable the built-in OAuth 2.1 authorization server + bearer-auth on `/mcp`. |
+| `ZOTEUS_PUBLIC_URL` | — | Public HTTPS origin claude.ai reaches (OAuth issuer), e.g. `https://zoteus.example.com`. Required when enabled; must be HTTPS in production. |
+| `ZOTEUS_OAUTH_PASSCODE` | — | Operator passcode gating consent (≥ 12 chars; `openssl rand -base64 24`). Required when enabled. |
+| `ZOTEUS_OAUTH_ACCESS_TTL` | `3600` | Access-token lifetime (seconds). |
+| `ZOTEUS_OAUTH_REFRESH_TTL` | `2592000` | Refresh-token lifetime (seconds). |
+| `ZOTEUS_ALLOWED_HOSTS` | — | Comma-separated extra `Host` values for DNS-rebinding protection (merged with the public host); use if a proxy rewrites `Host`. |
+| `ZOTEUS_ALLOW_INSECURE_HTTP` | `false` | Override the guard that forbids binding a non-loopback host without OAuth. Trusted networks only. |
+
+When OAuth is enabled, `--http` binds `0.0.0.0` and enables DNS-rebinding protection (`allowedHosts` = public host + `ZOTEUS_ALLOWED_HOSTS`). Put TLS (Caddy / cloudflared / Fly) in front; the proxy must forward the public `Host` header verbatim.
 
 ## Library backends
 

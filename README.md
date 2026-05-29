@@ -75,22 +75,26 @@ Get a Zotero API key at [zotero.org/settings/keys](https://www.zotero.org/settin
 zoteus --http --port 3939        # serves MCP at http://127.0.0.1:3939/mcp
 ```
 
-Runs on a trusted network or behind your own auth proxy (OAuth is on the roadmap). **Claude Desktop one-click:** build the [Desktop Extension](./dxt/manifest.json) (`dist/` + `dxt/manifest.json`) and double-click the `.dxt`.
+Runs on loopback for a trusted network or behind your own auth proxy. For a public, authenticated remote (claude.ai web), enable OAuth — see below. **Claude Desktop one-click:** build the [Desktop Extension](./dxt/manifest.json) (`dist/` + `dxt/manifest.json`) and double-click the `.dxt`.
 
 **Claude.ai (web) — custom connector**
 
-claude.ai connects to remote MCP servers from the cloud, so it needs a **public HTTPS URL** (not `localhost`) and, for secure access, **OAuth 2.1 + PKCE** ([docs](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)). A static API key or `Authorization` header cannot be entered in the connector UI.
+claude.ai connects to remote MCP servers from the cloud, so it needs a **public HTTPS URL** (not `localhost`) and **OAuth 2.1 + PKCE** ([docs](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)). Since **v0.9.0** Zoteus ships its own OAuth 2.1 authorization server in front of `/mcp`, so it is a turn-key connector — claude.ai self-registers (Dynamic Client Registration) and runs the auth-code + PKCE flow; a one-step **passcode** gates the consent.
 
-- **Status:** Zoteus serves the right transport (Streamable HTTP) but does **not yet implement OAuth**, so it is not a turn-key claude.ai connector. OAuth support is tracked on the roadmap.
-- **Quick personal test (no OAuth):** expose the local server with a tunnel and paste the resulting URL into *Settings → Connectors → Add custom connector*:
+```bash
+ZOTERO_API_KEY=zzz \
+ZOTEUS_OAUTH_ENABLED=true \
+ZOTEUS_PUBLIC_URL=https://zoteus.example.com \
+ZOTEUS_OAUTH_PASSCODE="$(openssl rand -base64 24)" \
+ZOTEUS_READ_ONLY=true \
+zoteus --http --port 3939 --host 0.0.0.0      # put HTTPS (Caddy / cloudflared / Fly) in front
+```
 
-  ```bash
-  zoteus --http --host 127.0.0.1 --port 3939
-  ngrok http 3939          # → https://<id>.ngrok-free.app  (use URL + "/mcp")
-  ```
+Then in claude.ai: **Settings → Connectors → Add custom connector** → URL `https://<host>/mcp` → **Connect** → enter the passcode → the tools appear. A [`Dockerfile`](./Dockerfile) is included for deployment.
 
-  ⚠️ This endpoint is **unauthenticated** — anyone with the URL can use your library (including writes). Only do this briefly, keep `ZOTEUS_ALLOW_DELETE=false`, prefer `ZOTEUS_READ_ONLY=true` if you only need reads, and stop the tunnel when done.
-- **Proper deployment:** host behind HTTPS with OAuth (roadmap) — see [`docs/configuration.md`](./docs/configuration.md).
+Full walkthrough (deploy options, TLS/tunnel, security notes): [`docs/remote-oauth.md`](./docs/remote-oauth.md).
+
+> Without OAuth, `--http` stays on `127.0.0.1` and Zoteus **refuses** to bind a public interface (an unauthenticated MCP endpoint would expose your library). For a brief local-only test you can still tunnel the loopback port, but prefer the OAuth path above. Keep `ZOTEUS_ALLOW_DELETE=false` and prefer `ZOTEUS_READ_ONLY=true`.
 
 ## ⚙️ Configuration
 
@@ -101,8 +105,11 @@ claude.ai connects to remote MCP servers from the cloud, so it needs a **public 
 | `ZOTEUS_TRANSLATION_SERVER_URL` | `http://127.0.0.1:1969` | Add-by-identifier/URL (optional) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
+| `ZOTEUS_OAUTH_ENABLED` | `false` | Turn `/mcp` into an OAuth 2.1 + PKCE protected remote (claude.ai) |
+| `ZOTEUS_PUBLIC_URL` | — | Public HTTPS origin (OAuth issuer); required when OAuth is enabled |
+| `ZOTEUS_OAUTH_PASSCODE` | — | Consent passcode (≥ 12 chars); required when OAuth is enabled |
 
-Full table in [`docs/configuration.md`](./docs/configuration.md).
+Full table in [`docs/configuration.md`](./docs/configuration.md); remote-OAuth walkthrough in [`docs/remote-oauth.md`](./docs/remote-oauth.md).
 
 ## 📚 Documentation
 
@@ -121,7 +128,7 @@ npm run build && npm publish --access public   # npm
 
 ## 🗺️ Status & roadmap
 
-**Feature-complete** — all 10 milestones implemented, 24 tools, 7 prompts, ~120 tests, CI green. (`npm publish` to make it installable for everyone is the only remaining step.)
+**Feature-complete** — all 11 milestones (0–10) implemented, 24 tools, 7 prompts, ~140 tests, CI green. (`npm publish` to make it installable for everyone is the only remaining step.)
 
 - [x] **0** Scaffold + CI
 - [x] **1** Zotero API clients (cloud + local) + capability probe
@@ -133,6 +140,7 @@ npm run build && npm publish --access public   # npm
 - [x] **7** Scholarly-context graph
 - [x] **8** Code-execution layer + Prompts
 - [x] **9** HTTP transport + DXT + MCP registry + docs polish
+- [x] **10** OAuth 2.1 + PKCE + hosted remote (claude.ai connector)
 
 ## 🤝 Contributing
 
