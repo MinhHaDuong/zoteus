@@ -45,6 +45,7 @@ function fakeCtx(): ToolContext {
     web: {} as any,
     styles: { resolveId: (n: string) => n, fetchStyle: async () => '', fetchLocale: async () => '' } as any,
     translation: { isUp: async () => false } as any,
+    search: { isEmpty: true, embedderName: 'none', status: () => ({}), query: async () => [] } as any,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
 }
@@ -64,7 +65,7 @@ async function connect() {
 }
 
 describe('Zoteus server (in-process)', () => {
-  it('lists all twenty tools', async () => {
+  it('lists all twenty-two tools', async () => {
     const { client } = await connect();
     const { tools: listed } = await client.listTools();
     const names = listed.map((t) => t.name).sort();
@@ -79,11 +80,13 @@ describe('Zoteus server (in-process)', () => {
       'zotero_get_item',
       'zotero_groups',
       'zotero_import',
+      'zotero_index',
       'zotero_manage_collections',
       'zotero_manage_tags',
       'zotero_saved_searches',
       'zotero_schema',
       'zotero_search_items',
+      'zotero_semantic_search',
       'zotero_styles',
       'zotero_sync',
       'zotero_trash_items',

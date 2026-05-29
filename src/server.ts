@@ -7,8 +7,12 @@ import { LocalApiClient } from './api/local-client.js';
 import { probeCapabilities } from './router/capabilities.js';
 import { LibraryRouter } from './router/library-router.js';
 import { SchemaService } from './schema/schema-service.js';
+import { join } from 'node:path';
 import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
+import { SearchIndex } from './features/search/index-manager.js';
+import { createEmbeddingProvider } from './features/search/embeddings.js';
+import { loadIndex } from './features/search/persistence.js';
 import { registerAllTools, type ToolContext } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
 import { tools } from './tools/index.js';
@@ -18,7 +22,7 @@ export interface BuiltServer {
   ctx: ToolContext;
 }
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 
 export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const logger = createLogger(config.logLevel);
@@ -36,8 +40,10 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const schema = new SchemaService({ web });
   const styles = new StyleResolver();
   const translation = new TranslationServerClient(config.translationServerUrl, fetcher);
+  const search = new SearchIndex({ embedder: createEmbeddingProvider(config, logger), logger });
+  await loadIndex(search, join(config.dataDir, 'search-index.json')).catch(() => false);
 
-  const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, logger };
+  const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, search, logger };
 
   const server = new McpServer(
     { name: 'zoteus', version: VERSION },

@@ -19,6 +19,8 @@ import importTool from './import.js';
 import styles from './styles.js';
 import formatBibliography from './format-bibliography.js';
 import bibliography from './bibliography.js';
+import indexTool from './index-tool.js';
+import semanticSearch from './semantic-search.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -45,4 +47,7 @@ export const tools: ToolDefinition[] = [
   styles,
   formatBibliography,
   bibliography,
+  // Hybrid semantic search (M6)
+  indexTool,
+  semanticSearch,
 ];

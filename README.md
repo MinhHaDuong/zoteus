@@ -95,7 +95,7 @@ Active development. Milestones:
 - [x] **3** Safe writes
 - [x] **4** Files / full-text / sync / groups / export
 - [x] **5** Citation pipeline (add-by-identifier + CSL formatting)
-- [ ] **6** Hybrid semantic search
+- [x] **6** Hybrid semantic search
 - [ ] **7** Scholarly-context graph
 - [ ] **8** Code-execution layer + Prompts
 - [ ] **9** HTTP transport + DXT + MCP registry + docs polish

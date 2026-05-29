@@ -9,6 +9,7 @@ import type { LocalApiClient } from '../api/local-client.js';
 import type { Logger } from '../lib/logger.js';
 import type { StyleResolver } from '../features/citation/styles.js';
 import type { TranslationServerClient } from '../features/citation/translation-server.js';
+import type { SearchIndex } from '../features/search/index-manager.js';
 import { ZoteroApiError } from '../api/errors.js';
 
 export interface ToolContext {
@@ -20,6 +21,7 @@ export interface ToolContext {
   local?: LocalApiClient;
   styles: StyleResolver;
   translation: TranslationServerClient;
+  search: SearchIndex;
   logger: Logger;
 }
 
