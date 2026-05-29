@@ -13,6 +13,7 @@ import { TranslationServerClient } from './features/citation/translation-server.
 import { SearchIndex } from './features/search/index-manager.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
 import { loadIndex } from './features/search/persistence.js';
+import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
 import { tools } from './tools/index.js';
@@ -22,7 +23,7 @@ export interface BuiltServer {
   ctx: ToolContext;
 }
 
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const logger = createLogger(config.logLevel);
@@ -42,8 +43,9 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const translation = new TranslationServerClient(config.translationServerUrl, fetcher);
   const search = new SearchIndex({ embedder: createEmbeddingProvider(config, logger), logger });
   await loadIndex(search, join(config.dataDir, 'search-index.json')).catch(() => false);
+  const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
-  const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, search, logger };
+  const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, search, scholar, logger };
 
   const server = new McpServer(
     { name: 'zoteus', version: VERSION },

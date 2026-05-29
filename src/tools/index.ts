@@ -21,6 +21,7 @@ import formatBibliography from './format-bibliography.js';
 import bibliography from './bibliography.js';
 import indexTool from './index-tool.js';
 import semanticSearch from './semantic-search.js';
+import scholar from './scholar.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -50,4 +51,6 @@ export const tools: ToolDefinition[] = [
   // Hybrid semantic search (M6)
   indexTool,
   semanticSearch,
+  // Scholarly-context graph (M7)
+  scholar,
 ];

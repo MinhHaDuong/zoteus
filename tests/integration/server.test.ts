@@ -46,6 +46,7 @@ function fakeCtx(): ToolContext {
     styles: { resolveId: (n: string) => n, fetchStyle: async () => '', fetchLocale: async () => '' } as any,
     translation: { isUp: async () => false } as any,
     search: { isEmpty: true, embedderName: 'none', status: () => ({}), query: async () => [] } as any,
+    scholar: { lookup: async () => null, references: async () => [], citations: async () => [], related: async () => [] } as any,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
 }
@@ -65,7 +66,7 @@ async function connect() {
 }
 
 describe('Zoteus server (in-process)', () => {
-  it('lists all twenty-two tools', async () => {
+  it('lists all twenty-three tools', async () => {
     const { client } = await connect();
     const { tools: listed } = await client.listTools();
     const names = listed.map((t) => t.name).sort();
@@ -85,6 +86,7 @@ describe('Zoteus server (in-process)', () => {
       'zotero_manage_tags',
       'zotero_saved_searches',
       'zotero_schema',
+      'zotero_scholar',
       'zotero_search_items',
       'zotero_semantic_search',
       'zotero_styles',
