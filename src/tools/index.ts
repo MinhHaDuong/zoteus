@@ -15,6 +15,10 @@ import exportTool from './export.js';
 import fulltext from './fulltext.js';
 import sync from './sync.js';
 import attachment from './attachment.js';
+import importTool from './import.js';
+import styles from './styles.js';
+import formatBibliography from './format-bibliography.js';
+import bibliography from './bibliography.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -36,4 +40,9 @@ export const tools: ToolDefinition[] = [
   fulltext,
   sync,
   attachment,
+  // Citation pipeline (M5)
+  importTool,
+  styles,
+  formatBibliography,
+  bibliography,
 ];

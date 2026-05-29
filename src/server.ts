@@ -7,6 +7,8 @@ import { LocalApiClient } from './api/local-client.js';
 import { probeCapabilities } from './router/capabilities.js';
 import { LibraryRouter } from './router/library-router.js';
 import { SchemaService } from './schema/schema-service.js';
+import { StyleResolver } from './features/citation/styles.js';
+import { TranslationServerClient } from './features/citation/translation-server.js';
 import { registerAllTools, type ToolContext } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
 import { tools } from './tools/index.js';
@@ -16,7 +18,7 @@ export interface BuiltServer {
   ctx: ToolContext;
 }
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 
 export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const logger = createLogger(config.logLevel);
@@ -32,8 +34,10 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const capabilities = await probeCapabilities(config, { web, local, logger });
   const router = new LibraryRouter({ config, capabilities, web, local });
   const schema = new SchemaService({ web });
+  const styles = new StyleResolver();
+  const translation = new TranslationServerClient(config.translationServerUrl, fetcher);
 
-  const ctx: ToolContext = { config, capabilities, router, schema, web, local, logger };
+  const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, logger };
 
   const server = new McpServer(
     { name: 'zoteus', version: VERSION },

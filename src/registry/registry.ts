@@ -7,6 +7,8 @@ import type { SchemaService } from '../schema/schema-service.js';
 import type { WebApiClient, LibraryRef } from '../api/web-client.js';
 import type { LocalApiClient } from '../api/local-client.js';
 import type { Logger } from '../lib/logger.js';
+import type { StyleResolver } from '../features/citation/styles.js';
+import type { TranslationServerClient } from '../features/citation/translation-server.js';
 import { ZoteroApiError } from '../api/errors.js';
 
 export interface ToolContext {
@@ -16,6 +18,8 @@ export interface ToolContext {
   schema: SchemaService;
   web: WebApiClient;
   local?: LocalApiClient;
+  styles: StyleResolver;
+  translation: TranslationServerClient;
   logger: Logger;
 }
 

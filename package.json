@@ -1,6 +1,6 @@
 {
   "name": "@oscardvs/zoteus",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "The everything Zotero MCP server — complete Zotero Web API v3 + desktop local API for Claude and any MCP client.",
   "keywords": [
     "zotero",
@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "citeproc": "^2.4.63",
     "zod": "^3.25.76"
   },
   "devDependencies": {

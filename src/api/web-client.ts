@@ -233,6 +233,23 @@ export class WebApiClient {
     return text;
   }
 
+  /** Cloud-rendered bibliography (format=bib XHTML) for item keys. Item-only, <=150. */
+  async getBibliography(
+    lib: LibraryRef,
+    itemKeys: string[],
+    opts: { style?: string; locale?: string; linkwrap?: boolean } = {},
+  ): Promise<string> {
+    const query = this.buildQuery({
+      itemKey: itemKeys.join(','),
+      format: 'bib',
+      style: opts.style,
+      locale: opts.locale,
+      linkwrap: opts.linkwrap ? 1 : undefined,
+    });
+    const { text } = await this.getRaw(this.prefix(lib) + '/items', query);
+    return text;
+  }
+
   // ---- Full text ----
 
   async getFullText(lib: LibraryRef, key: string): Promise<any | null> {

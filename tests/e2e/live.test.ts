@@ -36,4 +36,25 @@ d('Zoteus e2e (live Zotero API)', () => {
     const versions = await ctx.web.versions(lib, 'items', 0);
     expect(Object.keys(versions).length).toBeGreaterThan(0);
   }, 30_000);
+
+  it('formats a bibliography with citeproc (real CSL style + locale)', async () => {
+    const { formatBibliography } = await import('../../src/features/citation/citeproc-engine.js');
+    const { StyleResolver } = await import('../../src/features/citation/styles.js');
+    const resolver = new StyleResolver();
+    const styleXml = await resolver.fetchStyle(resolver.resolveId('APA 7th'));
+    const localeXml = await resolver.fetchLocale('en-US');
+    const items = [
+      {
+        id: 'item-1',
+        type: 'article-journal',
+        title: 'Attention Is All You Need',
+        author: [{ family: 'Vaswani', given: 'Ashish' }],
+        issued: { 'date-parts': [[2017]] },
+        'container-title': 'NeurIPS',
+      },
+    ];
+    const { bibliography } = formatBibliography({ items, styleXml, localeXml, format: 'text' });
+    expect(bibliography).toMatch(/Vaswani/);
+    expect(bibliography).toMatch(/Attention Is All You Need/);
+  }, 30_000);
 });
