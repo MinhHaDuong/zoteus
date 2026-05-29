@@ -14,8 +14,10 @@ export interface FormatResult {
 
 /** Format a CSL-JSON item list into a bibliography using citeproc-js. */
 export function formatBibliography(opts: FormatOptions): FormatResult {
+  // Defensive: accept a bare array or a { items: [...] } wrapper (Zotero csljson shape).
+  const items: any[] = Array.isArray(opts.items) ? opts.items : ((opts.items as any)?.items ?? []);
   const byId: Record<string, any> = {};
-  opts.items.forEach((it, i) => {
+  items.forEach((it, i) => {
     const id = it.id ?? `ITEM-${i + 1}`;
     byId[id] = { ...it, id };
   });

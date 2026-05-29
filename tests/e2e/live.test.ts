@@ -57,4 +57,15 @@ d('Zoteus e2e (live Zotero API)', () => {
     expect(bibliography).toMatch(/Vaswani/);
     expect(bibliography).toMatch(/Attention Is All You Need/);
   }, 30_000);
+
+  it('formats a real library item via zotero_format_bibliography (export csljson -> citeproc)', async () => {
+    const { ctx } = await buildServer(loadConfig(process.env));
+    const formatBib = (await import('../../src/tools/format-bibliography.js')).default;
+    const top = await ctx.router.searchItems({ limit: 1, top: true });
+    const key = (top.data[0] as any)?.key;
+    expect(key).toBeTruthy();
+    const res = await formatBib.handler({ item_keys: [key], style: 'APA 7th', format: 'text' }, ctx);
+    expect(res.isError).toBeUndefined();
+    expect((res.content[0].text as string).length).toBeGreaterThan(10);
+  }, 30_000);
 });

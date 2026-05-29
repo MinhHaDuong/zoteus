@@ -29,7 +29,9 @@ const formatBib: ToolDefinition = {
         ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
         : ctx.router.defaultLibrary();
       const text = await ctx.web.exportItems(lib, { format: 'csljson', itemKey: args.item_keys, limit: 100 });
-      cslItems = JSON.parse(text);
+      const parsed = JSON.parse(text);
+      // Zotero's csljson export wraps items in { items: [...] }; older shapes are a bare array.
+      cslItems = Array.isArray(parsed) ? parsed : (parsed.items ?? []);
     }
     const styleId = ctx.styles.resolveId(args.style ?? 'apa');
     const [styleXml, localeXml] = await Promise.all([
