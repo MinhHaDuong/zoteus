@@ -1,6 +1,6 @@
 {
   "name": "@oscardvs/zoteus",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "The everything Zotero MCP server — complete Zotero Web API v3 + desktop local API for Claude and any MCP client.",
   "keywords": [
     "zotero",
@@ -42,6 +42,7 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
+    "gen:codex": "tsx scripts/generate-codex.ts",
     "inspector": "npx @modelcontextprotocol/inspector npx tsx src/index.ts"
   },
   "dependencies": {

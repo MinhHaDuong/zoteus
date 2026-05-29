@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { registerAllTools, type ToolContext } from '../../src/registry/registry.js';
 import { registerResources } from '../../src/resources/index.js';
+import { registerPrompts } from '../../src/prompts/index.js';
 import { tools } from '../../src/tools/index.js';
 
 function fakeCtx(): ToolContext {
@@ -47,6 +48,7 @@ function fakeCtx(): ToolContext {
     translation: { isUp: async () => false } as any,
     search: { isEmpty: true, embedderName: 'none', status: () => ({}), query: async () => [] } as any,
     scholar: { lookup: async () => null, references: async () => [], citations: async () => [], related: async () => [] } as any,
+    toolCatalog: tools.map((t) => ({ name: t.name, title: t.title, description: t.description })),
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
 }
@@ -54,11 +56,12 @@ function fakeCtx(): ToolContext {
 async function connect() {
   const server = new McpServer(
     { name: 'zoteus-test', version: '0.0.0' },
-    { capabilities: { tools: {}, resources: {} } },
+    { capabilities: { tools: {}, resources: {}, prompts: {} } },
   );
   const ctx = fakeCtx();
   registerAllTools(server, tools, ctx);
   registerResources(server, ctx);
+  registerPrompts(server);
   const [clientT, serverT] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'test', version: '0.0.0' });
   await Promise.all([server.connect(serverT), client.connect(clientT)]);
@@ -66,11 +69,12 @@ async function connect() {
 }
 
 describe('Zoteus server (in-process)', () => {
-  it('lists all twenty-three tools', async () => {
+  it('lists all twenty-four tools', async () => {
     const { client } = await connect();
     const { tools: listed } = await client.listTools();
     const names = listed.map((t) => t.name).sort();
     expect(names).toEqual([
+      'search_tools',
       'zotero_attachment',
       'zotero_bibliography',
       'zotero_create_items',
@@ -119,5 +123,28 @@ describe('Zoteus server (in-process)', () => {
     const res: any = await client.readResource({ uri: 'zotero://collections' });
     const data = JSON.parse(res.contents[0].text);
     expect(data[0].data.name).toBe('Reading');
+  });
+
+  it('discovers tools via search_tools', async () => {
+    const { client } = await connect();
+    const res: any = await client.callTool({ name: 'search_tools', arguments: { query: 'bibliography' } });
+    const names = (res.structuredContent.tools as any[]).map((t) => t.name);
+    expect(names).toContain('zotero_bibliography');
+    expect(names).toContain('zotero_format_bibliography');
+  });
+
+  it('lists the workflow prompts', async () => {
+    const { client } = await connect();
+    const { prompts } = await client.listPrompts();
+    const names = prompts.map((p) => p.name).sort();
+    expect(names).toContain('zotero-literature-review');
+    expect(names).toContain('zotero-cite');
+    expect(prompts.length).toBe(7);
+  });
+
+  it('renders a prompt with arguments', async () => {
+    const { client } = await connect();
+    const res: any = await client.getPrompt({ name: 'zotero-cite', arguments: { item_keys: 'ABCD', style: 'IEEE' } });
+    expect(res.messages[0].content.text).toMatch(/IEEE/);
   });
 });

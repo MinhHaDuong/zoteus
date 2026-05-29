@@ -16,6 +16,7 @@ import { loadIndex } from './features/search/persistence.js';
 import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
+import { registerPrompts } from './prompts/index.js';
 import { tools } from './tools/index.js';
 
 export interface BuiltServer {
@@ -23,7 +24,7 @@ export interface BuiltServer {
   ctx: ToolContext;
 }
 
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const logger = createLogger(config.logLevel);
@@ -46,6 +47,7 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
   const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, search, scholar, logger };
+  ctx.toolCatalog = tools.map((t) => ({ name: t.name, title: t.title, description: t.description, deferLoading: t.deferLoading }));
 
   const server = new McpServer(
     { name: 'zoteus', version: VERSION },
@@ -62,6 +64,7 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
 
   registerAllTools(server, tools, ctx);
   registerResources(server, ctx);
+  registerPrompts(server);
 
   return { server, ctx };
 }

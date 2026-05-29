@@ -97,7 +97,7 @@ Active development. Milestones:
 - [x] **5** Citation pipeline (add-by-identifier + CSL formatting)
 - [x] **6** Hybrid semantic search
 - [x] **7** Scholarly-context graph
-- [ ] **8** Code-execution layer + Prompts
+- [x] **8** Code-execution layer + Prompts
 - [ ] **9** HTTP transport + DXT + MCP registry + docs polish
 
 ## 🤝 Contributing

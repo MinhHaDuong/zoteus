@@ -22,6 +22,7 @@ import bibliography from './bibliography.js';
 import indexTool from './index-tool.js';
 import semanticSearch from './semantic-search.js';
 import scholar from './scholar.js';
+import searchTools from './search-tools.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -53,4 +54,6 @@ export const tools: ToolDefinition[] = [
   semanticSearch,
   // Scholarly-context graph (M7)
   scholar,
+  // Code-execution / discovery (M8)
+  searchTools,
 ];
