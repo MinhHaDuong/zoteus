@@ -204,7 +204,7 @@ Nothing here is fatal: each capability flips a flag, and tools surface clear mes
 
 ## 7. Tool catalog (consolidated, workflow-oriented)
 
-~22 tools, all `zotero_`-namespaced, each with a long description encoding Zotero-specific niche knowledge (boolean `itemType`/`tag` syntax with `||`/`&&`/`-`; `bib` capped at 150 and item-only; saved searches not executed by the cloud API; DELETE permanent vs `deleted:1` trash; `mtime` in milliseconds). Read tools take `response_format: concise|detailed`. List/search tools cap response size (~25k tokens) and, on truncation, tell the model how to narrow rather than silently cutting.
+~24 tools, all `zotero_`-namespaced (comfortably under the 30–50 tool-selection ceiling), each with a long description encoding Zotero-specific niche knowledge (boolean `itemType`/`tag` syntax with `||`/`&&`/`-`; `bib` capped at 150 and item-only; saved searches not executed by the cloud API; DELETE permanent vs `deleted:1` trash; `mtime` in milliseconds). Read tools take `response_format: concise|detailed`. List/search tools cap response size (~25k tokens) and, on truncation, tell the model how to narrow rather than silently cutting.
 
 **Identity / schema**
 - `zotero_whoami` — resolve userID, username, per-library access scopes from the API key.
