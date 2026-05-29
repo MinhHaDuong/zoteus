@@ -1,0 +1,61 @@
+{
+  "name": "@oscardvs/zoteus",
+  "version": "0.1.0",
+  "description": "The everything Zotero MCP server — complete Zotero Web API v3 + desktop local API for Claude and any MCP client.",
+  "keywords": [
+    "zotero",
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "claude",
+    "citations",
+    "bibliography",
+    "reference-manager",
+    "zotero-api"
+  ],
+  "type": "module",
+  "license": "MIT",
+  "author": "Oscar Devos",
+  "homepage": "https://github.com/oscardvs/zoteus",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oscardvs/zoteus.git"
+  },
+  "bin": {
+    "zoteus": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint . --ext .ts",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "inspector": "npx @modelcontextprotocol/inspector npx tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "eslint": "^8.57.1",
+    "prettier": "^3.4.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

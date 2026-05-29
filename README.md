@@ -89,9 +89,9 @@ The complete design lives in [`docs/superpowers/specs/2026-05-29-zoteus-design.m
 
 Active development. Milestones:
 
-- [ ] **0** Scaffold + CI
-- [ ] **1** Zotero API clients (cloud + local) + capability probe
-- [ ] **2** MCP core + read tools + resources (stdio)
+- [x] **0** Scaffold + CI
+- [x] **1** Zotero API clients (cloud + local) + capability probe
+- [x] **2** MCP core + read tools + resources (stdio)
 - [ ] **3** Safe writes
 - [ ] **4** Files / full-text / sync / groups / export
 - [ ] **5** Citation pipeline (add-by-identifier + CSL formatting)
