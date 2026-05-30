@@ -51,11 +51,13 @@ export function chunkWithOffsets(text: string, size = 800, overlap = 100): Offse
     while (start < len && isSpace(start)) start++; // skip leading whitespace
     if (start >= len) break;
     if (start > 0 && !isSpace(start - 1)) {
-      // we're mid-word: advance past this word and the following whitespace
+      // we're mid-word: advance past this word + trailing whitespace, BUT only
+      // skip when the partial word is short — never strand a token longer than a
+      // chunk (that would silently drop its remainder from every passage).
       let s = start;
       while (s < len && !isSpace(s)) s++;
       while (s < len && isSpace(s)) s++;
-      start = s < len ? s : start;
+      if (s < len && s - start < size) start = s;
     }
     let end = Math.min(start + size, len);
     if (end < len) {

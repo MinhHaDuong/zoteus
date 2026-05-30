@@ -88,5 +88,15 @@ d('Zoteus e2e (live Zotero API)', () => {
     const sc = found.structuredContent as any;
     expect(sc.passages[0].charStart).toBeGreaterThanOrEqual(0);
     expect(['exact', 'approximate']).toContain(sc.pageSource);
-  }, 60_000);
+
+    // Exercise the real PDF re-extraction (exact-page) path on the same item.
+    const itemKey = sc.item_key;
+    const precise = await getFulltext.handler({ item_key: itemKey, query: 'method', precise_pages: true }, ctx);
+    const psc = precise.structuredContent as any;
+    expect(['exact', 'approximate']).toContain(psc.pageSource);
+    if (psc.pageSource === 'exact') {
+      expect(typeof psc.passages[0].page).toBe('number');
+    }
+    // precise_pages re-downloads + parses the real PDF (pdfjs), which is slow.
+  }, 180_000);
 });

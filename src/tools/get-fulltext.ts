@@ -53,7 +53,15 @@ const getFulltext: ToolDefinition = {
     query: z.string().optional().describe('Return top passages relevant to this query.'),
     page_range: z.string().optional().describe('Page span like "3-7" (1-based, inclusive).'),
     max_passages: z.number().int().min(1).max(20).optional().describe('Max passages (default 5).'),
-    max_chars: z.number().int().min(500).max(100000).optional().describe('Cap on total returned text (default 12000).'),
+    max_chars: z
+      .number()
+      .int()
+      .min(500)
+      .max(100000)
+      .optional()
+      .describe(
+        'Best-effort cap on total returned text (default 12000); a single passage is never split, so one passage may slightly exceed it.',
+      ),
     precise_pages: z.boolean().optional().describe('Re-extract the PDF for exact page numbers.'),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
@@ -159,6 +167,8 @@ const getFulltext: ToolDefinition = {
       }
       const truncated = slice.length > maxChars;
       const text = truncated ? slice.slice(0, maxChars) : slice;
+      const emptyNotice =
+        !text && totalPages ? ` Pages ${args.page_range} appear to be beyond the document (~${totalPages} pages).` : '';
       return ok(
         {
           ...base,
@@ -168,11 +178,12 @@ const getFulltext: ToolDefinition = {
           text,
           truncated,
           omittedChars: truncated ? slice.length - maxChars : 0,
-          notice: degradeNotice.trim() || undefined,
+          notice: (degradeNotice + emptyNotice).trim() || undefined,
         },
         `Text for pages ${args.page_range} of ${args.item_key} (${pageSource}).` +
           (truncated ? ' Truncated (max_chars).' : '') +
-          degradeNotice,
+          degradeNotice +
+          emptyNotice,
       );
     }
 

@@ -72,7 +72,7 @@ describe('zotero_get_fulltext', () => {
   });
 
   it('degrades precise_pages to approximate when extraction yields nothing', async () => {
-    // pdfjs-dist is not installed in tests → extractPdfPages returns null → approximate.
+    // the tiny garbage buffer fails to parse → extractPdfPages returns null → approximate
     const res = await getFulltext.handler({ item_key: 'PARENT01', query: 'Hessian', precise_pages: true }, ctx());
     const sc = res.structuredContent as any;
     expect(sc.pageSource).toBe('approximate');

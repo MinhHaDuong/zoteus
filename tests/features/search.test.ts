@@ -99,6 +99,20 @@ describe('chunkWithOffsets', () => {
     expect(chunks).toHaveLength(1);
     expect(chunks[0]).toMatchObject({ index: 0, text: 'hello world', start: 0, end: 11 });
   });
+
+  it('covers the whole source with no gaps even for a token longer than a chunk', () => {
+    const doc = 'x'.repeat(2000); // one 2000-char unbreakable token, size 800
+    const chunks = chunkWithOffsets(doc, 800, 100);
+    expect(chunks.length).toBeGreaterThan(1);
+    // sorted by start, each next chunk starts at or before the previous chunk's end → no gap
+    const sorted = [...chunks].sort((a, b) => a.start - b.start);
+    expect(sorted[0].start).toBe(0);
+    for (let i = 1; i < sorted.length; i++) {
+      expect(sorted[i].start).toBeLessThanOrEqual(sorted[i - 1].end);
+    }
+    expect(sorted[sorted.length - 1].end).toBe(2000);
+    for (const c of chunks) expect(doc.slice(c.start, c.end)).toBe(c.text);
+  });
 });
 
 describe('SearchIndex embedder passthrough', () => {
