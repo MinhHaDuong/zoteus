@@ -37,6 +37,14 @@ describe('zotero_search_items', () => {
     expect(items[0].version).toBe(2114);
   });
 
+  it('exposes item fields in the TEXT content the model sees, not only structuredContent', async () => {
+    const router = vi.fn(async () => ({ data: [sampleItem], totalResults: 1, lastModifiedVersion: 2114 }));
+    const res = await searchItems.handler({ q: 'deep learning' }, ctx(router));
+    const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+    expect(text).toContain('ABCD1234'); // item key — needed to chain into get_item/bibliography
+    expect(text).toContain('Deep Learning'); // title
+  });
+
   it('passes boolean tag/itemType filters through to the router', async () => {
     const router = vi.fn(async () => ({ data: [], totalResults: 0, lastModifiedVersion: 0 }));
     await searchItems.handler({ itemType: 'journalArticle || book', tag: 'to-read' }, ctx(router));

@@ -56,9 +56,22 @@ export interface ToolDefinition {
   handler: (args: any, ctx: ToolContext) => Promise<ToolHandlerResult>;
 }
 
-/** Build a successful result that mirrors structured data into a text block. */
+/**
+ * Build a successful result. The data is mirrored into a text content block (as
+ * JSON) in addition to `structuredContent`, because many MCP clients (e.g. the
+ * claude.ai web connector) surface only text content to the model and ignore
+ * `structuredContent` — without the mirror, tools appear to "succeed" but the
+ * model sees only the summary line and none of the payload (no item keys,
+ * snippets, etc.), which silently breaks chaining into get_item/bibliography.
+ */
 export function ok(structured: Record<string, unknown>, summary: string): ToolHandlerResult {
-  return { content: [{ type: 'text', text: summary }], structuredContent: structured };
+  return {
+    content: [
+      { type: 'text', text: summary },
+      { type: 'text', text: JSON.stringify(structured, null, 2) },
+    ],
+    structuredContent: structured,
+  };
 }
 
 /**
