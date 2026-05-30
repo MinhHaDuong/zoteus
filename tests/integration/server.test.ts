@@ -69,7 +69,7 @@ async function connect() {
 }
 
 describe('Zoteus server (in-process)', () => {
-  it('lists all twenty-seven tools', async () => {
+  it('lists all twenty-eight tools', async () => {
     const { client } = await connect();
     const { tools: listed } = await client.listTools();
     const names = listed.map((t) => t.name).sort();
@@ -98,6 +98,7 @@ describe('Zoteus server (in-process)', () => {
       'zotero_semantic_search',
       'zotero_styles',
       'zotero_sync',
+      'zotero_tag_audit',
       'zotero_trash_items',
       'zotero_update_item',
       'zotero_whoami',

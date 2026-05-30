@@ -26,6 +26,7 @@ import scholar from './scholar.js';
 import searchTools from './search-tools.js';
 import listTags from './list-tags.js';
 import listCollections from './list-collections.js';
+import tagAudit from './tag-audit.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -63,4 +64,5 @@ export const tools: ToolDefinition[] = [
   // Read-only views split out of mutating tools (M12 W0)
   listTags,
   listCollections,
+  tagAudit,
 ];

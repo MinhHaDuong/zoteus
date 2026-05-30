@@ -21,6 +21,7 @@ describe('read-only mode tool set', () => {
       'zotero_list_tags',
       'zotero_list_collections',
       'zotero_get_fulltext',
+      'zotero_tag_audit',
     ]) {
       expect(names).toContain(t);
     }
