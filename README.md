@@ -84,6 +84,8 @@ Runs on loopback for a trusted network or behind your own auth proxy. For a publ
 
 claude.ai connects to remote MCP servers from the cloud, so it needs a **public HTTPS URL** (not `localhost`) and **OAuth 2.1 + PKCE** ([docs](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)). Since **v0.9.0** Zoteus ships its own OAuth 2.1 authorization server in front of `/mcp`, so it is a turn-key connector — claude.ai self-registers (Dynamic Client Registration) and runs the auth-code + PKCE flow; a one-step **passcode** gates the consent.
 
+**Single- or multi-tenant.** The default (`ZOTEUS_OAUTH_MODE=passcode`) shares one operator Zotero key behind a passcode. For a multi-user hosted connector, set `ZOTEUS_OAUTH_MODE=zotero` so each user logs into **their own Zotero account** — the issued token carries that user's per-user key (encrypted at rest with `ZOTEUS_OAUTH_STORE=file` + `ZOTEUS_OAUTH_TOKEN_SECRET`), and every call runs against their own library. See [`docs/remote-oauth.md`](./docs/remote-oauth.md).
+
 ```bash
 ZOTERO_API_KEY=zzz \
 ZOTEUS_OAUTH_ENABLED=true \
@@ -140,7 +142,9 @@ npm run build && npm publish --access public   # npm
 
 ## 🗺️ Status & roadmap
 
-**Feature-complete** — all 12 milestones (0–11) implemented, 28 tools, 7 prompts, ~210 tests, CI green. (`npm publish` to make it installable for everyone is the only remaining step.)
+**Feature-complete + production-hardened.** 28 tools, 7 prompts, ~235 tests, CI green. The remaining step to make it installable for everyone is the public `npm publish` (the long-reserved `v1.0.0`).
+
+New in **v0.12.0 (M13 — production deploy & ops):** `/healthz` + `/readyz` probes, graceful `SIGTERM`/`SIGINT` shutdown (drain sessions → flush the encrypted store + indexes), structured **secret-redacted** JSON logging, request logging + `/metrics` counters, per-IP `/mcp` rate limiting, a volume-backed persistent store, backups, a CI image publish, and an end-to-end [deploy runbook](./docs/deployment.md).
 
 New in **v0.11.0 (M12):** `zotero_get_fulltext` (passage retrieval with page locators), `zotero_tag_audit` (controlled-vocabulary hygiene), `zotero_list_tags`, `zotero_list_collections`, `zotero_export format:"better-biblatex"` (local BBT with degrade), `zotero_update_item dry_run` (before→after diff), and query-centred search snippets.
 
@@ -156,6 +160,9 @@ New in **v0.11.0 (M12):** `zotero_get_fulltext` (passage retrieval with page loc
 - [x] **9** HTTP transport + DXT + MCP registry + docs polish
 - [x] **10** OAuth 2.1 + PKCE + hosted remote (claude.ai connector)
 - [x] **11** Read+grounding path — full-text passages, tag audit, BBT export, dry-run diff
+- [x] **＋** Multi-tenant — per-user Zotero login for hosted connectors (`ZOTEUS_OAUTH_MODE=zotero`), encrypted at-rest token/key store
+- [x] **＋** Production deploy & ops — health/readiness, graceful shutdown, structured logging, metrics, `/mcp` rate limiting, backups, CI image publish (v0.12.0)
+- [ ] **next** Public distribution — `npm publish` (`v1.0.0`) + MCP registry + DXT refresh
 
 ## 🤝 Contributing
 
