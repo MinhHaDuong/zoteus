@@ -25,6 +25,8 @@ export interface ToolContext {
   search: SearchIndex;
   scholar: ScholarGraph;
   logger: Logger;
+  /** Absolute path to this context's semantic-search index file (per-user in multi-tenant mode). */
+  searchIndexPath: string;
   /** Lightweight catalog of all registered tools (for search_tools discovery). */
   toolCatalog?: Array<{ name: string; title: string; description: string; deferLoading?: boolean }>;
 }
