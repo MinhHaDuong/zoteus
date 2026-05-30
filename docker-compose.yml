@@ -1,0 +1,45 @@
+# Zoteus hosted deploy: app + Caddy (auto-TLS, preserves Host). Free-VM friendly.
+# Secrets come from a git-ignored .env in this directory (see .env.example).
+services:
+  zoteus:
+    image: ghcr.io/oscardvs/zoteus:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ZOTEUS_OAUTH_ENABLED: "true"
+      ZOTEUS_OAUTH_MODE: "${ZOTEUS_OAUTH_MODE:-zotero}"
+      ZOTEUS_OAUTH_STORE: "file"
+      ZOTEUS_DATA_DIR: "/data"
+      ZOTEUS_LOG_FORMAT: "json"
+      ZOTEUS_METRICS_ENABLED: "true"
+      PORT: "3939"
+      HOST: "0.0.0.0"
+    volumes:
+      - zoteus-data:/data
+    expose:
+      - "3939"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3939/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [zoteus]
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file: .env
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  zoteus-data:
+  caddy-data:
+  caddy-config:

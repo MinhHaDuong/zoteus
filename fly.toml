@@ -1,0 +1,34 @@
+# Alternative deploy target (paid). Primary free path is docker-compose + Caddy; see docs/deployment.md.
+app = "zoteus"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ZOTEUS_OAUTH_ENABLED = "true"
+  ZOTEUS_OAUTH_STORE = "file"
+  ZOTEUS_DATA_DIR = "/data"
+  ZOTEUS_LOG_FORMAT = "json"
+  ZOTEUS_METRICS_ENABLED = "true"
+  PORT = "3939"
+
+[http_service]
+  internal_port = 3939
+  force_https = true
+  auto_stop_machines = false   # always-on: in-memory pending-consents + single-instance store
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  method = "get"
+  path = "/healthz"
+  interval = "30s"
+  timeout = "5s"
+
+[[mounts]]
+  source = "zoteus_data"
+  destination = "/data"
+
+[deploy]
+  strategy = "immediate"   # single instance; avoid overlapping writers to the file store

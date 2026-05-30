@@ -1,0 +1,17 @@
+[Unit]
+Description=Zoteus MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/zoteus/.env
+ExecStart=/usr/bin/docker run --rm --name zoteus -p 127.0.0.1:3939:3939 \
+  --env-file /opt/zoteus/.env -v zoteus-data:/data ghcr.io/oscardvs/zoteus:latest
+ExecStop=/usr/bin/docker stop -t 30 zoteus
+Restart=always
+RestartSec=5
+# Docker forwards SIGTERM → Zoteus drains/flushes within stop_grace_period.
+
+[Install]
+WantedBy=multi-user.target

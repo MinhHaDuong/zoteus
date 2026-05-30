@@ -1,0 +1,9 @@
+# Public HTTPS origin → Zoteus. Caddy terminates TLS and PRESERVES the Host header
+# (default reverse_proxy behavior), which Zoteus's DNS-rebinding guard requires.
+# {$ZOTEUS_DOMAIN} comes from .env (e.g. zoteus.example.duckdns.org).
+# For a DuckDNS hostname, use the DNS-01 challenge — build a Caddy image with the
+# duckdns module, or use a custom cert. See docs/deployment.md.
+{$ZOTEUS_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy zoteus:3939
+}
