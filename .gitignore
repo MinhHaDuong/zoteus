@@ -35,3 +35,6 @@ data/
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+# Internal planning artifacts (superpowers specs/plans/handoff briefs) — kept local, not published
+docs/superpowers/
