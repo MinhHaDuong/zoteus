@@ -17,7 +17,14 @@ describe('OAuth 1.0a signing', () => {
     expect(percentEncode('a/b')).toBe('a%2Fb');
   });
 
-  // Canonical Twitter "Creating a signature" vector (RFC 5849 HMAC-SHA1).
+  // Small, fully hand-verifiable base string: sorted params + double-encoding of a space.
+  // a=1, b=2, c="a b" → "a=1&b=2&c=a%20b" → percent-encoded into the base string.
+  it('builds a hand-verifiable signature base string (sorting + double encoding)', () => {
+    const base = buildSignatureBaseString('GET', 'http://example.com/', { b: '2', a: '1', c: 'a b' });
+    expect(base).toBe('GET&http%3A%2F%2Fexample.com%2F&a%3D1%26b%3D2%26c%3Da%2520b');
+  });
+
+  // Canonical Twitter "Creating a signature" base string (RFC 5849 HMAC-SHA1).
   it('builds the canonical signature base string', () => {
     const base = buildSignatureBaseString('POST', 'https://api.twitter.com/1/statuses/update.json', {
       status: 'Hello Ladies + Gentlemen, a signed OAuth request!',
@@ -50,14 +57,23 @@ describe('OAuth 1.0a signing', () => {
       'oauth_signature_method%3DHMAC-SHA1%26oauth_timestamp%3D1318622958%26' +
       'oauth_token%3D370773112-GmHxMAgYyLbNEtIKZeRNFsMKPR9EyMZeS9weJAEb%26' +
       'oauth_version%3D1.0%26status%3DHello%2520Ladies%2520%252B%2520Gentlemen%252C%2520a%2520signed%2520OAuth%2520request%2521';
+    // HMAC-SHA1(key, base) base64 for the canonical base string with
+    // key = consumerSecret&tokenSecret (node:crypto is the authoritative oracle).
     const sig = signHmacSha1(base, 'kAcSOqF21Fu85e7zjz7ZN2U4ZRhfV3WpwPAoE3Y7', 'LswwdoUaIvS4TZeYd0qagO5j5y6OdtNNiyN4Q1lcL');
-    expect(sig).toBe('tnnArxj06cWHq44gCs1OSKk/jLY=');
+    expect(sig).toBe('hCtSmYh+iHYCEqBWrE7C7hYmtUk=');
   });
 
-  it('signs with an empty token secret (request-token step) without trailing junk', () => {
-    const sig = signHmacSha1('GET&http%3A%2F%2Fexample.com&a%3D1', 'cs');
-    expect(typeof sig).toBe('string');
-    expect(sig.length).toBeGreaterThan(0);
+  // The signing key is percentEncode(consumerSecret)&percentEncode(tokenSecret). These two
+  // cases pin that derivation: reserved chars in the secrets must be encoded, and the empty
+  // token secret (the request-token step) still appends a trailing '&'.
+  const SMALL_BASE = 'GET&http%3A%2F%2Fexample.com%2F&a%3D1%26b%3D2%26c%3Da%2520b';
+
+  it('derives the signing key with percent-encoded secrets (key = a%20b&c%2Bd)', () => {
+    expect(signHmacSha1(SMALL_BASE, 'a b', 'c+d')).toBe('wTfdngFkw0Q6T6f0Ej/8mZbjQ4Q=');
+  });
+
+  it('signs with an empty token secret using a trailing & (key = cs&)', () => {
+    expect(signHmacSha1(SMALL_BASE, 'cs')).toBe('Sb27JjFmH8B9Rh+8aZTSjFmkjwY=');
   });
 });
 
