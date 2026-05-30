@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { BM25Index } from '../../src/features/search/bm25.js';
 import { VectorStore } from '../../src/features/search/vector-store.js';
-import { chunkText } from '../../src/features/search/chunker.js';
+import { chunkText, chunkWithOffsets } from '../../src/features/search/chunker.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import { SearchIndex } from '../../src/features/search/index-manager.js';
 
@@ -73,5 +73,42 @@ describe('SearchIndex (hybrid with fake embedder)', () => {
     expect(b.status().items).toBe(3);
     const hits = await b.query('gardening', { limit: 1 });
     expect(hits[0].itemKey).toBe('B');
+  });
+});
+
+describe('chunkWithOffsets', () => {
+  const doc = 'Alpha beta gamma. '.repeat(120); // ~2160 chars
+
+  it('returns offsets that slice back to the chunk text', () => {
+    const chunks = chunkWithOffsets(doc, 200, 40);
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      expect(doc.slice(c.start, c.end)).toBe(c.text);
+    }
+  });
+
+  it('never begins a chunk mid-word', () => {
+    const chunks = chunkWithOffsets(doc, 200, 40);
+    for (const c of chunks) {
+      if (c.start > 0) expect(/\s/.test(doc[c.start - 1] ?? ' ')).toBe(true);
+    }
+  });
+
+  it('returns one chunk for short text with correct offsets', () => {
+    const chunks = chunkWithOffsets('hello world');
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({ index: 0, text: 'hello world', start: 0, end: 11 });
+  });
+});
+
+describe('SearchIndex embedder passthrough', () => {
+  it('exposes hasEmbedder and embed for ad-hoc ranking', async () => {
+    const withEmb = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    expect(withEmb.hasEmbedder).toBe(true);
+    const vecs = await withEmb.embed(['a', 'b']);
+    expect(vecs).toHaveLength(2);
+    const none = new SearchIndex({ embedder: null });
+    expect(none.hasEmbedder).toBe(false);
+    expect(await none.embed(['a'])).toEqual([]);
   });
 });
