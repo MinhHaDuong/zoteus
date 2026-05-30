@@ -92,7 +92,9 @@ zoteus --http --port 3939 --host 0.0.0.0      # put HTTPS (Caddy / cloudflared /
 
 Then in claude.ai: **Settings → Connectors → Add custom connector** → URL `https://<host>/mcp` → **Connect** → enter the passcode → the tools appear. A [`Dockerfile`](./Dockerfile) is included for deployment.
 
-Full walkthrough (deploy options, TLS/tunnel, security notes): [`docs/remote-oauth.md`](./docs/remote-oauth.md).
+The same OAuth remote also works from the **Claude Code CLI** — `claude mcp add --transport http zoteus https://<host>/mcp`, then `/mcp` → **Authenticate** (enter the passcode in the browser).
+
+Full walkthrough (deploy options, TLS/tunnel, Claude Code remote, security notes): [`docs/remote-oauth.md`](./docs/remote-oauth.md).
 
 > Without OAuth, `--http` stays on `127.0.0.1` and Zoteus **refuses** to bind a public interface (an unauthenticated MCP endpoint would expose your library). For a brief local-only test you can still tunnel the loopback port, but prefer the OAuth path above. Keep `ZOTEUS_ALLOW_DELETE=false` and prefer `ZOTEUS_READ_ONLY=true`.
 

@@ -82,6 +82,27 @@ If your proxy rewrites `Host` to an internal value (causing every `/mcp` request
 4. Enter your `ZOTEUS_OAUTH_PASSCODE` and authorize.
 5. The tool list loads; try a read (e.g. `zotero_whoami` or `zotero_search_items`).
 
+## Connect from Claude Code (remote)
+
+The same OAuth remote also works from the **Claude Code CLI** — useful for testing the connector or using a hosted instance from the terminal. Claude Code runs the OAuth flow itself (DCR + PKCE with an RFC 8252 loopback redirect):
+
+```bash
+claude mcp add --transport http zoteus https://<your-host>/mcp
+```
+
+Then, inside Claude Code:
+
+1. Run `/mcp` → select **zoteus** → **Authenticate** (a browser opens).
+2. Complete the Zoteus consent page (enter the `ZOTEUS_OAUTH_PASSCODE`) → it redirects to a `localhost` port Claude Code owns and `/mcp` flips to **connected**.
+3. Use it, e.g. *"use zoteus — who am I signed in as?"*.
+
+Notes:
+
+- Names must be unique. If `zoteus` already exists (e.g. a leftover stdio entry), run `claude mcp remove zoteus` first. A stdio entry pointing at `npx -y @oscardvs/zoteus` will fail until the package is published — use this remote form, or a local build (`claude mcp add zoteus -e ZOTERO_API_KEY=… -- node /path/to/zoteus/dist/index.js`).
+- Add `-s user` to make the server available in every project (default scope is the current directory).
+- The callback is an ephemeral `http://localhost:<port>/callback` that Claude Code owns; Zoteus accepts loopback redirects port-agnostically, so no `--callback-port` is needed.
+- Manage with `claude mcp list` / `claude mcp get zoteus` / `claude mcp remove zoteus`.
+
 ## Security notes & v1 limitations
 
 - **The passcode is the trust boundary.** Use a high-entropy value and rotate it (restart with a new `ZOTEUS_OAUTH_PASSCODE`). `/consent` is rate-limited and locks a pending authorization after repeated wrong attempts.
