@@ -74,6 +74,33 @@ describe('zotero_update_item', () => {
     expect(res.structuredContent?.retried).toBe(true);
     expect(res.structuredContent?.newVersion).toBe(9);
   });
+
+  it('dry_run returns a field diff and does not write', async () => {
+    const ctx = makeCtx();
+    ctx.web.getItem = vi.fn(async () => ({
+      key: 'K1',
+      version: 7,
+      data: { itemType: 'book', title: 'Old', extra: 'keep', tags: [{ tag: 'a' }] },
+    }));
+    const res = await updateItem.handler(
+      { item_key: 'K1', patch: { title: 'New', tags: [{ tag: 'b' }] }, version: 7, dry_run: true },
+      ctx,
+    );
+    expect(ctx.web.patchItem).not.toHaveBeenCalled();
+    const sc = res.structuredContent as any;
+    expect(sc.dryRun).toBe(true);
+    expect(sc.diff.title).toEqual({ before: 'Old', after: 'New' });
+    expect(sc.diff.extra).toBeUndefined(); // unchanged field omitted
+    expect(sc.arrayReplacements).toContain('tags');
+    const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+    expect(text).toContain('title');
+  });
+
+  it('dry_run fetches the item even when version is supplied', async () => {
+    const ctx = makeCtx();
+    await updateItem.handler({ item_key: 'K1', patch: { title: 'x' }, version: 3, dry_run: true }, ctx);
+    expect(ctx.web.getItem).toHaveBeenCalled();
+  });
 });
 
 describe('zotero_trash_items', () => {
