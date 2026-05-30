@@ -22,7 +22,7 @@ const listTags: ToolDefinition = {
     const tags = r.data.map((t: any) =>
       typeof t === 'string'
         ? { name: t, numItems: undefined, auto: false }
-        : { name: t.tag, numItems: t.meta?.numItems, auto: t.meta?.type === 0 },
+        : { name: t.tag, numItems: t.meta?.numItems, auto: t.meta?.type === 1 }, // Zotero: type 1 = automatic, 0/absent = manual
     );
     return ok({ tags, totalResults: r.totalResults }, `${tags.length} tag(s) returned.`);
   },

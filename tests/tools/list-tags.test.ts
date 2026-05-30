@@ -12,7 +12,7 @@ describe('zotero_list_tags', () => {
   it('lists tags with usage counts and auto flag, visible in text content', async () => {
     const impl = vi.fn(async () => ({
       data: [
-        { tag: 'ml', meta: { type: 0, numItems: 12 } },
+        { tag: 'ml', meta: { type: 1, numItems: 12 } },
         { tag: 'to-read', meta: { numItems: 3 } },
       ],
       totalResults: 2,
