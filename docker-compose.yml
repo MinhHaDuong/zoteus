@@ -7,7 +7,7 @@ services:
     env_file: .env
     environment:
       ZOTEUS_OAUTH_ENABLED: "true"
-      ZOTEUS_OAUTH_MODE: "${ZOTEUS_OAUTH_MODE:-zotero}"
+      ZOTEUS_OAUTH_MODE: "${ZOTEUS_OAUTH_MODE:-passcode}"
       ZOTEUS_OAUTH_STORE: "file"
       ZOTEUS_DATA_DIR: "/data"
       ZOTEUS_LOG_FORMAT: "json"
@@ -33,7 +33,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
-    env_file: .env
+    environment:
+      ZOTEUS_DOMAIN: "${ZOTEUS_DOMAIN}"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
