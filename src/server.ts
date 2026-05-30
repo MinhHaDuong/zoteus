@@ -20,7 +20,7 @@ import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 import { tools } from './tools/index.js';
 
-const VERSION = '0.11.0';
+const VERSION = '0.12.0';
 
 export interface ContextOverrides {
   /** Per-user Zotero API key (multi-tenant); defaults to config.apiKey. */
