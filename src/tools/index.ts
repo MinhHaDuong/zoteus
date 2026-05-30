@@ -13,6 +13,7 @@ import savedSearches from './saved-searches.js';
 import groups from './groups.js';
 import exportTool from './export.js';
 import fulltext from './fulltext.js';
+import getFulltext from './get-fulltext.js';
 import sync from './sync.js';
 import attachment from './attachment.js';
 import importTool from './import.js';
@@ -44,6 +45,7 @@ export const tools: ToolDefinition[] = [
   groups,
   exportTool,
   fulltext,
+  getFulltext,
   sync,
   attachment,
   // Citation pipeline (M5)
