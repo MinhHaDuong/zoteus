@@ -45,7 +45,7 @@ function selectActiveTools(config: ZoteusConfig): ToolDefinition[] {
  * (identical to M10). With a per-user apiKey it is that tenant's context.
  */
 export async function buildContext(config: ZoteusConfig, overrides: ContextOverrides = {}): Promise<ToolContext> {
-  const logger = createLogger(config.logLevel);
+  const logger = createLogger(config.logLevel, config.logFormat);
   const apiKey = overrides.apiKey ?? config.apiKey;
   const perUser = overrides.apiKey !== undefined;
   const fetcher = new RateLimitedFetcher({ maxConcurrency: 4, logger });

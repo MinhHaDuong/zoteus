@@ -15,7 +15,7 @@ function flag(name: string): string | undefined {
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
-  const logger = createLogger(config.logLevel);
+  const logger = createLogger(config.logLevel, config.logFormat);
   const { server, ctx } = await buildServer(config);
 
   const httpFlag = flag('http');
