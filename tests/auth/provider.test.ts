@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Response } from 'express';
 import pkceChallenge from 'pkce-challenge';
 import { ZoteusOAuthProvider } from '../../src/auth/provider.js';
@@ -193,6 +193,31 @@ describe('ZoteusOAuthProvider', () => {
     expect(t2.access_token).not.toBe(t1.access_token);
     await p.revokeToken!(c, { token: t2.access_token });
     await expect(p.verifyAccessToken(t2.access_token)).rejects.toThrow();
+  });
+});
+
+describe('provider onEvent', () => {
+  it('emits token_issued when tokens are minted', async () => {
+    const onEvent = vi.fn();
+    const p = new ZoteusOAuthProvider({
+      mode: 'passcode',
+      passcode: 'passcode-1234',
+      accessTokenTtlSec: 60,
+      refreshTokenTtlSec: 600,
+      onEvent,
+    });
+    // exercise via refresh exchange (issues tokens). Register a client + refresh record first:
+    const client = p.clientsStore.registerClient!({ redirect_uris: ['http://localhost/cb'] } as never);
+    // Seed a refresh token through the store-backed path:
+    // (Use the public exchangeRefreshToken with a token we set directly.)
+    // Set up a refresh token in the store:
+    (p as never as { store: { setRefresh: (t: string, r: unknown) => void } }).store.setRefresh('r1', {
+      clientId: client.client_id,
+      scopes: ['zoteus'],
+      expiresAt: Date.now() + 60_000,
+    });
+    await p.exchangeRefreshToken(client, 'r1', ['zoteus']);
+    expect(onEvent).toHaveBeenCalledWith('token_issued');
   });
 });
 

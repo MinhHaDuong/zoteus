@@ -30,6 +30,7 @@ export interface ZoteusOAuthProviderOptions {
   refreshTokenTtlSec: number;
   store?: OAuthStore;
   zotero?: ZoteroBridgeOptions;
+  onEvent?: (event: 'token_issued' | 'auth_failed') => void;
 }
 
 interface ZoteroIdentity {
@@ -175,6 +176,7 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     }
     if (!timingSafeEqualStr(passcode, this.opts.passcode ?? '')) {
       pc.attempts += 1;
+      this.opts.onEvent?.('auth_failed');
       if (pc.attempts >= MAX_CONSENT_ATTEMPTS) {
         this.pending.delete(authId);
         this.sendConsent(res, 429, authId, pc.clientName, hostOf(pc.redirectUri), 'Too many attempts — please reconnect from the client.');
@@ -331,6 +333,7 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     this.store.setAccess(accessToken, accessRec);
     this.store.setRefresh(refreshToken, refreshRec);
     void this.store.flush();
+    this.opts.onEvent?.('token_issued');
     return {
       access_token: accessToken,
       token_type: 'Bearer',

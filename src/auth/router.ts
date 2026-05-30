@@ -18,7 +18,10 @@ export interface BuiltOAuth {
 }
 
 /** Build the OAuth subsystem from config, or undefined when OAuth is disabled. */
-export async function buildOAuth(config: ZoteusConfig): Promise<BuiltOAuth | undefined> {
+export async function buildOAuth(
+  config: ZoteusConfig,
+  hooks: { onEvent?: (e: 'token_issued' | 'auth_failed') => void } = {},
+): Promise<BuiltOAuth | undefined> {
   if (!config.oauth.enabled) return undefined;
   if (!config.oauth.publicUrl) {
     throw new Error('OAuth enabled but ZOTEUS_PUBLIC_URL missing');
@@ -43,6 +46,7 @@ export async function buildOAuth(config: ZoteusConfig): Promise<BuiltOAuth | und
     accessTokenTtlSec: config.oauth.accessTokenTtlSec,
     refreshTokenTtlSec: config.oauth.refreshTokenTtlSec,
     store,
+    onEvent: hooks.onEvent,
     zotero:
       config.oauth.mode === 'zotero'
         ? {

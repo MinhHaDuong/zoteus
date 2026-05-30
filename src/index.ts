@@ -27,10 +27,12 @@ async function main(): Promise<void> {
   const httpFlag = flag('http');
   if (httpFlag !== undefined) {
     const port = Number(flag('port') ?? process.env.PORT ?? 3939);
-    const oauth = await buildOAuth(config);
+    const metrics = config.metricsEnabled ? createMetrics() : undefined;
+    const oauth = await buildOAuth(config, {
+      onEvent: metrics ? (e) => metrics.inc(`${e === 'token_issued' ? 'tokens_issued' : 'auth_failures'}_total`) : undefined,
+    });
     const host = flag('host') ?? process.env.HOST ?? (oauth ? '0.0.0.0' : '127.0.0.1');
     const cache = new ContextCache(config, ctx);
-    const metrics = config.metricsEnabled ? createMetrics() : undefined;
     const readiness = makeReadiness(
       {
         store: storeCheck(oauth?.store),
