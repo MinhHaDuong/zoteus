@@ -49,7 +49,7 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
       ZOTEUS_PUBLIC_URL: base,
       ZOTEUS_OAUTH_PASSCODE: 'open-sesame-1234',
     } as unknown as NodeJS.ProcessEnv);
-    const oauth = buildOAuth(config)!;
+    const oauth = (await buildOAuth(config))!;
     // DNS-rebinding ON: allowedHosts=[127.0.0.1:<port>] matches the live Host (accept path).
     // Factory form (per-session) — the same path production/claude.ai uses.
     httpServer = await startHttp(() => pingServer(), {
