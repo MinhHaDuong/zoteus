@@ -158,14 +158,14 @@ curl -fsS https://$ZOTEUS_DOMAIN/readyz; echo
 Expected `healthz` response (200 OK):
 
 ```json
-{"status":"ok","uptime":12}
+{"status":"ok","version":"0.12.0","uptimeSec":12}
 ```
 
-Expected `readyz` response (200 OK — may show `"zotero":"degraded"` until a real
+Expected `readyz` response (200 OK — may show `"zotero":{"ok":false}` until a real
 Zotero API key is configured):
 
 ```json
-{"status":"ok","checks":{"store":"ok","zotero":"ok"}}
+{"ok":true,"checks":{"store":{"ok":true},"zotero":{"ok":true}}}
 ```
 
 To redeploy after a new image is published:

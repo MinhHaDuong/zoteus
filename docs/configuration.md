@@ -37,6 +37,16 @@ Turn the Streamable HTTP `/mcp` endpoint into an OAuth 2.1 + PKCE protected reso
 
 When OAuth is enabled, `--http` binds `0.0.0.0` and enables DNS-rebinding protection (`allowedHosts` = public host + `ZOTEUS_ALLOWED_HOSTS`). Put TLS (Caddy / cloudflared / Fly) in front; the proxy must forward the public `Host` header verbatim.
 
+## Ops / production
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ZOTEUS_LOG_FORMAT` | `text` | `text` (human-readable) or `json` (structured, for log aggregators). Never logs tokens, keys, or the passcode. |
+| `ZOTEUS_METRICS_ENABLED` | `false` | Expose `/metrics` in Prometheus text format (no auth). Enable only behind a proxy/WAF in production. |
+| `ZOTEUS_READYZ_CHECK_ZOTERO` | `true` | Whether `/readyz` pings the Zotero API (HEAD) to report upstream reachability. |
+| `ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC` | `60` | Sliding window length (seconds) for the per-IP rate limiter on `/mcp`. |
+| `ZOTEUS_MCP_RATE_LIMIT_MAX` | `120` | Max requests per IP per window on `/mcp`. Set to `0` to disable. |
+
 ## Optional dependencies
 
 **Exact full-text page locators** — `zotero_get_fulltext precise_pages:true` re-extracts the PDF for exact page numbers using `pdfjs-dist`, which is declared as an `optionalDependency`. Without it, the tool returns approximate (proportional) page numbers with a notice; no error is thrown:
