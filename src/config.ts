@@ -15,6 +15,11 @@ export interface ZoteusConfig {
   allowDelete: boolean;
   readOnly: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  logFormat: 'text' | 'json';
+  allowInsecureHttp: boolean;
+  metricsEnabled: boolean;
+  readyzCheckZotero: boolean;
+  mcpRateLimit: { windowMs: number; max: number };
   oauth: {
     enabled: boolean;
     publicUrl?: string;
@@ -54,6 +59,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTEUS_ALLOW_DELETE: bool(false),
     ZOTEUS_READ_ONLY: bool(false),
     ZOTEUS_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+    ZOTEUS_LOG_FORMAT: z.enum(['text', 'json']).default('text'),
+    ZOTEUS_ALLOW_INSECURE_HTTP: bool(false),
+    ZOTEUS_METRICS_ENABLED: bool(false),
+    ZOTEUS_READYZ_CHECK_ZOTERO: bool(true),
+    ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().nonnegative().default(60),
+    ZOTEUS_MCP_RATE_LIMIT_MAX: z.coerce.number().int().nonnegative().default(120),
     ZOTEUS_OAUTH_ENABLED: bool(false),
     ZOTEUS_PUBLIC_URL: z.string().url().optional(),
     ZOTEUS_OAUTH_PASSCODE: z.string().min(1).optional(),
@@ -119,6 +130,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     allowDelete: parsed.ZOTEUS_ALLOW_DELETE,
     readOnly: parsed.ZOTEUS_READ_ONLY,
     logLevel: parsed.ZOTEUS_LOG_LEVEL,
+    logFormat: parsed.ZOTEUS_LOG_FORMAT,
+    allowInsecureHttp: parsed.ZOTEUS_ALLOW_INSECURE_HTTP,
+    metricsEnabled: parsed.ZOTEUS_METRICS_ENABLED,
+    readyzCheckZotero: parsed.ZOTEUS_READYZ_CHECK_ZOTERO,
+    mcpRateLimit: {
+      windowMs: parsed.ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC * 1000,
+      max: parsed.ZOTEUS_MCP_RATE_LIMIT_MAX,
+    },
     oauth: {
       enabled: oauthEnabled,
       publicUrl,

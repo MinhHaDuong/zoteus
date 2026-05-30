@@ -92,3 +92,31 @@ describe('oauth config', () => {
     expect(c.oauth.allowedHosts).toEqual(['a.example.com', 'b.example.com:8443']);
   });
 });
+
+describe('M13 ops config', () => {
+  const base = { ZOTERO_API_KEY: 'k' };
+  it('defaults logFormat=text, metricsEnabled=false, mcp rate limit on, readyz zotero on', () => {
+    const c = loadConfig({ ...base });
+    expect(c.logFormat).toBe('text');
+    expect(c.metricsEnabled).toBe(false);
+    expect(c.mcpRateLimit).toEqual({ windowMs: 60_000, max: 120 });
+    expect(c.readyzCheckZotero).toBe(true);
+    expect(c.allowInsecureHttp).toBe(false);
+  });
+  it('parses overrides', () => {
+    const c = loadConfig({
+      ...base,
+      ZOTEUS_LOG_FORMAT: 'json',
+      ZOTEUS_METRICS_ENABLED: 'true',
+      ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC: '30',
+      ZOTEUS_MCP_RATE_LIMIT_MAX: '0',
+      ZOTEUS_READYZ_CHECK_ZOTERO: 'false',
+      ZOTEUS_ALLOW_INSECURE_HTTP: '1',
+    });
+    expect(c.logFormat).toBe('json');
+    expect(c.metricsEnabled).toBe(true);
+    expect(c.mcpRateLimit).toEqual({ windowMs: 30_000, max: 0 });
+    expect(c.readyzCheckZotero).toBe(false);
+    expect(c.allowInsecureHttp).toBe(true);
+  });
+});
