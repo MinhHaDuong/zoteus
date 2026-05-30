@@ -5,6 +5,10 @@ import { startStdio } from './transports/stdio.js';
 import { startHttp } from './transports/http.js';
 import { buildOAuth } from './auth/router.js';
 import { createLogger } from './lib/logger.js';
+import { createMetrics } from './lib/metrics.js';
+import { makeReadiness, storeCheck, zoteroPingCheck } from './lib/health.js';
+import { installShutdownHandlers } from './lib/lifecycle.js';
+import type { Server } from 'node:http';
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -12,6 +16,8 @@ function flag(name: string): string | undefined {
   const next = process.argv[i + 1];
   return next && !next.startsWith('--') ? next : '';
 }
+
+const VERSION = '0.12.0';
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -22,19 +28,44 @@ async function main(): Promise<void> {
   if (httpFlag !== undefined) {
     const port = Number(flag('port') ?? process.env.PORT ?? 3939);
     const oauth = await buildOAuth(config);
-    // With OAuth, bind all interfaces (behind TLS); otherwise default to loopback.
     const host = flag('host') ?? process.env.HOST ?? (oauth ? '0.0.0.0' : '127.0.0.1');
-    // Per-session factory: resolve the per-user context (multi-tenant) from the session's
-    // bearer auth, falling back to the operator context for passcode/no-auth sessions.
     const cache = new ContextCache(config, ctx);
-    await startHttp(async (authInfo) => createServer(await cache.resolve(authInfo)), {
+    const metrics = config.metricsEnabled ? createMetrics() : undefined;
+    const readiness = makeReadiness(
+      {
+        store: storeCheck(oauth?.store),
+        ...(config.readyzCheckZotero ? { zotero: zoteroPingCheck() } : {}),
+      },
+      30_000,
+    );
+
+    let lifecycle: { drainSessions: (ms: number) => Promise<void>; activeSessions: () => number } | undefined;
+    const httpServer: Server = await startHttp(async (authInfo) => createServer(await cache.resolve(authInfo)), {
       port,
       host,
       logger,
       oauth,
+      metrics,
+      readiness,
+      version: VERSION,
+      rateLimit: config.mcpRateLimit,
       enableDnsRebindingProtection: Boolean(oauth),
       allowedHosts: oauth?.allowedHosts,
-      allowInsecureBind: process.env.ZOTEUS_ALLOW_INSECURE_HTTP === 'true' || process.env.ZOTEUS_ALLOW_INSECURE_HTTP === '1',
+      allowInsecureBind: config.allowInsecureHttp,
+      registerLifecycle: (h) => {
+        lifecycle = h;
+      },
+    });
+
+    installShutdownHandlers({
+      server: httpServer,
+      logger,
+      timeoutMs: 25_000,
+      drainSessions: (ms) => lifecycle?.drainSessions(ms) ?? Promise.resolve(),
+      flush: async () => {
+        await oauth?.store.flush();
+        await cache.flushIndexes();
+      },
     });
   } else {
     await startStdio(server);

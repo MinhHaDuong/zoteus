@@ -8,6 +8,7 @@ import { MemoryStore, FileStore, type OAuthStore } from './store.js';
 
 export interface BuiltOAuth {
   provider: ZoteusOAuthProvider;
+  store: OAuthStore;
   issuerUrl: URL;
   resourceServerUrl: URL;
   resourceMetadataUrl: string;
@@ -69,6 +70,7 @@ export async function buildOAuth(config: ZoteusConfig): Promise<BuiltOAuth | und
 
   return {
     provider,
+    store,
     issuerUrl,
     resourceServerUrl,
     resourceMetadataUrl,

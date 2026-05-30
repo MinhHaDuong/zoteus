@@ -13,7 +13,7 @@ import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
 import { SearchIndex } from './features/search/index-manager.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
-import { loadIndex } from './features/search/persistence.js';
+import { loadIndex, saveIndex } from './features/search/persistence.js';
 import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext, type ToolDefinition } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
@@ -162,6 +162,12 @@ export class ContextCache {
     this.entries.set(zoteroUserId, { ctx, lastUsed: ++this.order });
     this.evictIfNeeded();
     return ctx;
+  }
+
+  /** Persist every live context's search index (operator + per-user). Best-effort. */
+  async flushIndexes(): Promise<void> {
+    const ctxs = [this.operatorCtx, ...[...this.entries.values()].map((e) => e.ctx)];
+    await Promise.allSettled(ctxs.map((c) => saveIndex(c.search, c.searchIndexPath)));
   }
 
   private evictIfNeeded(): void {
