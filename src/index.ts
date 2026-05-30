@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { loadConfig } from './config.js';
-import { buildServer } from './server.js';
+import { buildServer, createServer, ContextCache } from './server.js';
 import { startStdio } from './transports/stdio.js';
 import { startHttp } from './transports/http.js';
 import { buildOAuth } from './auth/router.js';
@@ -16,16 +16,18 @@ function flag(name: string): string | undefined {
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
   const logger = createLogger(config.logLevel);
-  const { server, createServer } = await buildServer(config);
+  const { server, ctx } = await buildServer(config);
 
   const httpFlag = flag('http');
   if (httpFlag !== undefined) {
     const port = Number(flag('port') ?? process.env.PORT ?? 3939);
-    const oauth = buildOAuth(config);
+    const oauth = await buildOAuth(config);
     // With OAuth, bind all interfaces (behind TLS); otherwise default to loopback.
     const host = flag('host') ?? process.env.HOST ?? (oauth ? '0.0.0.0' : '127.0.0.1');
-    // Per-session factory so each remote client gets its own server/transport.
-    await startHttp(createServer, {
+    // Per-session factory: resolve the per-user context (multi-tenant) from the session's
+    // bearer auth, falling back to the operator context for passcode/no-auth sessions.
+    const cache = new ContextCache(config, ctx);
+    await startHttp(async (authInfo) => createServer(await cache.resolve(authInfo)), {
       port,
       host,
       logger,
