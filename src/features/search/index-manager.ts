@@ -67,6 +67,16 @@ export class SearchIndex {
     return this.opts.embedder?.name ?? 'none (keyword-only)';
   }
 
+  get hasEmbedder(): boolean {
+    return Boolean(this.opts.embedder);
+  }
+
+  /** Embed arbitrary texts with the configured provider (empty array if none). */
+  async embed(texts: string[]): Promise<number[][]> {
+    if (!this.opts.embedder) return [];
+    return this.opts.embedder.embed(texts);
+  }
+
   status(): SearchIndexStatus {
     return {
       documents: this.bm25.size,
