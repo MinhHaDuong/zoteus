@@ -1,6 +1,7 @@
 import { BM25Index, type BM25Hit } from './bm25.js';
 import { VectorStore, type VectorHit } from './vector-store.js';
 import { chunkText } from './chunker.js';
+import { tokenize } from './tokenize.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import type { Logger } from '../../lib/logger.js';
 
@@ -51,6 +52,32 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
     list.forEach((hit, rank) => scores.set(hit.id, (scores.get(hit.id) ?? 0) + 1 / (k + rank + 1)));
   }
   return [...scores.entries()].map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score);
+}
+
+/** Build a readable, query-centred snippet trimmed to word boundaries. */
+export function makeSnippet(text: string, query: string, max = 240): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean.length <= max) return clean;
+  const lower = clean.toLowerCase();
+  let pos = -1;
+  for (const t of tokenize(query)) {
+    const i = lower.indexOf(t);
+    if (i >= 0 && (pos < 0 || i < pos)) pos = i;
+  }
+  let start = pos < 0 ? 0 : Math.max(0, pos - Math.floor(max / 3));
+  if (start > 0) {
+    const sp = clean.indexOf(' ', start);
+    start = sp >= 0 ? sp + 1 : start;
+  }
+  let end = Math.min(start + max, clean.length);
+  if (end < clean.length) {
+    const sp = clean.lastIndexOf(' ', end);
+    if (sp > start) end = sp;
+  }
+  let snip = clean.slice(start, end).trim();
+  if (start > 0) snip = `… ${snip}`;
+  if (end < clean.length) snip = `${snip} …`;
+  return snip;
 }
 
 /** Hybrid (BM25 + vector) search index over the library, persistable as JSON. */
@@ -153,7 +180,7 @@ export class SearchIndex {
       const rec = this.chunks.get(id);
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
-      hits.push({ itemKey: rec.itemKey, title: rec.title, snippet: rec.text.slice(0, 240), score });
+      hits.push({ itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score });
       if (hits.length >= limit) break;
     }
     return hits;

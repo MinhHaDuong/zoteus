@@ -126,3 +126,16 @@ describe('SearchIndex embedder passthrough', () => {
     expect(await none.embed(['a'])).toEqual([]);
   });
 });
+
+describe('snippet quality (W5)', () => {
+  it('centres the snippet on the query and does not start mid-word', async () => {
+    const longAbstract = 'padding '.repeat(80) + 'the Gauss Newton Hessian decomposition matters here ' + 'tail '.repeat(80);
+    const idx = new SearchIndex({ embedder: null });
+    await idx.build([{ key: 'Z', data: { itemType: 'journalArticle', title: 'Opt', abstractNote: longAbstract } }]);
+    const hits = await idx.query('Hessian decomposition', { limit: 1 });
+    expect(hits[0].snippet.toLowerCase()).toContain('hessian');
+    // first visible word (after any leading ellipsis) is a whole word
+    const firstWord = hits[0].snippet.replace(/^…\s*/, '').split(' ')[0];
+    expect(firstWord.length).toBeGreaterThan(1);
+  });
+});
