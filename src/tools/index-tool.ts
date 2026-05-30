@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { join } from 'node:path';
 import type { ToolDefinition, ToolContext } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
 import { saveIndex } from '../features/search/persistence.js';
@@ -40,7 +39,7 @@ const indexTool: ToolDefinition = {
       : ctx.router.defaultLibrary();
     const items = await fetchAllItems(ctx, lib);
     const status = await ctx.search.build(items, { version: items.length });
-    await saveIndex(ctx.search, join(ctx.config.dataDir, 'search-index.json')).catch((e) =>
+    await saveIndex(ctx.search, ctx.searchIndexPath).catch((e) =>
       ctx.logger.warn(`Could not persist index: ${e instanceof Error ? e.message : String(e)}`),
     );
     return ok(
