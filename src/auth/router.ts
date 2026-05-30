@@ -40,6 +40,9 @@ export function buildOAuth(config: ZoteusConfig): BuiltOAuth | undefined {
     max: 10,
     standardHeaders: true,
     legacyHeaders: false,
+    // Behind a TLS proxy/tunnel the server sets `trust proxy`; silence express-rate-limit's
+    // X-Forwarded-For / trust-proxy advisories so they don't spam logs on every request.
+    validate: { trustProxy: false, xForwardedForHeader: false },
     message: { error: 'too_many_requests', error_description: 'Too many consent attempts. Try again later.' },
   });
 

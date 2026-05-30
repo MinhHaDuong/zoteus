@@ -16,7 +16,7 @@ function flag(name: string): string | undefined {
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
   const logger = createLogger(config.logLevel);
-  const { server } = await buildServer(config);
+  const { server, createServer } = await buildServer(config);
 
   const httpFlag = flag('http');
   if (httpFlag !== undefined) {
@@ -24,7 +24,8 @@ async function main(): Promise<void> {
     const oauth = buildOAuth(config);
     // With OAuth, bind all interfaces (behind TLS); otherwise default to loopback.
     const host = flag('host') ?? process.env.HOST ?? (oauth ? '0.0.0.0' : '127.0.0.1');
-    await startHttp(server, {
+    // Per-session factory so each remote client gets its own server/transport.
+    await startHttp(createServer, {
       port,
       host,
       logger,

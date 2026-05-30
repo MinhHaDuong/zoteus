@@ -22,6 +22,13 @@ import { tools } from './tools/index.js';
 export interface BuiltServer {
   server: McpServer;
   ctx: ToolContext;
+  /**
+   * Create a fresh McpServer sharing the same (expensive) ToolContext. Used by the
+   * HTTP transport to give each MCP session its own server/transport pair — a single
+   * McpServer/transport cannot be reused across sessions (it rejects a second
+   * `initialize` with "Server already initialized").
+   */
+  createServer: () => McpServer;
 }
 
 const VERSION = '0.9.0';
@@ -56,22 +63,25 @@ export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
   const ctx: ToolContext = { config, capabilities, router, schema, web, local, styles, translation, search, scholar, logger };
   ctx.toolCatalog = activeTools.map((t) => ({ name: t.name, title: t.title, description: t.description, deferLoading: t.deferLoading }));
 
-  const server = new McpServer(
-    { name: 'zoteus', version: VERSION },
-    {
-      capabilities: {
-        tools: { listChanged: true },
-        resources: { listChanged: true },
-        prompts: { listChanged: true },
+  const createServer = (): McpServer => {
+    const server = new McpServer(
+      { name: 'zoteus', version: VERSION },
+      {
+        capabilities: {
+          tools: { listChanged: true },
+          resources: { listChanged: true },
+          prompts: { listChanged: true },
+        },
+        instructions:
+          'Zoteus exposes your Zotero library. Call zotero_whoami first to resolve identity. Prefer zotero_search_items for discovery and zotero_get_item for full records. Use zotero_schema before constructing items.',
       },
-      instructions:
-        'Zoteus exposes your Zotero library. Call zotero_whoami first to resolve identity. Prefer zotero_search_items for discovery and zotero_get_item for full records. Use zotero_schema before constructing items.',
-    },
-  );
+    );
 
-  registerAllTools(server, activeTools, ctx);
-  registerResources(server, ctx);
-  registerPrompts(server);
+    registerAllTools(server, activeTools, ctx);
+    registerResources(server, ctx);
+    registerPrompts(server);
+    return server;
+  };
 
-  return { server, ctx };
+  return { server: createServer(), ctx, createServer };
 }

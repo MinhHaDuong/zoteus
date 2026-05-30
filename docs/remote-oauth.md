@@ -86,7 +86,9 @@ If your proxy rewrites `Host` to an internal value (causing every `/mcp` request
 
 - **The passcode is the trust boundary.** Use a high-entropy value and rotate it (restart with a new `ZOTEUS_OAUTH_PASSCODE`). `/consent` is rate-limited and locks a pending authorization after repeated wrong attempts.
 - **Single tenant.** Every connected client acts as the one operator `ZOTERO_API_KEY`. Per-user Zotero accounts (multi-tenant) are a future milestone (M11).
-- **In-memory state.** Registered clients and tokens live in memory only — they do not survive a restart and are not shared across replicas. Run a single instance.
-- **One concurrent session.** A single shared Streamable HTTP transport backs `/mcp`; concurrent *independent* MCP sessions are not isolated. Fine for one connector; multi-session isolation is a follow-up.
-- **Token lifetime.** Access tokens remain valid until their TTL even after a refresh-token rotation; shorten `ZOTEUS_OAUTH_ACCESS_TTL` if you need tighter revocation, or use `/revoke`.
+- **In-memory state.** Registered clients and tokens live in memory only — they do not survive a restart and are not shared across replicas. Run a single instance. (After a restart, claude.ai transparently re-registers via DCR and re-runs consent.)
+- **Per-session transports.** Each MCP session gets its own Streamable HTTP transport (keyed by `Mcp-Session-Id`), sharing one Zotero context — so multiple/reconnecting claude.ai sessions are isolated and do not collide.
+- **Dynamic Client Registration.** Claude registers a fresh public client per connection; Zoteus caps the in-memory client store (FIFO) and sweeps expired state. For very high-traffic use, a Client ID Metadata Document (CIMD) flow would avoid per-connection registrations (future enhancement).
+- **Token lifetime.** Refresh tokens are rotated on each use (the old one is invalidated in the same response); access tokens remain valid until their TTL even after rotation. Shorten `ZOTEUS_OAUTH_ACCESS_TTL` for tighter revocation, or use `/revoke`.
+- **Proxy must forward `Host`.** DNS-rebinding protection matches the `Host` header exactly; your TLS proxy/tunnel must forward the public host verbatim (add extras via `ZOTEUS_ALLOWED_HOSTS` if not).
 - Prefer `ZOTEUS_READ_ONLY=true` and keep `ZOTEUS_ALLOW_DELETE=false` for public connectors.

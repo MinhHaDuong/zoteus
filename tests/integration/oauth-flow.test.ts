@@ -51,7 +51,8 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
     } as unknown as NodeJS.ProcessEnv);
     const oauth = buildOAuth(config)!;
     // DNS-rebinding ON: allowedHosts=[127.0.0.1:<port>] matches the live Host (accept path).
-    httpServer = await startHttp(pingServer(), {
+    // Factory form (per-session) — the same path production/claude.ai uses.
+    httpServer = await startHttp(() => pingServer(), {
       port,
       host: '127.0.0.1',
       oauth,
