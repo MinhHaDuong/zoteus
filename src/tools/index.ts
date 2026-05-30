@@ -23,6 +23,8 @@ import indexTool from './index-tool.js';
 import semanticSearch from './semantic-search.js';
 import scholar from './scholar.js';
 import searchTools from './search-tools.js';
+import listTags from './list-tags.js';
+import listCollections from './list-collections.js';
 
 export const tools: ToolDefinition[] = [
   // Read
@@ -56,4 +58,7 @@ export const tools: ToolDefinition[] = [
   scholar,
   // Code-execution / discovery (M8)
   searchTools,
+  // Read-only views split out of mutating tools (M12 W0)
+  listTags,
+  listCollections,
 ];

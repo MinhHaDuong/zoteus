@@ -18,6 +18,8 @@ describe('read-only mode tool set', () => {
       'zotero_scholar',
       'zotero_semantic_search',
       'search_tools',
+      'zotero_list_tags',
+      'zotero_list_collections',
     ]) {
       expect(names).toContain(t);
     }
