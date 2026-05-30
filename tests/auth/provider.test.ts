@@ -197,6 +197,26 @@ describe('ZoteusOAuthProvider', () => {
 });
 
 describe('provider onEvent', () => {
+  it('emits auth_failed on wrong passcode', async () => {
+    const onEvent = vi.fn();
+    const p = new ZoteusOAuthProvider({
+      mode: 'passcode',
+      passcode: 'correct-passcode',
+      accessTokenTtlSec: 60,
+      refreshTokenTtlSec: 600,
+      onEvent,
+    });
+    const client = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(client, { redirectUri: client.redirect_uris[0], codeChallenge: 'abc', state: 'st', scopes: [] }, res1);
+    const authId = authIdFrom(res1.body);
+    const res2 = fakeRes();
+    await p.completeConsent(authId, 'wrong-passcode', res2);
+    expect(res2.statusCode).toBe(401);
+    expect(onEvent).toHaveBeenCalledWith('auth_failed');
+    expect(onEvent).not.toHaveBeenCalledWith('token_issued');
+  });
+
   it('emits token_issued when tokens are minted', async () => {
     const onEvent = vi.fn();
     const p = new ZoteusOAuthProvider({
