@@ -5,11 +5,16 @@ import cors from 'cors';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { Logger } from '../lib/logger.js';
 import type { BuiltOAuth } from '../auth/router.js';
 
-/** A factory that produces a fresh McpServer per MCP session (sharing one ToolContext). */
-export type McpServerFactory = () => McpServer | Promise<McpServer>;
+/**
+ * A factory that produces a fresh McpServer per MCP session. Receives the session's
+ * {@link AuthInfo} (from the bearer middleware) so the server can be bound to a per-user
+ * ToolContext; `undefined` on the no-auth path → the operator/shared context.
+ */
+export type McpServerFactory = (authInfo?: AuthInfo) => McpServer | Promise<McpServer>;
 
 export interface HttpOptions {
   port?: number;
@@ -97,7 +102,7 @@ export async function startHttp(
           const sid = transport!.sessionId;
           if (sid) transports.delete(sid);
         };
-        const server = await factory();
+        const server = await factory((req as express.Request & { auth?: AuthInfo }).auth);
         await server.connect(transport);
       } else {
         res.status(400).json({
