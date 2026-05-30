@@ -2,10 +2,16 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type { Response } from 'express';
 import pkceChallenge from 'pkce-challenge';
 import { ZoteusOAuthProvider } from '../../src/auth/provider.js';
+import { MemoryStore } from '../../src/auth/store.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 
 function makeProvider(): ZoteusOAuthProvider {
-  return new ZoteusOAuthProvider({ passcode: 'secret-passcode', accessTokenTtlSec: 3600, refreshTokenTtlSec: 2592000 });
+  return new ZoteusOAuthProvider({
+    mode: 'passcode',
+    passcode: 'secret-passcode',
+    accessTokenTtlSec: 3600,
+    refreshTokenTtlSec: 2592000,
+  });
 }
 
 async function registerClient(p: ZoteusOAuthProvider, redirect = 'http://localhost:7777/callback'): Promise<OAuthClientInformationFull> {
@@ -161,7 +167,7 @@ describe('ZoteusOAuthProvider', () => {
 
   it('verifyAccessToken rejects unknown and expired tokens', async () => {
     await expect(p.verifyAccessToken('nope')).rejects.toThrow();
-    const short = new ZoteusOAuthProvider({ passcode: 'secret-passcode', accessTokenTtlSec: -1, refreshTokenTtlSec: 10 });
+    const short = new ZoteusOAuthProvider({ mode: 'passcode', passcode: 'secret-passcode', accessTokenTtlSec: -1, refreshTokenTtlSec: 10 });
     const c = await registerClient(short);
     const { code_challenge } = await pkceChallenge();
     const res1 = fakeRes();
@@ -187,5 +193,92 @@ describe('ZoteusOAuthProvider', () => {
     expect(t2.access_token).not.toBe(t1.access_token);
     await p.revokeToken!(c, { token: t2.access_token });
     await expect(p.verifyAccessToken(t2.access_token)).rejects.toThrow();
+  });
+});
+
+// A tiny mock Zotero OAuth 1.0a endpoint set, served by overriding the provider's fetchImpl.
+function mockZoteroFetch(): typeof fetch {
+  return (async (url: string) => {
+    const u = String(url);
+    const form = (s: string) =>
+      new Response(s, { status: 200, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    if (u.endsWith('/oauth/request')) return form('oauth_token=REQTOK&oauth_token_secret=REQSEC&oauth_callback_confirmed=true');
+    if (u.endsWith('/oauth/access')) return form('oauth_token=UT&oauth_token_secret=USERKEY-77&userID=77&username=carol');
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch;
+}
+
+function zoteroProvider(): ZoteusOAuthProvider {
+  return new ZoteusOAuthProvider({
+    mode: 'zotero',
+    accessTokenTtlSec: 3600,
+    refreshTokenTtlSec: 2592000,
+    store: new MemoryStore(),
+    zotero: {
+      clientKey: 'ck',
+      clientSecret: 'cs',
+      callbackUrl: 'https://z.example/oauth/zotero/callback',
+      readOnly: true,
+      baseUrl: 'https://www.zotero.org',
+      fetchImpl: mockZoteroFetch(),
+    },
+  });
+}
+
+describe('ZoteusOAuthProvider — zotero (multi-tenant) mode', () => {
+  it('authorize redirects the browser to zotero.org with a request token', async () => {
+    const p = zoteroProvider();
+    const c = await registerClient(p);
+    const res = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'abc', state: 'st', scopes: ['zoteus'] }, res);
+    expect(res.statusCode).toBe(302);
+    const loc = new URL(res.redirectedTo!);
+    expect(loc.origin + loc.pathname).toBe('https://www.zotero.org/oauth/authorize');
+    expect(loc.searchParams.get('oauth_token')).toBe('REQTOK');
+    expect(loc.searchParams.get('write_access')).toBe('0');
+  });
+
+  it('callback exchanges the verifier and mints a code bound to the per-user key', async () => {
+    const p = zoteroProvider();
+    const c = await registerClient(p);
+    const a = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'chal', state: 'xyz', scopes: ['zoteus'] }, a);
+
+    const cb = fakeRes();
+    await p.completeZoteroCallback('REQTOK', 'VERIF', cb);
+    expect(cb.statusCode).toBe(302);
+    const loc = new URL(cb.redirectedTo!);
+    expect(loc.origin + loc.pathname).toBe('http://localhost:7777/callback');
+    expect(loc.searchParams.get('state')).toBe('xyz');
+    const code = loc.searchParams.get('code')!;
+    expect(code).toBeTruthy();
+
+    expect(await p.challengeForAuthorizationCode(c, code)).toBe('chal');
+    const tokens = await p.exchangeAuthorizationCode(c, code, undefined, c.redirect_uris[0]);
+    const info = await p.verifyAccessToken(tokens.access_token);
+    expect(info.extra).toMatchObject({ zoteroKey: 'USERKEY-77', zoteroUserId: 77, username: 'carol' });
+    expect(typeof info.expiresAt).toBe('number');
+  });
+
+  it('the per-user identity survives a refresh-token rotation', async () => {
+    const p = zoteroProvider();
+    const c = await registerClient(p);
+    const a = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'chal', scopes: ['zoteus'] }, a);
+    const cb = fakeRes();
+    await p.completeZoteroCallback('REQTOK', 'VERIF', cb);
+    const code = new URL(cb.redirectedTo!).searchParams.get('code')!;
+    const t1 = await p.exchangeAuthorizationCode(c, code, undefined, c.redirect_uris[0]);
+    const t2 = await p.exchangeRefreshToken(c, t1.refresh_token!);
+    const info = await p.verifyAccessToken(t2.access_token);
+    expect(info.extra).toMatchObject({ zoteroUserId: 77 });
+  });
+
+  it('callback with an unknown oauth_token renders an error page (no redirect)', async () => {
+    const p = zoteroProvider();
+    const res = fakeRes();
+    await p.completeZoteroCallback('UNKNOWN', 'VERIF', res);
+    expect(res.redirectedTo).toBeUndefined();
+    expect(res.statusCode).toBe(400);
   });
 });
