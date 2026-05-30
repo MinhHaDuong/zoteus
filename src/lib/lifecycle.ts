@@ -15,17 +15,21 @@ export interface ShutdownTasks {
 const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T | void> =>
   Promise.race([p, new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.())]);
 
-/** Drain sessions → flush state → stop accepting connections, all under one deadline. */
+/** Stop accepting new connections → drain sessions → flush state, all under one deadline. */
 export async function gracefulShutdown(tasks: ShutdownTasks): Promise<void> {
   const deadline = tasks.timeoutMs ?? 25_000;
   const run = (async () => {
+    // Stop accepting NEW connections first so the drain below isn't racing freshly-created
+    // sessions during a redeploy. close() does NOT terminate in-flight connections; we don't
+    // await its callback (it only fires once every existing connection ends) — the deadline
+    // plus the explicit process.exit in installShutdownHandlers guarantees termination.
+    tasks.server.close();
     try {
       if (tasks.drainSessions) await tasks.drainSessions(deadline);
       if (tasks.flush) await tasks.flush();
     } catch (e) {
       tasks.logger?.error('shutdown task failed', e instanceof Error ? e.message : String(e));
     }
-    await new Promise<void>((resolve) => tasks.server.close(() => resolve()));
   })();
   await withDeadline(run, deadline);
 }

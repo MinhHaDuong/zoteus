@@ -1,5 +1,5 @@
 // Mask secret-bearing object keys before anything reaches the logs.
-const SECRET_KEY = /(pass(code|word)?|secret|token|api[-_]?key|authorization|bearer|cookie|credential|client[-_]?secret|zoterokey)/i;
+const SECRET_KEY = /(pass(code|word)?|secret|token|api[-_]?key|authorization|bearer|cookie|credential|client[-_]?(key|secret)|zoterokey)/i;
 const MASK = '[REDACTED]';
 
 function redact(value: unknown, seen: WeakSet<object>): unknown {

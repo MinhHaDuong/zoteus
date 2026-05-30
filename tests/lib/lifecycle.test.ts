@@ -2,12 +2,12 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { gracefulShutdown, installShutdownHandlers } from '../../src/lib/lifecycle.js';
 
-function fakeServer(closeDelayMs = 0): { close: (cb: (e?: Error) => void) => void } {
-  return { close: (cb) => setTimeout(() => cb(), closeDelayMs) };
+function fakeServer(closeDelayMs = 0): { close: (cb?: (e?: Error) => void) => void } {
+  return { close: (cb) => setTimeout(() => cb?.(), closeDelayMs) };
 }
 
 describe('gracefulShutdown', () => {
-  it('drains, flushes, then closes — in that order — and resolves', async () => {
+  it('stops accepting connections, then drains, then flushes — in that order — and resolves', async () => {
     const order: string[] = [];
     const drainSessions = vi.fn(async () => {
       order.push('drain');
@@ -15,9 +15,9 @@ describe('gracefulShutdown', () => {
     const flush = vi.fn(async () => {
       order.push('flush');
     });
-    const server = { close: (cb: () => void) => (order.push('close'), cb()) };
+    const server = { close: (cb?: () => void) => (order.push('close'), cb?.()) };
     await gracefulShutdown({ server: server as never, drainSessions, flush, timeoutMs: 1000 });
-    expect(order).toEqual(['drain', 'flush', 'close']);
+    expect(order).toEqual(['close', 'drain', 'flush']);
   });
 
   it('still resolves if a step hangs past the deadline', async () => {
