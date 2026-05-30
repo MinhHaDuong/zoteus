@@ -116,6 +116,12 @@ Full walkthrough (deploy options, TLS/tunnel, Claude Code remote, security notes
 
 Full table in [`docs/configuration.md`](./docs/configuration.md); remote-OAuth walkthrough in [`docs/remote-oauth.md`](./docs/remote-oauth.md).
 
+## Deploy (hosted connector)
+
+Run Zoteus as an always-on connector at a stable HTTPS domain with persistent, encrypted
+state. See **[docs/deployment.md](docs/deployment.md)** for the end-to-end runbook
+(free-tier VM + Caddy, secrets, health checks, backups, rotation, and the connector test).
+
 ## 📚 Documentation
 
 - [Architecture](./docs/architecture.md) · [Configuration](./docs/configuration.md)
