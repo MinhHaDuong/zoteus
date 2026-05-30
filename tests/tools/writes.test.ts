@@ -93,13 +93,15 @@ describe('zotero_update_item', () => {
     expect(sc.diff.extra).toBeUndefined(); // unchanged field omitted
     expect(sc.arrayReplacements).toContain('tags');
     const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
-    expect(text).toContain('title');
+    expect(text).toContain('field(s) would change');
+    expect(text).toContain('arrays replaced wholesale: tags');
   });
 
   it('dry_run fetches the item even when version is supplied', async () => {
     const ctx = makeCtx();
     await updateItem.handler({ item_key: 'K1', patch: { title: 'x' }, version: 3, dry_run: true }, ctx);
     expect(ctx.web.getItem).toHaveBeenCalled();
+    expect(ctx.web.patchItem).not.toHaveBeenCalled();
   });
 });
 
