@@ -156,7 +156,9 @@ export function buildAuthorizeUrl(
   url.searchParams.set('identity', '1');
   url.searchParams.set('name', opts.name ?? 'Zoteus');
   url.searchParams.set('library_access', '1');
-  url.searchParams.set('notes_access', opts.readOnly ? '0' : '1');
+  // notes are readable library content; visibility is always granted. write_access /
+  // all_groups are the mutation gates that read-only mode pins to 0 / read.
+  url.searchParams.set('notes_access', '1');
   url.searchParams.set('write_access', opts.readOnly ? '0' : '1');
   url.searchParams.set('all_groups', opts.readOnly ? 'read' : 'write');
   return url.href;

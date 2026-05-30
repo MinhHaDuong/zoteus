@@ -115,12 +115,15 @@ describe('OAuth 1.0a flow helpers (mocked fetch)', () => {
     expect(url.origin + url.pathname).toBe('https://www.zotero.org/oauth/authorize');
     expect(url.searchParams.get('oauth_token')).toBe('REQTOK');
     expect(url.searchParams.get('library_access')).toBe('1');
+    // notes stay readable even read-only (write_access/all_groups are the mutation gates)
+    expect(url.searchParams.get('notes_access')).toBe('1');
     expect(url.searchParams.get('write_access')).toBe('0');
     expect(url.searchParams.get('all_groups')).toBe('read');
   });
 
   it('buildAuthorizeUrl requests write when not read-only', () => {
     const url = new URL(buildAuthorizeUrl('REQTOK', { baseUrl: 'https://www.zotero.org', readOnly: false }));
+    expect(url.searchParams.get('notes_access')).toBe('1');
     expect(url.searchParams.get('write_access')).toBe('1');
     expect(url.searchParams.get('all_groups')).toBe('write');
   });
