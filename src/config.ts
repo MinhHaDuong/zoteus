@@ -22,6 +22,11 @@ export interface ZoteusConfig {
     accessTokenTtlSec: number;
     refreshTokenTtlSec: number;
     allowedHosts: string[];
+    mode: 'passcode' | 'zotero';
+    zoteroClientKey?: string;
+    zoteroClientSecret?: string;
+    store: 'memory' | 'file';
+    tokenSecret?: string;
   };
 }
 
@@ -55,18 +60,41 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTEUS_OAUTH_ACCESS_TTL: z.coerce.number().int().positive().default(3600),
     ZOTEUS_OAUTH_REFRESH_TTL: z.coerce.number().int().positive().default(2592000),
     ZOTEUS_ALLOWED_HOSTS: z.string().optional(),
+    ZOTEUS_OAUTH_MODE: z.enum(['passcode', 'zotero']).default('passcode'),
+    ZOTERO_OAUTH_CLIENT_KEY: z.string().min(1).optional(),
+    ZOTERO_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
+    ZOTEUS_OAUTH_STORE: z.enum(['memory', 'file']).default('memory'),
+    ZOTEUS_OAUTH_TOKEN_SECRET: z.string().min(1).optional(),
   });
 
   const parsed = schema.parse(env);
 
   const oauthEnabled = parsed.ZOTEUS_OAUTH_ENABLED;
   const publicUrl = parsed.ZOTEUS_PUBLIC_URL?.replace(/\/+$/, '');
+  const mode = parsed.ZOTEUS_OAUTH_MODE;
+  const store = parsed.ZOTEUS_OAUTH_STORE;
   if (oauthEnabled) {
     if (!publicUrl) throw new Error('ZOTEUS_PUBLIC_URL is required when ZOTEUS_OAUTH_ENABLED=true');
-    if (!parsed.ZOTEUS_OAUTH_PASSCODE) throw new Error('ZOTEUS_OAUTH_PASSCODE is required when ZOTEUS_OAUTH_ENABLED=true');
-    if (parsed.ZOTEUS_OAUTH_PASSCODE.length < MIN_PASSCODE_LENGTH) {
+    if (mode === 'passcode') {
+      if (!parsed.ZOTEUS_OAUTH_PASSCODE) {
+        throw new Error('ZOTEUS_OAUTH_PASSCODE is required when ZOTEUS_OAUTH_ENABLED=true (passcode mode)');
+      }
+      if (parsed.ZOTEUS_OAUTH_PASSCODE.length < MIN_PASSCODE_LENGTH) {
+        throw new Error(
+          `ZOTEUS_OAUTH_PASSCODE must be at least ${MIN_PASSCODE_LENGTH} characters (generate one with: openssl rand -base64 24)`,
+        );
+      }
+    } else {
+      // zotero mode: per-user Zotero login replaces the shared passcode
+      if (!parsed.ZOTERO_OAUTH_CLIENT_KEY || !parsed.ZOTERO_OAUTH_CLIENT_SECRET) {
+        throw new Error(
+          'ZOTERO_OAUTH_CLIENT_KEY and ZOTERO_OAUTH_CLIENT_SECRET are required when ZOTEUS_OAUTH_MODE=zotero (register an app at https://www.zotero.org/oauth/apps)',
+        );
+      }
+    }
+    if (store === 'file' && !parsed.ZOTEUS_OAUTH_TOKEN_SECRET) {
       throw new Error(
-        `ZOTEUS_OAUTH_PASSCODE must be at least ${MIN_PASSCODE_LENGTH} characters (generate one with: openssl rand -base64 24)`,
+        'ZOTEUS_OAUTH_TOKEN_SECRET is required when ZOTEUS_OAUTH_STORE=file (used to encrypt stored Zotero keys at rest; generate one with: openssl rand -base64 32)',
       );
     }
   }
@@ -98,6 +126,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       accessTokenTtlSec: parsed.ZOTEUS_OAUTH_ACCESS_TTL,
       refreshTokenTtlSec: parsed.ZOTEUS_OAUTH_REFRESH_TTL,
       allowedHosts,
+      mode,
+      zoteroClientKey: parsed.ZOTERO_OAUTH_CLIENT_KEY,
+      zoteroClientSecret: parsed.ZOTERO_OAUTH_CLIENT_SECRET,
+      store,
+      tokenSecret: parsed.ZOTEUS_OAUTH_TOKEN_SECRET,
     },
   };
 }
