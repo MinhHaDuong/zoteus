@@ -2,11 +2,15 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
+import { rateLimit } from 'express-rate-limit';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { Logger } from '../lib/logger.js';
+import { requestLogger } from '../lib/request-logger.js';
+import { liveness, type Readiness } from '../lib/health.js';
+import type { Metrics } from '../lib/metrics.js';
 import type { BuiltOAuth } from '../auth/router.js';
 
 /**
@@ -27,6 +31,12 @@ export interface HttpOptions {
   allowedHosts?: string[];
   /** Permit binding a non-loopback host without OAuth (escape hatch; default false). */
   allowInsecureBind?: boolean;
+  metrics?: Metrics;
+  readiness?: () => Promise<Readiness>;
+  version?: string;
+  rateLimit?: { windowMs: number; max: number };
+  /** Receives a drain handle for graceful shutdown (factory + single modes). */
+  registerLifecycle?: (h: { drainSessions: (timeoutMs: number) => Promise<void>; activeSessions: () => number }) => void;
 }
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
@@ -85,6 +95,12 @@ export async function startHttp(
     const transport = makeTransport();
     await serverOrFactory.connect(transport);
     route = (req, res) => transport.handleRequest(req, res, req.method === 'POST' ? req.body : undefined);
+    opts.registerLifecycle?.({
+      activeSessions: () => 1,
+      drainSessions: async () => {
+        await transport.close();
+      },
+    });
   } else {
     const factory = serverOrFactory;
     const transports = new Map<string, StreamableHTTPServerTransport>();
@@ -114,13 +130,25 @@ export async function startHttp(
       }
       await transport!.handleRequest(req, res, body);
     };
+    opts.registerLifecycle?.({
+      activeSessions: () => transports.size,
+      drainSessions: async (timeoutMs) => {
+        const all = [...transports.values()];
+        await Promise.race([
+          Promise.allSettled(all.map((t) => t.close())),
+          new Promise<void>((r) => setTimeout(r, timeoutMs).unref?.()),
+        ]);
+      },
+    });
   }
 
   const app = express();
   app.disable('x-powered-by');
   // Behind a TLS proxy/tunnel (OAuth deployments) so express-rate-limit keys on the
-  // forwarded client IP instead of throwing on the X-Forwarded-For header.
+  // forwarded client IP instead of throwing on the X-Forwarded-For header. Set trust
+  // proxy first so the request logger / rate limiter see the real client IP.
   if (opts.oauth) app.set('trust proxy', 1);
+  if (opts.logger) app.use(requestLogger(opts.logger, opts.metrics));
 
   if (opts.oauth) opts.oauth.mount(app);
 
@@ -130,17 +158,42 @@ export async function startHttp(
 
   const wrap = (req: express.Request, res: express.Response): void => {
     route(req, res).catch((err) => {
+      opts.metrics?.inc('http_errors_total');
       opts.logger?.error('HTTP request failed:', err instanceof Error ? err.message : String(err));
       if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
     });
   };
 
+  // No-auth ops endpoints, mounted before the MCP path routes and the 404 catch-all.
+  const startedAt = Date.now();
+  app.get('/healthz', (_req, res) => res.json(liveness(opts.version ?? 'dev', startedAt)));
+  app.get('/readyz', async (_req, res) => {
+    if (!opts.readiness) return res.json({ ok: true, checks: {} });
+    const r = await opts.readiness();
+    res.status(r.ok ? 200 : 503).json(r);
+  });
+  if (opts.metrics) app.get('/metrics', (_req, res) => res.type('text/plain').send(opts.metrics!.render()));
+
+  const limiter =
+    opts.rateLimit && opts.rateLimit.max > 0
+      ? [
+          rateLimit({
+            windowMs: opts.rateLimit.windowMs,
+            max: opts.rateLimit.max,
+            standardHeaders: true,
+            legacyHeaders: false,
+            validate: { trustProxy: false, xForwardedForHeader: false },
+            message: { jsonrpc: '2.0', error: { code: -32000, message: 'Too many requests' }, id: null },
+          }),
+        ]
+      : [];
+
   // CORS for web-based MCP clients + OPTIONS preflight (before bearer auth so
   // preflight is not rejected). The SDK already CORS-enables its own routes.
   app.use(path, cors());
-  app.post(path, ...guards, express.json({ limit: '8mb' }), wrap);
-  app.get(path, ...guards, wrap);
-  app.delete(path, ...guards, wrap);
+  app.post(path, ...limiter, ...guards, express.json({ limit: '8mb' }), wrap);
+  app.get(path, ...limiter, ...guards, wrap);
+  app.delete(path, ...limiter, ...guards, wrap);
   app.use((_req, res) => res.status(404).json({ error: `Not found. MCP endpoint is ${path}.` }));
 
   const httpServer = await new Promise<http.Server>((resolve) => {
