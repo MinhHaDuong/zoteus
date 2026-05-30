@@ -103,11 +103,63 @@ Notes:
 - The callback is an ephemeral `http://localhost:<port>/callback` that Claude Code owns; Zoteus accepts loopback redirects port-agnostically, so no `--callback-port` is needed.
 - Manage with `claude mcp list` / `claude mcp get zoteus` / `claude mcp remove zoteus`.
 
+## Multi-tenant: per-user Zotero accounts (M11)
+
+By default Zoteus runs **single-tenant** (`ZOTEUS_OAUTH_MODE=passcode`): every connected
+client uses the one operator `ZOTERO_API_KEY`, gated by a shared passcode.
+
+Set **`ZOTEUS_OAUTH_MODE=zotero`** to make Zoteus **multi-tenant** — each user who adds the
+connector logs into **their own Zotero account**, and every call runs against that user's
+library. Zoteus stays its own OAuth 2.1 server for claude.ai; during consent it performs
+Zotero's OAuth 1.0a on the user's behalf and binds the resulting per-user Zotero key to the
+issued bearer token. No `ZOTERO_API_KEY` and no `ZOTEUS_OAUTH_PASSCODE` are needed in this mode.
+
+### Setup
+
+1. Register a Zotero app at https://www.zotero.org/oauth/apps. Set the callback to
+   `https://<your-host>/oauth/zotero/callback`. Note the **Client Key** and **Client Secret**.
+2. Configure:
+   ```bash
+   ZOTEUS_OAUTH_ENABLED=true
+   ZOTEUS_OAUTH_MODE=zotero
+   ZOTEUS_PUBLIC_URL=https://<your-host>
+   ZOTERO_OAUTH_CLIENT_KEY=<client key>
+   ZOTERO_OAUTH_CLIENT_SECRET=<client secret>
+   ZOTEUS_OAUTH_STORE=file
+   ZOTEUS_OAUTH_TOKEN_SECRET="$(openssl rand -base64 32)"
+   ZOTEUS_READ_ONLY=true
+   ZOTEUS_DATA_DIR=/data        # mount a volume so the store + per-user indexes persist
+   ```
+3. Deploy behind HTTPS (Fly/Render/Railway/VPS+Caddy/named cloudflared) exactly as for
+   single-tenant, mounting a volume at `ZOTEUS_DATA_DIR`.
+
+### Verifying two accounts (operator runbook)
+
+1. In **Account A**'s claude.ai: Settings → Connectors → Add custom connector →
+   `https://<your-host>/mcp` → Connect → you are redirected to **zotero.org**, sign in,
+   approve → tools load. Run `zotero_whoami`; confirm it reports **Account A**'s userID.
+2. Repeat in **Account B** (a second account / browser profile). `zotero_whoami` must report
+   **Account B**'s userID — not A's, and not the operator's. Read a few items to confirm it's
+   B's library.
+3. Restart the server and reconnect from both — neither user is forced back through Zotero
+   (the encrypted file store kept their keys).
+
+### Notes
+
+- **Encryption at rest:** stored Zotero keys are AES-256-GCM encrypted with
+  `ZOTEUS_OAUTH_TOKEN_SECRET`. Losing or rotating the secret invalidates the store (users
+  simply re-authorize). The store file lives under `ZOTEUS_DATA_DIR` (git-ignored).
+- **Per-user index:** `zotero_index` builds a separate semantic index per user
+  (`search-index-<userID>.json`); tenants never share an index.
+- **Single instance:** the file store is local; run one instance (no shared-replica state).
+- **Read-only recommended:** keep `ZOTEUS_READ_ONLY=true` so the connector requests
+  read-only Zotero permissions (`library_access=1&write_access=0&all_groups=read`).
+
 ## Security notes & v1 limitations
 
 - **The passcode is the trust boundary.** Use a high-entropy value and rotate it (restart with a new `ZOTEUS_OAUTH_PASSCODE`). `/consent` is rate-limited and locks a pending authorization after repeated wrong attempts.
 - **Single tenant.** Every connected client acts as the one operator `ZOTERO_API_KEY`. Per-user Zotero accounts (multi-tenant) are a future milestone (M11).
-- **In-memory state.** Registered clients and tokens live in memory only — they do not survive a restart and are not shared across replicas. Run a single instance. (After a restart, claude.ai transparently re-registers via DCR and re-runs consent.)
+- **State persistence.** By default (`ZOTEUS_OAUTH_STORE=memory`) registered clients and tokens live in memory only — they do not survive a restart. Set `ZOTEUS_OAUTH_STORE=file` (with `ZOTEUS_OAUTH_TOKEN_SECRET`) to persist clients, tokens, and per-user Zotero keys across restarts, encrypted at rest under the data dir. Either way, state is local to one instance (no shared-replica store). Short-lived pending consents and auth codes always stay in memory; a mid-flow restart just re-prompts.
 - **Per-session transports.** Each MCP session gets its own Streamable HTTP transport (keyed by `Mcp-Session-Id`), sharing one Zotero context — so multiple/reconnecting claude.ai sessions are isolated and do not collide.
 - **Dynamic Client Registration.** Claude registers a fresh public client per connection; Zoteus caps the in-memory client store (FIFO) and sweeps expired state. For very high-traffic use, a Client ID Metadata Document (CIMD) flow would avoid per-connection registrations (future enhancement).
 - **Token lifetime.** Refresh tokens are rotated on each use (the old one is invalidated in the same response); access tokens remain valid until their TTL even after rotation. Shorten `ZOTEUS_OAUTH_ACCESS_TTL` for tighter revocation, or use `/revoke`.

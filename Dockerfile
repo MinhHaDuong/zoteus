@@ -27,5 +27,12 @@ COPY package.json ./
 #   ZOTEUS_OAUTH_PASSCODE=...          (>= 12 chars; `openssl rand -base64 24`)
 #   ZOTEUS_READ_ONLY=true              (recommended for public connectors)
 # Optional: ZOTEUS_ALLOWED_HOSTS=...   (extra Host values if your proxy rewrites Host)
+#
+# Multi-tenant (per-user Zotero accounts) instead of the single operator key:
+#   ZOTEUS_OAUTH_MODE=zotero
+#   ZOTERO_OAUTH_CLIENT_KEY=...  ZOTERO_OAUTH_CLIENT_SECRET=...  (https://www.zotero.org/oauth/apps)
+#   ZOTEUS_OAUTH_STORE=file      ZOTEUS_OAUTH_TOKEN_SECRET=...   (openssl rand -base64 32)
+#   ZOTEUS_DATA_DIR=/data        + mount a volume at /data so the encrypted store + indexes persist
+VOLUME ["/data"]
 EXPOSE 3939
 ENTRYPOINT ["node", "dist/index.js", "--http", "--port", "3939", "--host", "0.0.0.0"]
