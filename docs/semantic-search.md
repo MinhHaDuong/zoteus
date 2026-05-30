@@ -11,6 +11,7 @@ M6 adds local-first hybrid retrieval: BM25 keyword scoring fused with vector sim
 ### `zotero_semantic_search` — search by meaning
 - `q` — natural-language query. `mode`: `auto` (hybrid, default), `keyword` (BM25), or `semantic` (vector).
 - Returns ranked items with a snippet and fused score. Build the index first.
+- Snippets are query-centred and trimmed to word boundaries: the excerpt is positioned around the first query token hit rather than always taken from the document head, so the relevant phrase appears in the snippet even when it occurs deep in the abstract.
 
 For exact field/tag/itemType filtering, use `zotero_search_items`. Use semantic search for conceptual "papers about X" queries.
 

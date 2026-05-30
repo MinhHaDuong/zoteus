@@ -37,6 +37,16 @@ Turn the Streamable HTTP `/mcp` endpoint into an OAuth 2.1 + PKCE protected reso
 
 When OAuth is enabled, `--http` binds `0.0.0.0` and enables DNS-rebinding protection (`allowedHosts` = public host + `ZOTEUS_ALLOWED_HOSTS`). Put TLS (Caddy / cloudflared / Fly) in front; the proxy must forward the public `Host` header verbatim.
 
+## Optional dependencies
+
+**Exact full-text page locators** — `zotero_get_fulltext precise_pages:true` re-extracts the PDF for exact page numbers using `pdfjs-dist`, which is declared as an `optionalDependency`. Without it, the tool returns approximate (proportional) page numbers with a notice; no error is thrown:
+
+```bash
+npm i pdfjs-dist
+```
+
+**Better BibTeX export** — `zotero_export format:"better-biblatex"` calls the Better BibTeX plugin running in your local desktop Zotero instance. It is desktop-local only: when desktop Zotero or the plugin is unavailable (e.g. the hosted connector), the tool automatically degrades to Zotero's built-in stock `biblatex` translator. See [`grounding.md`](./grounding.md) for details.
+
 ## Library backends
 
 Zoteus uses both Zotero backends and chooses per request:

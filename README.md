@@ -39,7 +39,10 @@ There are several Zotero MCP servers. Zoteus is the one that combines **everythi
 - **Safe by default.** Reversible trash is the default; permanent deletion is opt-in and confirmation-gated. Optimistic-locking conflicts, rate limits, 50-item batch chunking, and partial-success parsing are handled *in the client* so the model never has to.
 - **Cite anything.** Add a paper by DOI/ISBN/PMID/arXiv and format a bibliography in any CSL style — no account required for the import → format path.
 - **Find anything.** Hybrid keyword + semantic search across metadata, full text, and annotations, with results that cite the page.
-- **Built for agents.** ~24 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, with structured outputs and a generated TypeScript tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
+- **Ground claims with page locators.** `zotero_get_fulltext` retrieves relevant passages from a PDF with character offsets, nearest section heading, and a page number (approximate by default; exact with the optional `pdfjs-dist` dependency).
+- **Audit your tag vocabulary.** `zotero_tag_audit` checks all library tags against a controlled vocabulary with required tiers, flags off-taxonomy and auto-applied tags, and reports items missing a required-tier tag — optionally scoped per collection.
+- **Better BibTeX export.** `zotero_export` now supports `format:"better-biblatex"` (applies your BBT citation-key and export options; requires desktop Zotero + the Better BibTeX plugin; degrades to built-in `biblatex` otherwise).
+- **Built for agents.** ~28 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, with structured outputs and a generated TypeScript tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
 
 ## 🚀 Quickstart
 
@@ -118,6 +121,7 @@ Full table in [`docs/configuration.md`](./docs/configuration.md); remote-OAuth w
 - [Architecture](./docs/architecture.md) · [Configuration](./docs/configuration.md)
 - [Writing (safe writes)](./docs/writing.md) · [Files, full-text & sync](./docs/files-and-sync.md)
 - [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md)
+- [Full-text grounding, tag audit, BBT export](./docs/grounding.md) (M12)
 - [Prompts](./docs/prompts.md) · [Code execution with MCP](./docs/code-execution.md)
 - Full design spec: [`docs/superpowers/specs/2026-05-29-zoteus-design.md`](./docs/superpowers/specs/2026-05-29-zoteus-design.md)
 
@@ -130,7 +134,9 @@ npm run build && npm publish --access public   # npm
 
 ## 🗺️ Status & roadmap
 
-**Feature-complete** — all 11 milestones (0–10) implemented, 24 tools, 7 prompts, ~140 tests, CI green. (`npm publish` to make it installable for everyone is the only remaining step.)
+**Feature-complete** — all 12 milestones (0–11) implemented, 28 tools, 7 prompts, ~210 tests, CI green. (`npm publish` to make it installable for everyone is the only remaining step.)
+
+New in **v0.11.0 (M12):** `zotero_get_fulltext` (passage retrieval with page locators), `zotero_tag_audit` (controlled-vocabulary hygiene), `zotero_list_tags`, `zotero_list_collections`, `zotero_export format:"better-biblatex"` (local BBT with degrade), `zotero_update_item dry_run` (before→after diff), and query-centred search snippets.
 
 - [x] **0** Scaffold + CI
 - [x] **1** Zotero API clients (cloud + local) + capability probe
@@ -143,6 +149,7 @@ npm run build && npm publish --access public   # npm
 - [x] **8** Code-execution layer + Prompts
 - [x] **9** HTTP transport + DXT + MCP registry + docs polish
 - [x] **10** OAuth 2.1 + PKCE + hosted remote (claude.ai connector)
+- [x] **11** Read+grounding path — full-text passages, tag audit, BBT export, dry-run diff
 
 ## 🤝 Contributing
 
