@@ -140,8 +140,9 @@ export class WebApiClient {
   }
 
   async listItems(lib: LibraryRef, query: ItemQuery = {}): Promise<ListResult> {
-    const segment = query.top ? '/items/top' : '/items';
-    const { top: _top, ...rest } = query;
+    const { top: _top, collectionKey, ...rest } = query;
+    const base = collectionKey ? `/collections/${collectionKey}` : '';
+    const segment = query.top ? `${base}/items/top` : `${base}/items`;
     const { json, headers } = await this.getJson(
       this.prefix(lib) + segment,
       this.buildQuery(rest as any),

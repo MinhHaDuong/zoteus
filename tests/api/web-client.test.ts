@@ -39,6 +39,34 @@ describe('WebApiClient', () => {
     expect(r.lastModifiedVersion).toBe(2114);
   });
 
+  it('scopes listItems by collection via the path segment, not a query param', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/users/19552201/collections/ABC/items');
+      expect(url).not.toContain('collectionKey=');
+      return new Response(JSON.stringify([{ key: 'A' }]), {
+        status: 200,
+        headers: { 'Total-Results': '1', 'Last-Modified-Version': '5' },
+      });
+    });
+    const r = await makeClient(fetchImpl).listItems(
+      { type: 'user', id: 19552201 },
+      { collectionKey: 'ABC' },
+    );
+    expect(r.data).toHaveLength(1);
+  });
+
+  it('scopes listItems by collection and top via the path segment', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/users/19552201/collections/ABC/items/top');
+      expect(url).not.toContain('collectionKey=');
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Total-Results': '0' } });
+    });
+    await makeClient(fetchImpl).listItems(
+      { type: 'user', id: 19552201 },
+      { collectionKey: 'ABC', top: true },
+    );
+  });
+
   it('throws ZoteroApiError with an actionable message on failure', async () => {
     const fetchImpl = vi.fn(async () => new Response('nope', { status: 404 }));
     await expect(makeClient(fetchImpl).getItem({ type: 'user', id: 1 }, 'XYZ')).rejects.toThrow(

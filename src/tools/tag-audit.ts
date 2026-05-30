@@ -79,7 +79,13 @@ const tagAudit: ToolDefinition = {
     else if (args.vocabulary_path) {
       const raw = await readFile(args.vocabulary_path, 'utf8').catch(() => null);
       if (raw == null) return err(`Could not read vocabulary file: ${args.vocabulary_path}`);
-      const parsed = vocabSchema.safeParse(JSON.parse(raw));
+      let json: unknown;
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        return err(`Vocabulary file is not valid JSON: ${args.vocabulary_path}`);
+      }
+      const parsed = vocabSchema.safeParse(json);
       if (!parsed.success) return err(`Vocabulary file is invalid: ${parsed.error.message}`);
       vocab = parsed.data;
     } else return err('Provide a `vocabulary` object or a `vocabulary_path`.');

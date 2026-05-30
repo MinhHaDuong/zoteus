@@ -68,8 +68,9 @@ export class LocalApiClient {
   }
 
   async listItems(query: ItemQuery = {}): Promise<ListResult> {
-    const segment = query.top ? '/items/top' : '/items';
-    const { top: _t, ...rest } = query;
+    const { top: _t, collectionKey, ...rest } = query;
+    const base = collectionKey ? `/collections/${collectionKey}` : '';
+    const segment = query.top ? `${base}/items/top` : `${base}/items`;
     const { json, headers } = await this.getJson(`/users/0${segment}`, this.buildQuery(rest as any));
     return this.toListResult(json, headers);
   }

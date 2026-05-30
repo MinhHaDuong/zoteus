@@ -35,4 +35,17 @@ describe('LocalApiClient', () => {
     expect(r.data).toHaveLength(1);
     expect(r.totalResults).toBe(1);
   });
+
+  it('scopes listItems by collection via the path segment, not a query param', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/users/0/collections/ABC/items');
+      expect(url).not.toContain('collectionKey=');
+      return new Response(JSON.stringify([{ key: 'A' }]), {
+        status: 200,
+        headers: { 'Total-Results': '1', 'Last-Modified-Version': '10' },
+      });
+    });
+    const r = await makeLocal(fetchImpl).listItems({ collectionKey: 'ABC' });
+    expect(r.data).toHaveLength(1);
+  });
 });

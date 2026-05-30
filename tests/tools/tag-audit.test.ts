@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
+import { writeFile, unlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import tagAudit from '../../src/tools/tag-audit.js';
 
 function ctx() {
@@ -50,5 +53,18 @@ describe('zotero_tag_audit', () => {
   it('errors when neither vocabulary nor vocabulary_path is given', async () => {
     const res = await tagAudit.handler({}, ctx());
     expect(res.isError).toBe(true);
+  });
+
+  it('returns a friendly error when vocabulary_path is malformed JSON', async () => {
+    const path = join(tmpdir(), `zoteus-vocab-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    await writeFile(path, '{ this is not: valid json,, }', 'utf8');
+    try {
+      const res = await tagAudit.handler({ vocabulary_path: path }, ctx());
+      expect(res.isError).toBe(true);
+      const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+      expect(text).toContain('not valid JSON');
+    } finally {
+      await unlink(path).catch(() => {});
+    }
   });
 });
