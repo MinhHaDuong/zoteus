@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { buildServer } from '../../src/server.js';
+import getFulltext from '../../src/tools/get-fulltext.js';
 
 const hasKey = Boolean(process.env.ZOTERO_API_KEY);
 const d = hasKey ? describe : describe.skip;
@@ -68,4 +69,24 @@ d('Zoteus e2e (live Zotero API)', () => {
     expect(res.isError).toBeUndefined();
     expect((res.content[0].text as string).length).toBeGreaterThan(10);
   }, 30_000);
+
+  it('get_fulltext returns passages with locators for a real PDF item', async () => {
+    const { ctx } = await buildServer(loadConfig(process.env));
+    // Find a top-level item that has a PDF child with extracted full text.
+    const list = await ctx.router.searchItems({ top: true, limit: 25 });
+    let found: any;
+    for (const it of list.data) {
+      const key = (it as any)?.key;
+      if (!key) continue;
+      const res = await getFulltext.handler({ item_key: key, query: 'method' }, ctx);
+      if (!res.isError && (res.structuredContent as any)?.passages?.length) {
+        found = res;
+        break;
+      }
+    }
+    expect(found, 'no item with extracted full text found in the first 25').toBeTruthy();
+    const sc = found.structuredContent as any;
+    expect(sc.passages[0].charStart).toBeGreaterThanOrEqual(0);
+    expect(['exact', 'approximate']).toContain(sc.pageSource);
+  }, 60_000);
 });
