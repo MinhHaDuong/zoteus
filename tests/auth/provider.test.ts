@@ -327,3 +327,50 @@ describe('ZoteusOAuthProvider — zotero (multi-tenant) mode', () => {
     expect(res.statusCode).toBe(400);
   });
 });
+
+describe('provider CIMD client resolution', () => {
+  const url = 'https://claude.ai/.well-known/oauth-client';
+  function jsonResponse(body: unknown): Response {
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  }
+
+  it('resolves a URL client_id via CIMD without DCR', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ client_id: url, redirect_uris: ['https://claude.ai/cb'], token_endpoint_auth_method: 'none' }),
+    ) as unknown as typeof fetch;
+    const p = new ZoteusOAuthProvider({
+      mode: 'passcode',
+      passcode: 'secret-passcode',
+      accessTokenTtlSec: 60,
+      refreshTokenTtlSec: 600,
+      cimd: { enabled: true, cacheTtlSec: 3600, maxBytes: 16384, allowedRedirectSchemes: ['https'], fetchImpl },
+    });
+    const client = await p.clientsStore.getClient(url);
+    expect(client?.client_id).toBe(url);
+    expect(client?.redirect_uris).toEqual(['https://claude.ai/cb']);
+    // second lookup is cached → no second fetch
+    await p.clientsStore.getClient(url);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns undefined for an unknown opaque id when CIMD is on (DCR untouched)', async () => {
+    const p = new ZoteusOAuthProvider({
+      mode: 'passcode',
+      passcode: 'secret-passcode',
+      accessTokenTtlSec: 60,
+      refreshTokenTtlSec: 600,
+      cimd: { enabled: true, cacheTtlSec: 3600, maxBytes: 16384, allowedRedirectSchemes: ['https'] },
+    });
+    expect(await p.clientsStore.getClient('opaque-dcr-id')).toBeUndefined();
+  });
+
+  it('ignores URL client_ids when CIMD is disabled', async () => {
+    const p = new ZoteusOAuthProvider({
+      mode: 'passcode',
+      passcode: 'secret-passcode',
+      accessTokenTtlSec: 60,
+      refreshTokenTtlSec: 600,
+    });
+    expect(await p.clientsStore.getClient(url)).toBeUndefined();
+  });
+});

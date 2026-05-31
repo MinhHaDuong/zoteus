@@ -13,6 +13,7 @@ import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/
 import { renderConsentPage } from './consent.js';
 import { MemoryStore, type OAuthStore, type StoredAccess, type StoredRefresh } from './store.js';
 import { requestToken, accessToken, buildAuthorizeUrl } from './zotero-oauth.js';
+import { isClientIdMetadataUrl, fetchClientMetadata, InMemoryCimdCache } from '../lib/cimd.js';
 
 export interface ZoteroBridgeOptions {
   clientKey: string;
@@ -20,6 +21,14 @@ export interface ZoteroBridgeOptions {
   callbackUrl: string;
   readOnly: boolean;
   baseUrl?: string;
+  fetchImpl?: typeof fetch;
+}
+
+export interface CimdOptions {
+  enabled: boolean;
+  cacheTtlSec: number;
+  maxBytes: number;
+  allowedRedirectSchemes: string[];
   fetchImpl?: typeof fetch;
 }
 
@@ -31,6 +40,7 @@ export interface ZoteusOAuthProviderOptions {
   store?: OAuthStore;
   zotero?: ZoteroBridgeOptions;
   onEvent?: (event: 'token_issued' | 'auth_failed') => void;
+  cimd?: CimdOptions;
 }
 
 interface ZoteroIdentity {
@@ -96,15 +106,35 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
   private readonly store: OAuthStore;
   private readonly pending = new Map<string, PendingConsent>();
   private readonly codes = new Map<string, StoredCode>();
+  private readonly cimdCache?: InMemoryCimdCache;
 
   constructor(private readonly opts: ZoteusOAuthProviderOptions) {
     this.store = opts.store ?? new MemoryStore();
     if (opts.mode === 'passcode' && !opts.passcode) throw new Error('passcode mode requires a passcode');
     if (opts.mode === 'zotero' && !opts.zotero) throw new Error('zotero mode requires zotero bridge options');
+    if (opts.cimd?.enabled) this.cimdCache = new InMemoryCimdCache(opts.cimd.cacheTtlSec * 1000);
   }
 
   readonly clientsStore: OAuthRegisteredClientsStore = {
-    getClient: (id) => this.store.getClient(id),
+    getClient: async (id) => {
+      const known = this.store.getClient(id);
+      if (known) return known;
+      const cimd = this.opts.cimd;
+      if (cimd?.enabled && this.cimdCache && isClientIdMetadataUrl(id)) {
+        try {
+          return await this.cimdCache.getOrLoad(id, () =>
+            fetchClientMetadata(id, {
+              maxBytes: cimd.maxBytes,
+              allowedRedirectSchemes: cimd.allowedRedirectSchemes,
+              fetchImpl: cimd.fetchImpl,
+            }),
+          );
+        } catch {
+          return undefined; // invalid/unreachable CIMD doc → treat as unknown client
+        }
+      }
+      return undefined;
+    },
     registerClient: (info) => {
       const partial = info as Partial<OAuthClientInformationFull>;
       const client_id = partial.client_id ?? randomUUID();
