@@ -464,3 +464,104 @@ docker run -d --restart=always \
 **Deployment is zero-downtime within a single instance** — the old container drains
 (Zoteus's `SIGTERM` handler waits for in-flight MCP sessions, flushes the OAuth store
 and search indexes to disk, then exits 0) before Docker starts the replacement.
+
+## 15. Paid hosted tier (license gate) — optional
+
+An **opt-in** subscription gate that lets you run one paid, multi-tenant hosted instance
+while the open-source self-host path stays unchanged. It is **off by default**: with
+`ZOTEUS_LICENSE_ENABLED` unset, zero billing code runs and the binary behaves exactly as
+in §1–§14. When enabled, a subscriber pastes a [Polar](https://polar.sh) license key on a
+gate page **before** the Zotero sign-in; the key is validated with Polar, bound 1:1 to that
+Zotero account, and re-checked (cached) on every `/mcp` request and token refresh.
+
+**Prerequisites (enforced by config validation):** `ZOTEUS_OAUTH_ENABLED=true`,
+`ZOTEUS_OAUTH_MODE=zotero` (the gate fronts the per-user login), and
+`ZOTEUS_OAUTH_STORE=file` (bindings must persist). Subscribers get **write access**, so set
+`ZOTEUS_READ_ONLY=false` — see the GDPR note at the end.
+
+### Polar setup (one-time)
+
+1. Create an organization at <https://polar.sh> (a true merchant-of-record — it registers and
+   remits EU VAT, so you never touch tax/refunds/dunning).
+2. Create a product with the **License Key** benefit. Annual-first pricing (~€30/yr) dilutes
+   the MoR fee to ~3%; add an optional monthly (~€4–5) if you like.
+3. Copy the **organization ID** and an **organization access token** into `.env` as
+   `POLAR_ORGANIZATION_ID` / `POLAR_API_KEY`, and the hosted **checkout URL** as
+   `ZOTEUS_LICENSE_CHECKOUT_URL` (shown as the "Subscribe" link on the gate page).
+
+### Enable
+
+```bash
+# In .env (alongside the §4 OAuth secrets):
+ZOTEUS_LICENSE_ENABLED=true
+ZOTEUS_LICENSE_PROVIDER=polar
+POLAR_API_KEY=polar_oat_...
+POLAR_ORGANIZATION_ID=...
+ZOTEUS_LICENSE_CHECKOUT_URL=https://buy.polar.sh/...
+# Optional tuning (defaults shown):
+ZOTEUS_LICENSE_CACHE_TTL_SEC=900     # re-check cadence
+ZOTEUS_LICENSE_GRACE_SEC=86400       # serve last-good verdict this long if Polar is down
+
+docker compose up -d
+# Verify the gate is mounted: an unauthenticated POST should NOT 404.
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://$ZOTEUS_DOMAIN/license --data 'auth_id=x&license_key=y'
+# Expect 400 (mounted, stale auth_id) — NOT 404 (which would mean the gate is off).
+```
+
+After enabling, `/authorize` shows the subscription-key page before the Zotero login.
+
+### Bindings & the data volume
+
+The `licenseKey ↔ { zoteroUserId }` bindings live in **`entitlements.json`** on `/data`,
+encrypted with the **same `ZOTEUS_OAUTH_TOKEN_SECRET`** (AES-256-GCM) as `oauth-store.json`.
+`scripts/backup-store.sh` already includes it — back up that secret separately (a backup is
+useless without it).
+
+### Operator unbind (legitimate account move)
+
+There is no live unbind CLI yet. To release a key so a different Zotero account can claim it:
+
+```bash
+docker compose stop zoteus
+# entitlements.json is encrypted; the simplest reset is to remove the file (clears ALL
+# bindings — keys re-bind on next connect) or restore an edited copy. For a single user,
+# decrypt with ZOTEUS_OAUTH_TOKEN_SECRET, drop the entry, re-encrypt, copy back.
+docker compose start zoteus
+```
+
+The in-memory entitlement cache is rebuilt on restart, so a restart also clears any cached
+verdict (equivalent to `cache.invalidate`).
+
+### Rotating `POLAR_API_KEY`
+
+Set the new token in `.env` and `docker compose up -d`. No user re-auth is needed — the
+public validate endpoint is keyed by the **license key**, not your API token.
+
+### Incident steps
+
+- **Revoke a subscriber:** revoke/disable the key in Polar → access drops within
+  `ZOTEUS_LICENSE_CACHE_TTL_SEC` (≤15 min by default) on the next cache miss.
+- **Leaked Zotero key:** because subscribers have **write** access, a leaked stored key is
+  read+write. Revoke it at <https://www.zotero.org/settings/keys>, operator-unbind the
+  license (above), and have the user reconnect.
+- **Confirm no secret leakage in logs:**
+  ```bash
+  docker compose logs zoteus | grep -iE 'license|polar|api[_-]?key' || echo "no license/polar secrets in logs"
+  ```
+
+### Outage behavior
+
+If Polar is unreachable **mid-session**, a paying user keeps access until
+`ZOTEUS_LICENSE_GRACE_SEC` past their last good check (stale-while-degraded); past grace, or
+on a **first** connect that can't be verified, the gate fails **closed** (access denied with a
+friendly retry). A recovered provider is re-checked on the very next request (degraded
+verdicts are never cached).
+
+### Legal / GDPR (not optional if you host for others)
+
+Storing users' Zotero keys makes you a **data processor**. Before taking real subscribers:
+publish a **privacy policy**, a **DPA**, and a **sub-processor list** (Polar for payments, your
+host for compute, any embedding provider), and **best-effort, no-SLA Terms** (read+write scope,
+data-deletion-on-request, 72-hour breach-notification readiness). Mitigations already in place:
+minimal stored data, AES-256-GCM at rest, TLS in transit, prompt key revocation, and a
+merchant-of-record handling payments.
