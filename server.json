@@ -32,5 +32,11 @@
         }
       ]
     }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://zoteus.duckdns.org/mcp"
+    }
   ]
 }
