@@ -22,6 +22,8 @@ yarn-error.log*
 .env
 .env.*
 !.env.example
+# mcp-publisher login credentials (registry/github tokens) — never commit
+.mcpregistry_*
 
 # Zoteus runtime data (semantic index, caches)
 .zoteus/
