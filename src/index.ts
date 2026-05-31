@@ -17,7 +17,7 @@ function flag(name: string): string | undefined {
   return next && !next.startsWith('--') ? next : '';
 }
 
-const VERSION = '0.12.0';
+const VERSION = '1.0.0';
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
