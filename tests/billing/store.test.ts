@@ -54,4 +54,17 @@ describe('FileEntitlementStore (encrypted at rest)', () => {
     const s2 = await FileEntitlementStore.open(path, 'wrong-secret');
     expect(s2.getBinding('LK')).toBeUndefined();
   });
+
+  it('serializes concurrent flushes without losing a write', async () => {
+    const path = join(dir, 'entitlements.json');
+    const s = await FileEntitlementStore.open(path, 'secret-key-material');
+    s.bind('A', 1);
+    const f1 = s.flush();
+    s.bind('B', 2);
+    const f2 = s.flush();
+    await Promise.all([f1, f2]);
+    const s2 = await FileEntitlementStore.open(path, 'secret-key-material');
+    expect(s2.getBinding('A')?.zoteroUserId).toBe(1);
+    expect(s2.getBinding('B')?.zoteroUserId).toBe(2);
+  });
 });

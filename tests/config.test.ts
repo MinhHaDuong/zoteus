@@ -210,4 +210,10 @@ describe('M15 license config', () => {
   it('requires Polar creds when enabled', () => {
     expect(() => loadConfig({ ...zoteroBase, ZOTEUS_LICENSE_ENABLED: 'true' })).toThrow(/POLAR_API_KEY/);
   });
+
+  it('requires oauth enabled when license enabled', () => {
+    expect(() =>
+      loadConfig({ ZOTEUS_LICENSE_ENABLED: 'true', POLAR_API_KEY: 'p', POLAR_ORGANIZATION_ID: 'o' }),
+    ).toThrow(/ZOTEUS_OAUTH_ENABLED/);
+  });
 });

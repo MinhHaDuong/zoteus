@@ -13,7 +13,7 @@ export interface PolarClientOptions {
 }
 
 interface PolarValidateResponse {
-  status?: string; // 'granted' | 'expired' | 'revoked' | ...
+  status?: string; // Polar LicenseKeyStatus: granted | revoked | disabled (expiry surfaces as a 404)
   expires_at?: string | null;
   customer_id?: string;
 }
@@ -66,6 +66,7 @@ function mapStatus(body: PolarValidateResponse): EntitlementStatus {
     case 'expired':
       return { active: false, reason: 'expired' };
     case 'revoked':
+    case 'disabled':
       return { active: false, reason: 'revoked' };
     default:
       return { active: false, reason: 'invalid' };

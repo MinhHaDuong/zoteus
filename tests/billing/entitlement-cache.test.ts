@@ -50,4 +50,18 @@ describe('EntitlementCache', () => {
     const cache = new EntitlementCache(p, { ttlMs: 0, graceMs: 60_000 });
     expect(await cache.check(111, 'LK')).toEqual({ active: false, reason: 'unknown' });
   });
+
+  it('does NOT cache a degraded verdict — re-hits the provider on the next call after recovery', async () => {
+    let mode: 'ok' | 'throw' = 'throw';
+    const p = provider(async () => {
+      if (mode === 'throw') throw new Error('polar down');
+      return { active: true };
+    });
+    // Long TTL: if the degraded verdict were cached with at:now it would lock out for ttlMs.
+    const cache = new EntitlementCache(p, { ttlMs: 10_000, graceMs: 0 });
+    expect(await cache.check(111, 'LK')).toEqual({ active: false, reason: 'unknown' }); // first contact, down
+    mode = 'ok'; // provider recovers
+    expect((await cache.check(111, 'LK')).active).toBe(true); // must re-hit, not serve cached 'unknown'
+    expect(p.calls()).toBe(2);
+  });
 });

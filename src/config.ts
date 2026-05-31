@@ -138,6 +138,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     }
   }
   if (parsed.ZOTEUS_LICENSE_ENABLED) {
+    if (!oauthEnabled) {
+      throw new Error('ZOTEUS_LICENSE_ENABLED=true requires ZOTEUS_OAUTH_ENABLED=true (the license gate fronts the OAuth flow)');
+    }
     if (mode !== 'zotero') {
       throw new Error('ZOTEUS_LICENSE_ENABLED=true requires ZOTEUS_OAUTH_MODE=zotero (the license gate sits in front of per-user Zotero login)');
     }

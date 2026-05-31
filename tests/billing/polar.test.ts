@@ -27,6 +27,12 @@ describe('PolarClient', () => {
       expect(s.reason).toBe(reason);
     }
   });
+  it('maps disabled → inactive (revoked); expiry arrives as a 404, not a status', async () => {
+    const { client } = clientWith(() => ok({ status: 'disabled' }));
+    const s = await client.validate('LK-1');
+    expect(s.active).toBe(false);
+    expect(s.reason).toBe('revoked');
+  });
   it('maps a 404 → inactive/invalid', async () => {
     const { client } = clientWith(() => new Response('{}', { status: 404 }));
     const s = await client.validate('LK-missing');

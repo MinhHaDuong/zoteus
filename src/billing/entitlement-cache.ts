@@ -41,9 +41,9 @@ export class EntitlementCache {
       if (prev?.lastGoodAt !== undefined && now - prev.lastGoodAt <= this.opts.graceMs) {
         return prev.status; // serve last good within grace
       }
-      const degraded: EntitlementStatus = { active: false, reason: 'unknown' };
-      this.entries.set(zoteroUserId, { status: degraded, at: now, lastGoodAt: prev?.lastGoodAt });
-      return degraded;
+      // Fail closed, but do NOT cache the degraded verdict: leave any prior entry untouched so
+      // the next call is a TTL miss and re-hits the provider (never lock out a recovered user).
+      return { active: false, reason: 'unknown' };
     }
 
     this.entries.set(zoteroUserId, {

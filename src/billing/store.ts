@@ -103,14 +103,16 @@ export class FileEntitlementStore extends MemoryEntitlementStore {
   override async flush(): Promise<void> {
     if (!this.dirty) return this.writing;
     this.dirty = false;
-    const plain = Buffer.from(JSON.stringify(this.snapshot()), 'utf8');
-    const iv = randomBytes(12);
-    const cipher = createCipheriv(ALG, this.key, iv);
-    const ct = Buffer.concat([cipher.update(plain), cipher.final()]);
-    const tag = cipher.getAuthTag();
-    const payload = Buffer.concat([iv, tag, ct]).toString('base64');
-    const tmp = `${this.path}.tmp-${randomBytes(6).toString('hex')}`;
+    const prev = this.writing;
     this.writing = (async () => {
+      await prev.catch(() => {}); // serialize writes so the last rename reflects the newest state
+      const plain = Buffer.from(JSON.stringify(this.snapshot()), 'utf8');
+      const iv = randomBytes(12);
+      const cipher = createCipheriv(ALG, this.key, iv);
+      const ct = Buffer.concat([cipher.update(plain), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      const payload = Buffer.concat([iv, tag, ct]).toString('base64');
+      const tmp = `${this.path}.tmp-${randomBytes(6).toString('hex')}`;
       await mkdir(dirname(this.path), { recursive: true });
       await writeFile(tmp, payload);
       await rename(tmp, this.path);
