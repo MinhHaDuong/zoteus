@@ -7,8 +7,9 @@
 A TypeScript [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents (Claude Code, Claude Desktop, and any MCP client) complete, **safe** access to your [Zotero](https://www.zotero.org) library: search, read, write, cite, import-by-DOI, semantic search, and a scholarly-context graph — local-first and privacy-preserving.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-2ea44f.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-feature--complete-brightgreen.svg)](#-status--roadmap)
+[![Status](https://img.shields.io/badge/status-v1.0.0-brightgreen.svg)](#-status--roadmap)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-server-6E56CF.svg)](https://modelcontextprotocol.io)
+[![npm version](https://img.shields.io/npm/v/@oscardvs/zoteus.svg)](https://www.npmjs.com/package/@oscardvs/zoteus)
 [![Made for Zotero](https://img.shields.io/badge/Zotero-Web%20API%20v3%20%2B%20Local%20API-CC2936.svg)](https://www.zotero.org/support/dev/web_api/v3/basics)
 
 </div>
@@ -46,7 +47,14 @@ There are several Zotero MCP servers. Zoteus is the one that combines **everythi
 
 ## 🚀 Quickstart
 
-> Zoteus is feature-complete. The `npx`/registry commands below work once it's published to npm; until then, clone the repo and run `npm install && npm run build`, then point your client at `node /path/to/zoteus/dist/index.js`.
+| Client | How | Auth |
+|---|---|---|
+| **Claude Code** (CLI) | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` | Zotero API key (env) |
+| **Claude Desktop** | one-click DXT (`dxt/`), or `npx` in `claude_desktop_config.json` | Zotero API key |
+| **claude.ai** (web) | Add custom connector → `https://<host>/mcp` | OAuth 2.1 + PKCE (passcode or per-user Zotero login) |
+| **Self-hosted HTTP** | `zoteus --http --port 3939` (loopback) or `--host 0.0.0.0` + OAuth | bearer / OAuth |
+
+> Zoteus is published to npm — `npx -y @oscardvs/zoteus` just works. To hack on it, clone the repo and run `npm install && npm run build`, then point your client at `node /path/to/zoteus/dist/index.js`.
 
 **Claude Code**
 
@@ -101,6 +109,13 @@ The same OAuth remote also works from the **Claude Code CLI** — `claude mcp ad
 
 Full walkthrough (deploy options, TLS/tunnel, Claude Code remote, security notes): [`docs/remote-oauth.md`](./docs/remote-oauth.md).
 
+> **Connector directory (hosted):** directory-listed connectors use a single shared client app
+> via a **Client ID Metadata Document (CIMD)** or Anthropic-held credentials — not per-connection
+> Dynamic Client Registration. Zoteus advertises `client_id_metadata_document_supported` and
+> resolves a URL `client_id` to its metadata document (set `ZOTEUS_CIMD_ENABLED=true`). DCR keeps
+> working for custom (non-directory) connectors. To pursue a directory listing, prepare the hosted
+> instance (see `docs/deployment.md`) and follow `docs/distribution.md` (contact `mcp-review@anthropic.com`).
+
 > Without OAuth, `--http` stays on `127.0.0.1` and Zoteus **refuses** to bind a public interface (an unauthenticated MCP endpoint would expose your library). For a brief local-only test you can still tunnel the loopback port, but prefer the OAuth path above. Keep `ZOTEUS_ALLOW_DELETE=false` and prefer `ZOTEUS_READ_ONLY=true`.
 
 ## ⚙️ Configuration
@@ -142,7 +157,7 @@ npm run build && npm publish --access public   # npm
 
 ## 🗺️ Status & roadmap
 
-**Feature-complete + production-hardened.** 28 tools, 7 prompts, ~235 tests, CI green. The remaining step to make it installable for everyone is the public `npm publish` (the long-reserved `v1.0.0`).
+**v1.0.0 — published.** All milestones through M14 (public distribution) shipped: on npm (`npx -y @oscardvs/zoteus`), in the MCP registry, with a Claude Desktop DXT, a hardened hosted connector, and CIMD support for the claude.ai connector directory.
 
 New in **v0.12.0 (M13 — production deploy & ops):** `/healthz` + `/readyz` probes, graceful `SIGTERM`/`SIGINT` shutdown (drain sessions → flush the encrypted store + indexes), structured **secret-redacted** JSON logging, request logging + `/metrics` counters, per-IP `/mcp` rate limiting, a volume-backed persistent store, backups, a CI image publish, and an end-to-end [deploy runbook](./docs/deployment.md).
 
@@ -162,7 +177,7 @@ New in **v0.11.0 (M12):** `zotero_get_fulltext` (passage retrieval with page loc
 - [x] **11** Read+grounding path — full-text passages, tag audit, BBT export, dry-run diff
 - [x] **＋** Multi-tenant — per-user Zotero login for hosted connectors (`ZOTEUS_OAUTH_MODE=zotero`), encrypted at-rest token/key store
 - [x] **＋** Production deploy & ops — health/readiness, graceful shutdown, structured logging, metrics, `/mcp` rate limiting, backups, CI image publish (v0.12.0)
-- [ ] **next** Public distribution — `npm publish` (`v1.0.0`) + MCP registry + DXT refresh
+- [x] **12** Public distribution — npm v1.0.0, MCP registry, DXT, CIMD + claude.ai connector directory
 
 ## 🤝 Contributing
 
