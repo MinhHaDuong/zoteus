@@ -149,3 +149,65 @@ describe('M14 CIMD config', () => {
     expect(c.cimd.allowedHosts).toEqual(['claude.ai', 'example.com']);
   });
 });
+
+describe('M15 license config', () => {
+  const zoteroBase = {
+    ZOTEUS_OAUTH_ENABLED: 'true',
+    ZOTEUS_OAUTH_MODE: 'zotero',
+    ZOTEUS_OAUTH_STORE: 'file',
+    ZOTEUS_OAUTH_TOKEN_SECRET: 's',
+    ZOTEUS_PUBLIC_URL: 'https://example.test',
+    ZOTERO_OAUTH_CLIENT_KEY: 'ck',
+    ZOTERO_OAUTH_CLIENT_SECRET: 'cs',
+  };
+
+  it('defaults: license disabled, no billing surface', () => {
+    const c = loadConfig({ ZOTERO_API_KEY: 'k' });
+    expect(c.license.enabled).toBe(false);
+    expect(c.license.provider).toBe('polar');
+    expect(c.license.cacheTtlSec).toBe(900);
+    expect(c.license.graceSec).toBe(86400);
+  });
+
+  it('parses the enabled block', () => {
+    const c = loadConfig({
+      ...zoteroBase,
+      ZOTEUS_LICENSE_ENABLED: 'true',
+      POLAR_API_KEY: 'polar_oat_x',
+      POLAR_ORGANIZATION_ID: 'org_1',
+      ZOTEUS_LICENSE_CHECKOUT_URL: 'https://buy.polar.sh/x',
+      ZOTEUS_LICENSE_CACHE_TTL_SEC: '300',
+      ZOTEUS_LICENSE_GRACE_SEC: '3600',
+    });
+    expect(c.license.enabled).toBe(true);
+    expect(c.license.polarApiKey).toBe('polar_oat_x');
+    expect(c.license.polarOrganizationId).toBe('org_1');
+    expect(c.license.checkoutUrl).toBe('https://buy.polar.sh/x');
+    expect(c.license.cacheTtlSec).toBe(300);
+    expect(c.license.graceSec).toBe(3600);
+  });
+
+  it('requires zotero mode when enabled', () => {
+    expect(() =>
+      loadConfig({
+        ZOTEUS_OAUTH_ENABLED: 'true',
+        ZOTEUS_OAUTH_MODE: 'passcode',
+        ZOTEUS_OAUTH_PASSCODE: 'passcode-1234',
+        ZOTEUS_PUBLIC_URL: 'https://example.test',
+        ZOTEUS_LICENSE_ENABLED: 'true',
+        POLAR_API_KEY: 'p',
+        POLAR_ORGANIZATION_ID: 'o',
+      }),
+    ).toThrow(/ZOTEUS_OAUTH_MODE=zotero/);
+  });
+
+  it('requires store=file when enabled', () => {
+    expect(() =>
+      loadConfig({ ...zoteroBase, ZOTEUS_OAUTH_STORE: 'memory', ZOTEUS_LICENSE_ENABLED: 'true', POLAR_API_KEY: 'p', POLAR_ORGANIZATION_ID: 'o' }),
+    ).toThrow(/ZOTEUS_OAUTH_STORE=file/);
+  });
+
+  it('requires Polar creds when enabled', () => {
+    expect(() => loadConfig({ ...zoteroBase, ZOTEUS_LICENSE_ENABLED: 'true' })).toThrow(/POLAR_API_KEY/);
+  });
+});

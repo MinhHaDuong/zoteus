@@ -33,6 +33,15 @@ export interface ZoteusConfig {
     store: 'memory' | 'file';
     tokenSecret?: string;
   };
+  license: {
+    enabled: boolean;
+    provider: 'polar';
+    polarApiKey?: string;
+    polarOrganizationId?: string;
+    checkoutUrl?: string;
+    cacheTtlSec: number;
+    graceSec: number;
+  };
   cimd: {
     enabled: boolean;
     cacheTtlSec: number;
@@ -83,6 +92,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTERO_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
     ZOTEUS_OAUTH_STORE: z.enum(['memory', 'file']).default('memory'),
     ZOTEUS_OAUTH_TOKEN_SECRET: z.string().min(1).optional(),
+    ZOTEUS_LICENSE_ENABLED: bool(false),
+    ZOTEUS_LICENSE_PROVIDER: z.enum(['polar']).default('polar'),
+    POLAR_API_KEY: z.string().min(1).optional(),
+    POLAR_ORGANIZATION_ID: z.string().min(1).optional(),
+    ZOTEUS_LICENSE_CHECKOUT_URL: z.string().url().optional(),
+    ZOTEUS_LICENSE_CACHE_TTL_SEC: z.coerce.number().int().positive().default(900),
+    ZOTEUS_LICENSE_GRACE_SEC: z.coerce.number().int().nonnegative().default(86400),
     ZOTEUS_CIMD_ENABLED: bool(false),
     ZOTEUS_CIMD_CACHE_TTL_SEC: z.coerce.number().int().nonnegative().default(3600),
     ZOTEUS_CIMD_MAX_BYTES: z.coerce.number().int().positive().default(16384),
@@ -119,6 +135,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       throw new Error(
         'ZOTEUS_OAUTH_TOKEN_SECRET is required when ZOTEUS_OAUTH_STORE=file (used to encrypt stored Zotero keys at rest; generate one with: openssl rand -base64 32)',
       );
+    }
+  }
+  if (parsed.ZOTEUS_LICENSE_ENABLED) {
+    if (mode !== 'zotero') {
+      throw new Error('ZOTEUS_LICENSE_ENABLED=true requires ZOTEUS_OAUTH_MODE=zotero (the license gate sits in front of per-user Zotero login)');
+    }
+    if (store !== 'file') {
+      throw new Error('ZOTEUS_LICENSE_ENABLED=true requires ZOTEUS_OAUTH_STORE=file (license↔user bindings must persist)');
+    }
+    if (!parsed.POLAR_API_KEY || !parsed.POLAR_ORGANIZATION_ID) {
+      throw new Error('ZOTEUS_LICENSE_ENABLED=true requires POLAR_API_KEY and POLAR_ORGANIZATION_ID (create them at https://polar.sh)');
     }
   }
   const allowedHosts = (parsed.ZOTEUS_ALLOWED_HOSTS ?? '')
@@ -162,6 +189,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       zoteroClientSecret: parsed.ZOTERO_OAUTH_CLIENT_SECRET,
       store,
       tokenSecret: parsed.ZOTEUS_OAUTH_TOKEN_SECRET,
+    },
+    license: {
+      enabled: parsed.ZOTEUS_LICENSE_ENABLED,
+      provider: parsed.ZOTEUS_LICENSE_PROVIDER,
+      polarApiKey: parsed.POLAR_API_KEY,
+      polarOrganizationId: parsed.POLAR_ORGANIZATION_ID,
+      checkoutUrl: parsed.ZOTEUS_LICENSE_CHECKOUT_URL,
+      cacheTtlSec: parsed.ZOTEUS_LICENSE_CACHE_TTL_SEC,
+      graceSec: parsed.ZOTEUS_LICENSE_GRACE_SEC,
     },
     cimd: {
       enabled: parsed.ZOTEUS_CIMD_ENABLED,
