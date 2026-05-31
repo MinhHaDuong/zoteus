@@ -4,6 +4,10 @@ import { buildServer, createServer, ContextCache } from './server.js';
 import { startStdio } from './transports/stdio.js';
 import { startHttp } from './transports/http.js';
 import { buildOAuth } from './auth/router.js';
+import { FileEntitlementStore } from './billing/store.js';
+import { PolarClient } from './billing/polar.js';
+import { RateLimitedFetcher } from './api/http.js';
+import { join } from 'node:path';
 import { createLogger } from './lib/logger.js';
 import { createMetrics } from './lib/metrics.js';
 import { makeReadiness, storeCheck, zoteroPingCheck } from './lib/health.js';
@@ -28,9 +32,24 @@ async function main(): Promise<void> {
   if (httpFlag !== undefined) {
     const port = Number(flag('port') ?? process.env.PORT ?? 3939);
     const metrics = config.metricsEnabled ? createMetrics() : undefined;
-    const oauth = await buildOAuth(config, {
-      onEvent: metrics ? (e) => metrics.inc(`${e === 'token_issued' ? 'tokens_issued' : 'auth_failures'}_total`) : undefined,
-    });
+    let license: { provider: PolarClient; store: FileEntitlementStore } | undefined;
+    if (config.license.enabled) {
+      const entStore = await FileEntitlementStore.open(join(config.dataDir, 'entitlements.json'), config.oauth.tokenSecret!);
+      const provider = new PolarClient({
+        apiKey: config.license.polarApiKey!,
+        organizationId: config.license.polarOrganizationId!,
+        fetcher: new RateLimitedFetcher({ logger }),
+        logger,
+      });
+      license = { provider, store: entStore };
+    }
+    const oauth = await buildOAuth(
+      config,
+      {
+        onEvent: metrics ? (e) => metrics.inc(`${e === 'token_issued' ? 'tokens_issued' : 'auth_failures'}_total`) : undefined,
+      },
+      license,
+    );
     const host = flag('host') ?? process.env.HOST ?? (oauth ? '0.0.0.0' : '127.0.0.1');
     const cache = new ContextCache(config, ctx);
     const readiness = makeReadiness(
@@ -66,6 +85,7 @@ async function main(): Promise<void> {
       drainSessions: (ms) => lifecycle?.drainSessions(ms) ?? Promise.resolve(),
       flush: async () => {
         await oauth?.store.flush();
+        await license?.store.flush();
         await cache.flushIndexes();
       },
     });
