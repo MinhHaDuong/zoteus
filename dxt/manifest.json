@@ -25,7 +25,7 @@
       "args": ["${__dirname}/dist/index.js"],
       "env": {
         "ZOTERO_API_KEY": "${user_config.api_key}",
-        "ZOTEUS_LOCAL": "auto"
+        "ZOTEUS_LOCAL": "${user_config.local}"
       }
     }
   },
@@ -35,6 +35,13 @@
       "title": "Zotero API Key",
       "description": "Create one at https://www.zotero.org/settings/keys. Optional if you only read your local Zotero 7+ library, but required for writes, sync, and group libraries.",
       "sensitive": true,
+      "required": false
+    },
+    "local": {
+      "type": "string",
+      "title": "Zotero local API",
+      "description": "Use the Zotero 7+ desktop local API for fast, key-free reads: auto | on | off.",
+      "default": "auto",
       "required": false
     }
   },
