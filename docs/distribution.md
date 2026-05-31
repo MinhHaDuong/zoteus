@@ -55,6 +55,10 @@ npm publish              # or: npm publish --dry-run  to rehearse
 green `test` gate. Requires a repo Actions secret **`NPM_TOKEN`** — an *automation* token from
 npmjs.com with publish rights on `@oscardvs/zoteus`. Never commit the token.
 
+> Prefer **one** path per release — CI **or** manual, not both. The CI `npm-publish` step is
+> idempotent (it checks `npm view` and skips if the version already exists), so a prior manual
+> publish or a re-pushed tag won't fail the pipeline or block the `.dxt` release asset.
+
 ---
 
 ## 3. Post-publish verification (the broken-install path)

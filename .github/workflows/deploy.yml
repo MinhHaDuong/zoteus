@@ -63,7 +63,16 @@ jobs:
       - run: npm ci
       - run: npm run build
       # publishConfig.access=public + provenance from CI OIDC. prepublishOnly re-runs build.
-      - run: npm publish --provenance
+      # Idempotent: skip (don't fail) if this version is already on the registry, so a prior
+      # manual publish or a re-pushed tag still lets the `release` job attach the .dxt.
+      - name: Publish to npm (skip if version already published)
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "@oscardvs/zoteus@${VERSION}" version >/dev/null 2>&1; then
+            echo "@oscardvs/zoteus@${VERSION} already on npm — skipping publish."
+          else
+            npm publish --provenance
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
