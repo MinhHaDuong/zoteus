@@ -37,6 +37,18 @@ Turn the Streamable HTTP `/mcp` endpoint into an OAuth 2.1 + PKCE protected reso
 
 When OAuth is enabled, `--http` binds `0.0.0.0` and enables DNS-rebinding protection (`allowedHosts` = public host + `ZOTEUS_ALLOWED_HOSTS`). Put TLS (Caddy / cloudflared / Fly) in front; the proxy must forward the public `Host` header verbatim.
 
+## Connector directory / CIMD
+
+Client ID Metadata Document support — resolve a URL `client_id` to a registered client without per-connection Dynamic Client Registration. Required only to list the hosted connector in the claude.ai directory; off by default, so OSS self-host is unaffected. See [`distribution.md`](./distribution.md) §7.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ZOTEUS_CIMD_ENABLED` | `false` | Resolve a URL `client_id` via its metadata document and advertise `client_id_metadata_document_supported`. DCR keeps working in parallel. |
+| `ZOTEUS_CIMD_CACHE_TTL_SEC` | `3600` | How long a fetched CIMD document is cached (seconds). |
+| `ZOTEUS_CIMD_MAX_BYTES` | `16384` | Max bytes accepted for a CIMD document (enforced while streaming). |
+| `ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES` | `https` | Comma-separated `redirect_uri` schemes permitted in a CIMD document. |
+| `ZOTEUS_CIMD_ALLOWED_HOSTS` | — | SSRF guard: comma-separated host allowlist for `client_id` (exact or `.suffix`). Empty = any **public** host (private/loopback/link-local/reserved IPs are always rejected). Set to the directory host (e.g. `claude.ai`) for a directory connector. |
+
 ## Ops / production
 
 | Variable | Default | Purpose |

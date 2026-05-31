@@ -50,7 +50,7 @@ There are several Zotero MCP servers. Zoteus is the one that combines **everythi
 | Client | How | Auth |
 |---|---|---|
 | **Claude Code** (CLI) | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` | Zotero API key (env) |
-| **Claude Desktop** | one-click DXT (`dxt/`), or `npx` in `claude_desktop_config.json` | Zotero API key |
+| **Claude Desktop** | one-click `.dxt` (GitHub Release), or `npx` in `claude_desktop_config.json` | Zotero API key |
 | **claude.ai** (web) | Add custom connector → `https://<host>/mcp` | OAuth 2.1 + PKCE (passcode or per-user Zotero login) |
 | **Self-hosted HTTP** | `zoteus --http --port 3939` (loopback) or `--host 0.0.0.0` + OAuth | bearer / OAuth |
 
@@ -86,7 +86,7 @@ Get a Zotero API key at [zotero.org/settings/keys](https://www.zotero.org/settin
 zoteus --http --port 3939        # serves MCP at http://127.0.0.1:3939/mcp
 ```
 
-Runs on loopback for a trusted network or behind your own auth proxy. For a public, authenticated remote (claude.ai web), enable OAuth — see below. **Claude Desktop one-click:** build the [Desktop Extension](./dxt/manifest.json) (`dist/` + `dxt/manifest.json`) and double-click the `.dxt`.
+Runs on loopback for a trusted network or behind your own auth proxy. For a public, authenticated remote (claude.ai web), enable OAuth — see below. **Claude Desktop one-click:** download the prebuilt `zoteus.dxt` from the [latest GitHub Release](https://github.com/oscardvs/zoteus/releases/latest) and double-click it (maintainers: build it via [`docs/distribution.md` §5](./docs/distribution.md) — packing `dxt/` alone is not enough).
 
 **Claude.ai (web) — custom connector**
 
