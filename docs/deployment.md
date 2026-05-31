@@ -30,20 +30,37 @@ claude.ai  ──HTTPS──►  Caddy (TLS terminator)  ──HTTP──►  Zo
 
 ## 2. Pick a free-forever host
 
-**Recommended: Oracle Cloud Always Free** (ARM VM)
+**Recommended: Oracle Cloud Always Free.** The release image is multi-arch
+(`linux/amd64` + `linux/arm64`), so **either** Always-Free shape works:
+
+| Shape | Arch | Free allowance | Notes |
+|---|---|---|---|
+| `VM.Standard.A1.Flex` (Ampere) | arm64 | up to 4 OCPU / 24 GB total | **Roomier — preferred.** 1 OCPU / 6 GB is plenty. |
+| `VM.Standard.E2.1.Micro` | x86-64 | 1 OCPU / 1 GB (×2) | Works, but **1 GB is tight** — add swap + disable local embeddings (below). |
 
 - Sign up at <https://cloud.oracle.com/> (credit card required for identity
   verification; Always Free instances are never billed).
-- Provision an **Ampere A1** (ARM) VM with Ubuntu 22.04 or 24.04.
-  - Shape: `VM.Standard.A1.Flex` · 1 OCPU · 6 GB RAM (well within Always Free limits).
+- **Capacity type: On-demand** — do *not* choose preemptible (those get reclaimed).
+- OS: Ubuntu 22.04/24.04 or Oracle Linux 9 — any works; you only need Docker.
+- **On the 1 GB E2.1.Micro**, add a 2 GB swap file (free — it lives on the boot volume
+  you already have) and disable local embeddings for the first bring-up:
+  ```bash
+  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+  sudo mkswap /swapfile && sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+  ```
+  and add `ZOTEUS_EMBEDDINGS=off` to `.env` (BM25 keyword search still works; enable it
+  once you move to a roomier box).
+- **Open ports 80 and 443 in TWO places** (Oracle's #1 gotcha): the **VCN Security
+  List** (or an NSG) *ingress* rules, **and** the host firewall —
+  `sudo firewall-cmd --add-service={http,https} --permanent && sudo firewall-cmd --reload`
+  on Oracle Linux, or `sudo ufw allow 80,443/tcp` on Ubuntu.
+- Install Docker Engine + the Compose v2 plugin.
 - **Watch out for idle-reclaim:** Oracle may reclaim "idle" Always Free instances
-  after 7 days of low CPU. Mitigate by setting up a lightweight cron health-check or
-  simply noting you'll need to reprovision occasionally.
-- Install Docker + Docker Compose v2 and open ports 80 and 443 in the OCI Security List.
+  after ~7 days of low CPU; a lightweight cron health-check mitigates it.
 
-Any always-on Linux box (a Raspberry Pi on a stable IP, a cheap VPS) works equally
-well. The only hard requirement is a public IPv4/IPv6 address and ports 80/443
-reachable from the internet.
+Any always-on Linux box (a Raspberry Pi, a cheap VPS) works too. The only hard
+requirement is a public IPv4 (or IPv6) address with ports 80/443 reachable.
 
 ---
 
@@ -51,35 +68,30 @@ reachable from the internet.
 
 ### Option A — DuckDNS subdomain + Caddy (recommended)
 
-1. Create a free subdomain at <https://www.duckdns.org/> (e.g. `zoteus.duckdns.org`).
-   Point it at your VM's public IP.
+1. Create a free subdomain at <https://www.duckdns.org/> (e.g. `zoteus.duckdns.org`)
+   and set its IP to your VM's **public IPv4** (the "current ip" field on the DuckDNS
+   dashboard). Verify with `dig +short zoteus.duckdns.org`.
 2. Set `ZOTEUS_DOMAIN=zoteus.duckdns.org` in your `.env`.
-3. **DuckDNS requires the DNS-01 ACME challenge** for wildcard or purely DNS-managed
-   domains. Build a Caddy image with the `caddy-dns/duckdns` module:
+3. **Default (simplest): stock `caddy:2` + HTTP-01 — no plugin, no token.** A regular
+   `*.duckdns.org` subdomain gets a Let's Encrypt cert via the HTTP-01 challenge as long
+   as **port 80 is reachable** from the internet (see §2). The supplied
+   `docker-compose.yml` + `deploy/Caddyfile` already do exactly this — no changes needed;
+   Caddy obtains and auto-renews the cert on first start.
+
+   **Only** if port 80 is blocked (e.g. CGNAT) or you need a wildcard cert do you need
+   the **DNS-01** challenge — build a Caddy image with the `caddy-dns/duckdns` module:
 
    ```dockerfile
+   # deploy/caddy-duckdns/Dockerfile
    FROM caddy:builder AS builder
-   RUN xcaddy build \
-       --with github.com/caddy-dns/duckdns
-
+   RUN xcaddy build --with github.com/caddy-dns/duckdns
    FROM caddy:latest
    COPY --from=builder /usr/bin/caddy /usr/bin/caddy
    ```
 
-   In `docker-compose.yml` swap `image: caddy:2` for `build: ./deploy/caddy-duckdns`
-   (place the Dockerfile above there) and add `DUCKDNS_TOKEN` to the environment.
-
-   Update `deploy/Caddyfile` to use DNS-01:
-
-   ```caddyfile
-   {$ZOTEUS_DOMAIN} {
-       tls {
-           dns duckdns {$DUCKDNS_TOKEN}
-       }
-       encode zstd gzip
-       reverse_proxy zoteus:3939
-   }
-   ```
+   Then in `docker-compose.yml` swap `image: caddy:2` for `build: ./deploy/caddy-duckdns`,
+   add `DUCKDNS_TOKEN` to the environment, and set the Caddyfile TLS block to
+   `tls { dns duckdns {$DUCKDNS_TOKEN} }`.
 
 4. Keep the DuckDNS record fresh from a cron job on the VM:
 
@@ -136,6 +148,15 @@ you do not need to repeat them in `.env`.
 ---
 
 ## 5. Deploy
+
+> **Prerequisite — a published, public image.** `docker compose pull` needs
+> `ghcr.io/oscardvs/zoteus:latest` to exist and be **public**. The release CI
+> (`.github/workflows/deploy.yml`) builds + pushes it (multi-arch) when a `vX.Y.Z` tag
+> is pushed; the GHCR package must then be set to **Public** once (GitHub → your profile
+> → **Packages** → `zoteus` → **Package settings** → **Change visibility** → Public).
+> Prefer not to publish? Build on the VM instead: replace
+> `image: ghcr.io/oscardvs/zoteus:latest` with `build: .` in `docker-compose.yml` and
+> run `docker compose up -d --build` (add the §2 swap file first on a 1 GB box).
 
 ```bash
 # Clone the repo (or copy docker-compose.yml + deploy/) onto the VM.
