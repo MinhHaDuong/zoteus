@@ -78,4 +78,33 @@ describe('zotero_get_fulltext', () => {
     expect(sc.pageSource).toBe('approximate');
     expect(sc.notice).toMatch(/precise|exact|approx/i);
   });
+
+  it('skips precise_pages re-extraction (no download) for an oversized PDF — OOM guard', async () => {
+    const big = 50 * 1024 * 1024; // 50 MB > the 20 MB re-extraction cap
+    const c = ctx({
+      router: {
+        defaultLibrary: () => ({ type: 'user', id: 19552201 }),
+        getItem: vi.fn(async () => ({ key: 'PARENT01', data: { itemType: 'journalArticle', title: 'Big PDF' } })),
+        getItemChildren: vi.fn(async () => ({
+          data: [
+            {
+              key: 'ATT01',
+              data: { itemType: 'attachment', contentType: 'application/pdf', filename: 'big.pdf' },
+              links: { enclosure: { length: big } },
+            },
+          ],
+          totalResults: 1,
+          lastModifiedVersion: 1,
+        })),
+      },
+    });
+    const res = await getFulltext.handler({ item_key: 'PARENT01', query: 'Hessian', precise_pages: true }, c);
+    const sc = res.structuredContent as any;
+    expect(sc.pageSource).toBe('approximate');
+    expect(sc.notice).toMatch(/exceeds|limit|MB/i);
+    // the 42 MB-class transfer is never made — the guard fired before download
+    expect(c.web.downloadFileBytes).not.toHaveBeenCalled();
+    // grounding still works: approximate passages are still returned
+    expect(sc.passages[0].pageApprox).toBeGreaterThanOrEqual(1);
+  });
 });

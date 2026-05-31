@@ -3,7 +3,7 @@ import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry
 import { ok } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
 import { rankPassages, approxPage, type Passage } from '../features/fulltext/passages.js';
-import { extractPdfPages, locatePage } from '../features/fulltext/pdf-pages.js';
+import { extractPdfPages, locatePage, DEFAULT_PRECISE_MAX_BYTES } from '../features/fulltext/pdf-pages.js';
 
 function err(text: string): ToolHandlerResult {
   return { content: [{ type: 'text', text }], isError: true };
@@ -14,6 +14,14 @@ interface Resolved {
   parentKey?: string;
   filename?: string;
   title?: string;
+  /** Attachment file size in bytes, when known (used to skip oversized PDF re-extraction). */
+  size?: number;
+}
+
+/** Best-effort attachment file size from Zotero item metadata (links.enclosure.length). */
+function fileSize(raw: any): number | undefined {
+  const len = raw?.links?.enclosure?.length ?? raw?.data?.links?.enclosure?.length;
+  return typeof len === 'number' && len > 0 ? len : undefined;
 }
 
 async function resolveAttachment(
@@ -24,7 +32,7 @@ async function resolveAttachment(
   const item = await ctx.router.getItem(itemKey, { library });
   const d = item?.data ?? item ?? {};
   if (d.itemType === 'attachment') {
-    return { attachmentKey: itemKey, parentKey: d.parentItem, filename: d.filename, title: d.title };
+    return { attachmentKey: itemKey, parentKey: d.parentItem, filename: d.filename, title: d.title, size: fileSize(item) };
   }
   const children = await ctx.router.getItemChildren(itemKey, { library });
   const atts = (children.data ?? []).filter((c: any) => (c.data?.itemType ?? c.itemType) === 'attachment');
@@ -32,7 +40,7 @@ async function resolveAttachment(
   const chosen = pdf ?? atts[0];
   if (!chosen) return { error: `Item ${itemKey} has no attachment with full text. Attach a PDF in Zotero.` };
   const cd = chosen.data ?? chosen;
-  return { attachmentKey: chosen.key ?? cd.key, parentKey: itemKey, filename: cd.filename, title: d.title };
+  return { attachmentKey: chosen.key ?? cd.key, parentKey: itemKey, filename: cd.filename, title: d.title, size: fileSize(chosen) };
 }
 
 function parseRange(range: string): { from: number; to: number } | undefined {
@@ -101,19 +109,32 @@ const getFulltext: ToolDefinition = {
 
     // Optionally pull exact pages once (shared by passages / page_range).
     let pages: string[] | null = null;
+    let tooLarge = false;
     if (args.precise_pages) {
-      try {
-        const dl = await ctx.web.downloadFileBytes(lib, resolved.attachmentKey);
-        pages = await extractPdfPages(dl.bytes);
-      } catch {
-        pages = null;
+      // Pre-download guard: skip the (potentially large) file transfer + pdfjs extraction
+      // when the attachment is already known to exceed the safe size for this host. pdfjs can
+      // balloon to many× the file size and OOM a small instance (see DEFAULT_PRECISE_MAX_BYTES).
+      if (resolved.size && resolved.size > DEFAULT_PRECISE_MAX_BYTES) {
+        tooLarge = true;
+      } else {
+        try {
+          const dl = await ctx.web.downloadFileBytes(lib, resolved.attachmentKey);
+          // extractPdfPages self-guards on byte size too (catches unknown-size attachments).
+          pages = await extractPdfPages(dl.bytes);
+          if (!pages && dl.bytes.byteLength > DEFAULT_PRECISE_MAX_BYTES) tooLarge = true;
+        } catch {
+          pages = null;
+        }
       }
     }
     const exact = Boolean(pages && pages.length);
     const pageSource = args.precise_pages ? (exact ? 'exact' : 'approximate') : 'approximate';
+    const maxMb = Math.round(DEFAULT_PRECISE_MAX_BYTES / (1024 * 1024));
     const degradeNotice =
       args.precise_pages && !exact
-        ? ' Exact pages unavailable (PDF bytes or the optional pdfjs-dist parser missing); pageApprox is an estimate.'
+        ? tooLarge
+          ? ` Exact pages skipped: this PDF exceeds the ${maxMb} MB re-extraction limit on this instance; pageApprox is an estimate.`
+          : ' Exact pages unavailable (PDF bytes or the optional pdfjs-dist parser missing); pageApprox is an estimate.'
         : '';
 
     // --- passages mode ---

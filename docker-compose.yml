@@ -4,6 +4,12 @@ services:
   zoteus:
     image: ghcr.io/oscardvs/zoteus:latest
     restart: unless-stopped
+    # Memory backstop for small (≈1 GB) free-tier VMs: cap the container so a runaway
+    # (e.g. parsing a huge PDF) is OOM-killed + auto-restarted by Docker instead of the
+    # host kernel thrashing/killing other processes. Raise on larger hosts. The primary
+    # guard is in-app (get_fulltext refuses precise re-extraction of oversized PDFs).
+    mem_limit: 900m
+    mem_reservation: 256m
     env_file: .env
     environment:
       ZOTEUS_OAUTH_ENABLED: "true"

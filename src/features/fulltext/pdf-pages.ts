@@ -1,9 +1,23 @@
 /**
- * Optional exact-page support for W1 `precise_pages`. Lazily imports the optional
- * `pdfjs-dist` dependency; if it is absent or extraction fails, returns null so the
- * caller degrades to approximate pages. Never throws for missing-dependency reasons.
+ * Default cap on PDF bytes for exact-page re-extraction. pdfjs decodes the whole document
+ * (objects + images) into memory and can balloon to many× the file size — on a small host
+ * (e.g. a 1 GB free-tier VM) a large PDF OOM-kills the process. Above this we degrade to
+ * approximate pages; the indexed cloud full text is still returned, so grounding still works.
  */
-export async function extractPdfPages(bytes: Uint8Array): Promise<string[] | null> {
+export const DEFAULT_PRECISE_MAX_BYTES = 20 * 1024 * 1024; // 20 MB
+
+/**
+ * Optional exact-page support for W1 `precise_pages`. Lazily imports the optional
+ * `pdfjs-dist` dependency; if it is absent, the PDF is too large (`maxBytes`), or extraction
+ * fails, returns null so the caller degrades to approximate pages. Never throws.
+ */
+export async function extractPdfPages(
+  bytes: Uint8Array,
+  opts: { maxBytes?: number } = {},
+): Promise<string[] | null> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_PRECISE_MAX_BYTES;
+  // Refuse before importing/parsing: a large PDF would OOM pdfjs on a small host.
+  if (bytes.byteLength > maxBytes) return null;
   let pdfjs: any;
   try {
     // Legacy build runs under Node without a DOM.
