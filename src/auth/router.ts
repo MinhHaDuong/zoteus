@@ -5,6 +5,9 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelconte
 import type { ZoteusConfig } from '../config.js';
 import { ZoteusOAuthProvider } from './provider.js';
 import { MemoryStore, FileStore, type OAuthStore } from './store.js';
+import type { EntitlementProvider } from '../billing/entitlement.js';
+import type { EntitlementStore } from '../billing/store.js';
+import { EntitlementCache } from '../billing/entitlement-cache.js';
 
 export interface BuiltOAuth {
   provider: ZoteusOAuthProvider;
@@ -14,6 +17,11 @@ export interface BuiltOAuth {
   resourceMetadataUrl: string;
   /** Hosts accepted by DNS-rebinding protection (issuer host + any operator overrides). */
   allowedHosts: string[];
+  /** Present only when the license gate is enabled; used by the /mcp per-request check. */
+  entitlementGate?: {
+    store: EntitlementStore;
+    cache: EntitlementCache;
+  };
   mount(app: Express): void;
 }
 
@@ -21,6 +29,7 @@ export interface BuiltOAuth {
 export async function buildOAuth(
   config: ZoteusConfig,
   hooks: { onEvent?: (e: 'token_issued' | 'auth_failed') => void } = {},
+  license?: { provider: EntitlementProvider; store: EntitlementStore },
 ): Promise<BuiltOAuth | undefined> {
   if (!config.oauth.enabled) return undefined;
   if (!config.oauth.publicUrl) {
@@ -40,6 +49,14 @@ export async function buildOAuth(
     store = new MemoryStore();
   }
 
+  const licenseEnabled = config.license.enabled && config.oauth.mode === 'zotero' && Boolean(license);
+  const entitlementCache = licenseEnabled
+    ? new EntitlementCache(license!.provider, {
+        ttlMs: config.license.cacheTtlSec * 1000,
+        graceMs: config.license.graceSec * 1000,
+      })
+    : undefined;
+
   const provider = new ZoteusOAuthProvider({
     mode: config.oauth.mode,
     passcode: config.oauth.passcode,
@@ -47,6 +64,9 @@ export async function buildOAuth(
     refreshTokenTtlSec: config.oauth.refreshTokenTtlSec,
     store,
     onEvent: hooks.onEvent,
+    license: licenseEnabled
+      ? { provider: license!.provider, store: license!.store, cache: entitlementCache!, checkoutUrl: config.license.checkoutUrl }
+      : undefined,
     cimd: config.cimd.enabled
       ? {
           enabled: true,
@@ -88,6 +108,7 @@ export async function buildOAuth(
     resourceServerUrl,
     resourceMetadataUrl,
     allowedHosts,
+    entitlementGate: licenseEnabled ? { store: license!.store, cache: entitlementCache! } : undefined,
     mount(app: Express): void {
       // Register the custom consent endpoints before the SDK router. The SDK
       // sub-routers only bind their own mount paths (/authorize, /token, ...)
@@ -99,6 +120,16 @@ export async function buildOAuth(
         const passcode = typeof body.passcode === 'string' ? body.passcode : '';
         void provider.completeConsent(authId, passcode, res);
       });
+      // Paid hosted tier (M15): the license gate posts here before the Zotero login. Same
+      // limiter + urlencoded body as /consent; only mounted when the gate is enabled.
+      if (licenseEnabled) {
+        app.post('/license', consentLimiter, express.urlencoded({ extended: false }), (req, res) => {
+          const body = (req.body ?? {}) as Record<string, unknown>;
+          const authId = typeof body.auth_id === 'string' ? body.auth_id : '';
+          const licenseKey = typeof body.license_key === 'string' ? body.license_key : '';
+          void provider.completeLicense(authId, licenseKey, res);
+        });
+      }
       // Zotero OAuth 1.0a callback (zotero mode). A top-level browser redirect from zotero.org.
       if (config.oauth.mode === 'zotero') {
         app.get('/oauth/zotero/callback', consentLimiter, (req, res) => {
