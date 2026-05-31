@@ -46,3 +46,52 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  npm-publish:
+    needs: test                      # green gate guards the publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write                # OIDC → npm provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm run build
+      # publishConfig.access=public + provenance from CI OIDC. prepublishOnly re-runs build.
+      - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    needs: [test, npm-publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write                # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build
+      # Assemble a SELF-CONTAINED .dxt: manifest + icon + built dist + bundled production deps
+      # (incl. optional pdfjs-dist for feature parity). Packing dxt/ alone would omit dist/ and
+      # node_modules, yielding a broken extension — so stage a complete tree, then pack + verify.
+      - name: Build self-contained .dxt
+        run: |
+          rm -rf dxt-build && mkdir -p dxt-build
+          cp dxt/manifest.json dxt/icon.png dxt-build/
+          cp -r dist dxt-build/dist
+          cp package.json package-lock.json dxt-build/
+          (cd dxt-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
+          npx --yes @anthropic-ai/dxt pack dxt-build zoteus.dxt
+          unzip -l zoteus.dxt | grep -q ' dist/index.js$' || { echo "::error::.dxt missing dist/index.js"; exit 1; }
+          unzip -l zoteus.dxt | grep -q 'node_modules/@modelcontextprotocol/sdk/' || { echo "::error::.dxt missing bundled deps"; exit 1; }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: zoteus.dxt
+          generate_release_notes: true
