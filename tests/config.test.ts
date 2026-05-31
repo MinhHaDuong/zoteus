@@ -120,3 +120,29 @@ describe('M13 ops config', () => {
     expect(c.allowInsecureHttp).toBe(true);
   });
 });
+
+describe('M14 CIMD config', () => {
+  const base = { ZOTERO_API_KEY: 'k' };
+  it('defaults: CIMD off, 1h cache, 16KB cap, https-only redirects', () => {
+    const c = loadConfig({ ...base } as NodeJS.ProcessEnv);
+    expect(c.cimd).toEqual({
+      enabled: false,
+      cacheTtlSec: 3600,
+      maxBytes: 16384,
+      allowedRedirectSchemes: ['https'],
+    });
+  });
+  it('parses overrides', () => {
+    const c = loadConfig({
+      ...base,
+      ZOTEUS_CIMD_ENABLED: 'true',
+      ZOTEUS_CIMD_CACHE_TTL_SEC: '600',
+      ZOTEUS_CIMD_MAX_BYTES: '8192',
+      ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES: 'https,http',
+    } as NodeJS.ProcessEnv);
+    expect(c.cimd.enabled).toBe(true);
+    expect(c.cimd.cacheTtlSec).toBe(600);
+    expect(c.cimd.maxBytes).toBe(8192);
+    expect(c.cimd.allowedRedirectSchemes).toEqual(['https', 'http']);
+  });
+});

@@ -33,6 +33,12 @@ export interface ZoteusConfig {
     store: 'memory' | 'file';
     tokenSecret?: string;
   };
+  cimd: {
+    enabled: boolean;
+    cacheTtlSec: number;
+    maxBytes: number;
+    allowedRedirectSchemes: string[];
+  };
 }
 
 /** Minimum length for the consent passcode (defense-in-depth alongside /consent throttling). */
@@ -76,6 +82,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTERO_OAUTH_CLIENT_SECRET: z.string().min(1).optional(),
     ZOTEUS_OAUTH_STORE: z.enum(['memory', 'file']).default('memory'),
     ZOTEUS_OAUTH_TOKEN_SECRET: z.string().min(1).optional(),
+    ZOTEUS_CIMD_ENABLED: bool(false),
+    ZOTEUS_CIMD_CACHE_TTL_SEC: z.coerce.number().int().nonnegative().default(3600),
+    ZOTEUS_CIMD_MAX_BYTES: z.coerce.number().int().positive().default(16384),
+    ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES: z.string().default('https'),
   });
 
   const parsed = schema.parse(env);
@@ -150,6 +160,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       zoteroClientSecret: parsed.ZOTERO_OAUTH_CLIENT_SECRET,
       store,
       tokenSecret: parsed.ZOTEUS_OAUTH_TOKEN_SECRET,
+    },
+    cimd: {
+      enabled: parsed.ZOTEUS_CIMD_ENABLED,
+      cacheTtlSec: parsed.ZOTEUS_CIMD_CACHE_TTL_SEC,
+      maxBytes: parsed.ZOTEUS_CIMD_MAX_BYTES,
+      allowedRedirectSchemes: parsed.ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES.split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
     },
   };
 }
