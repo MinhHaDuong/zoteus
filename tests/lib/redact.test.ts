@@ -23,4 +23,14 @@ describe('redactArgs', () => {
     expect((out[2] as Array<Record<string, unknown>>)[0].secret).toBe('[REDACTED]');
     expect((out[3] as Record<string, unknown>).token).toBe('[REDACTED]');
   });
+  it('masks license / polar key-names (M15)', () => {
+    const [out] = redactArgs([
+      { licenseKey: 'LK-123', polarApiKey: 'polar_oat_x', license: 'L', polar_organization_id: 'org_1', userId: 7 },
+    ]) as [Record<string, unknown>];
+    expect(out.licenseKey).toBe('[REDACTED]');
+    expect(out.polarApiKey).toBe('[REDACTED]');
+    expect(out.license).toBe('[REDACTED]');
+    expect(out.polar_organization_id).toBe('[REDACTED]');
+    expect(out.userId).toBe(7);
+  });
 });
