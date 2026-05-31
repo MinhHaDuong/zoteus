@@ -343,7 +343,14 @@ describe('provider CIMD client resolution', () => {
       passcode: 'secret-passcode',
       accessTokenTtlSec: 60,
       refreshTokenTtlSec: 600,
-      cimd: { enabled: true, cacheTtlSec: 3600, maxBytes: 16384, allowedRedirectSchemes: ['https'], fetchImpl },
+      cimd: {
+        enabled: true,
+        cacheTtlSec: 3600,
+        maxBytes: 16384,
+        allowedRedirectSchemes: ['https'],
+        fetchImpl,
+        lookupImpl: async () => ['93.184.216.34'],
+      },
     });
     const client = await p.clientsStore.getClient(url);
     expect(client?.client_id).toBe(url);

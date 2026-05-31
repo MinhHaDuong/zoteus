@@ -29,7 +29,11 @@ export interface CimdOptions {
   cacheTtlSec: number;
   maxBytes: number;
   allowedRedirectSchemes: string[];
+  /** Host allowlist for CIMD client_ids (empty = any public host). */
+  allowedHosts?: string[];
   fetchImpl?: typeof fetch;
+  /** Hostname → IP resolver (test seam; defaults to DNS). */
+  lookupImpl?: (hostname: string) => Promise<string[]>;
 }
 
 export interface ZoteusOAuthProviderOptions {
@@ -126,7 +130,9 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
             fetchClientMetadata(id, {
               maxBytes: cimd.maxBytes,
               allowedRedirectSchemes: cimd.allowedRedirectSchemes,
+              allowedHosts: cimd.allowedHosts,
               fetchImpl: cimd.fetchImpl,
+              lookupImpl: cimd.lookupImpl,
             }),
           );
         } catch {

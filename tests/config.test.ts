@@ -130,6 +130,7 @@ describe('M14 CIMD config', () => {
       cacheTtlSec: 3600,
       maxBytes: 16384,
       allowedRedirectSchemes: ['https'],
+      allowedHosts: [],
     });
   });
   it('parses overrides', () => {
@@ -139,10 +140,12 @@ describe('M14 CIMD config', () => {
       ZOTEUS_CIMD_CACHE_TTL_SEC: '600',
       ZOTEUS_CIMD_MAX_BYTES: '8192',
       ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES: 'https,http',
+      ZOTEUS_CIMD_ALLOWED_HOSTS: 'claude.ai, Example.COM',
     } as NodeJS.ProcessEnv);
     expect(c.cimd.enabled).toBe(true);
     expect(c.cimd.cacheTtlSec).toBe(600);
     expect(c.cimd.maxBytes).toBe(8192);
     expect(c.cimd.allowedRedirectSchemes).toEqual(['https', 'http']);
+    expect(c.cimd.allowedHosts).toEqual(['claude.ai', 'example.com']);
   });
 });

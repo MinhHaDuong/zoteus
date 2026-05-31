@@ -53,6 +53,7 @@ export async function buildOAuth(
           cacheTtlSec: config.cimd.cacheTtlSec,
           maxBytes: config.cimd.maxBytes,
           allowedRedirectSchemes: config.cimd.allowedRedirectSchemes,
+          allowedHosts: config.cimd.allowedHosts,
         }
       : undefined,
     zotero:

@@ -38,6 +38,7 @@ export interface ZoteusConfig {
     cacheTtlSec: number;
     maxBytes: number;
     allowedRedirectSchemes: string[];
+    allowedHosts: string[];
   };
 }
 
@@ -86,6 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTEUS_CIMD_CACHE_TTL_SEC: z.coerce.number().int().nonnegative().default(3600),
     ZOTEUS_CIMD_MAX_BYTES: z.coerce.number().int().positive().default(16384),
     ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES: z.string().default('https'),
+    ZOTEUS_CIMD_ALLOWED_HOSTS: z.string().default(''),
   });
 
   const parsed = schema.parse(env);
@@ -166,6 +168,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       cacheTtlSec: parsed.ZOTEUS_CIMD_CACHE_TTL_SEC,
       maxBytes: parsed.ZOTEUS_CIMD_MAX_BYTES,
       allowedRedirectSchemes: parsed.ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES.split(',')
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean),
+      allowedHosts: parsed.ZOTEUS_CIMD_ALLOWED_HOSTS.split(',')
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean),
     },
