@@ -17,6 +17,11 @@ describe('actionableMessage', () => {
     expect(msg).toMatch(/30/);
   });
 
+  it('tells the model to go sequential when rate-limited (429/503)', () => {
+    expect(actionableMessage(429, '', hdr({ 'retry-after': '30' })).toLowerCase()).toMatch(/sequential/);
+    expect(actionableMessage(503, '', hdr({})).toLowerCase()).toMatch(/sequential/);
+  });
+
   it('names the cause for 413 and 400', () => {
     expect(actionableMessage(413, 'Too many items', hdr({}))).toMatch(/too (large|many)/i);
     expect(actionableMessage(400, 'invalid itemType', hdr({}))).toMatch(/invalid itemType/);

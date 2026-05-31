@@ -15,6 +15,12 @@ All notable changes to Zoteus are documented here. The format is based on
   (effective) and `broadened`; only previously-empty searches change behavior.
 - `zotero_fulltext`: description now states it is not a search and points to
   `zotero_search_items` (qmode=everything) for finding which items contain a term.
+- Zotero fetcher: bounded per-request time budget (~25s, overridable) with an `AbortController`,
+  so a rate-limited (429/503) retry loop or a stalled connection fails fast with an actionable
+  408 ("retry sequentially, avoid parallel batches, keep responses concise") instead of hanging
+  until the MCP connector's own per-call timeout fires. The budget is per request (not per
+  operation), so multi-request batch flows are unaffected. 429/503 messages and the server
+  `instructions` now also steer the model toward sequential calls.
 
 ## [1.0.0] — 2026-05-31
 

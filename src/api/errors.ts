@@ -44,11 +44,11 @@ export function actionableMessage(status: number, body: string, headers: Headers
       return `Missing precondition${detail}. A version (If-Unmodified-Since-Version) is required for this write.`;
     case 429: {
       const ra = headers.get('retry-after');
-      return `Rate limited by Zotero. Wait ${ra ?? 'a few'} seconds before retrying${ra ? ` (Retry-After: ${ra}s)` : ''}.`;
+      return `Rate limited by Zotero. Wait ${ra ?? 'a few'} seconds, then retry sequentially (avoid parallel batches) and keep responses concise${ra ? ` (Retry-After: ${ra}s)` : ''}.`;
     }
     case 503: {
       const ra = headers.get('retry-after');
-      return `Zotero is temporarily unavailable. Retry after ${ra ?? 'a short delay'}${ra ? ` (${ra}s)` : ''}.`;
+      return `Zotero is temporarily unavailable. Retry sequentially after ${ra ?? 'a short delay'} (avoid parallel batches)${ra ? ` (${ra}s)` : ''}.`;
     }
     default:
       return `Zotero API error ${status}${detail}.`;
