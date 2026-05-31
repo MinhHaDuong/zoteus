@@ -10,7 +10,7 @@ const fulltext: ToolDefinition = {
   name: 'zotero_fulltext',
   title: 'Attachment full-text',
   description:
-    "Read, set, or track an attachment's extracted full text. `action`: \"get\" returns the indexed text content plus indexing stats for an attachment item (only attachment items have full text; returns found:false if none); \"set\" stores extracted text for an attachment (provide `content` and the indexing counts); \"since\" returns the map of attachment keys whose full text changed after a given library `version` (useful for incremental indexing). Only attachment items support full text. \"set\" writes via the cloud Web API.",
+    "Not a search — to find which items contain a term, use `zotero_search_items` with qmode=everything. This reads, sets, or tracks one attachment's already-extracted full text by key. `action`: \"get\" returns the indexed text content plus indexing stats for an attachment item (only attachment items have full text; returns found:false if none); \"set\" stores extracted text for an attachment (provide `content` and the indexing counts); \"since\" returns the map of attachment keys whose full text changed after a given library `version` (useful for incremental indexing). Only attachment items support full text. \"set\" writes via the cloud Web API.",
   inputSchema: {
     action: z.enum(['get', 'set', 'since']),
     item_key: z.string().optional().describe('Attachment item key (get/set).'),

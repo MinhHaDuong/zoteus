@@ -4,6 +4,18 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- `zotero_search_items`: a quick search (`q`) with no pinned `qmode` that returns nothing now
+  auto-retries once in `everything` mode (notes + attachment full text) before reporting
+  absence, so "is X in my library?" checks no longer false-negative on terms that appear only
+  inside PDF text. Empty `everything` results are reported as strong-but-not-conclusive
+  (un-indexed/scanned/un-synced PDFs aren't full-text searchable). The response gains `qmode`
+  (effective) and `broadened`; only previously-empty searches change behavior.
+- `zotero_fulltext`: description now states it is not a search and points to
+  `zotero_search_items` (qmode=everything) for finding which items contain a term.
+
 ## [1.0.0] — 2026-05-31
 
 First public release: published to npm as a scoped public package, listed in the MCP

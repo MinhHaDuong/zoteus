@@ -52,4 +52,58 @@ describe('zotero_search_items', () => {
       expect.objectContaining({ itemType: 'journalArticle || book', tag: 'to-read' }),
     );
   });
+
+  it('auto-broadens to everything mode when the default search is empty', async () => {
+    const router = vi
+      .fn()
+      .mockResolvedValueOnce({ data: [], totalResults: 0, lastModifiedVersion: 10 })
+      .mockResolvedValueOnce({ data: [sampleItem], totalResults: 1, lastModifiedVersion: 10 });
+    const res = await searchItems.handler({ q: 'acados' }, ctx(router));
+    expect(router).toHaveBeenCalledTimes(2);
+    expect(router).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: 'acados', qmode: 'everything' }),
+    );
+    const items = res.structuredContent?.items as any[];
+    expect(items).toHaveLength(1);
+    expect(res.structuredContent?.broadened).toBe(true);
+    expect(res.structuredContent?.qmode).toBe('everything');
+    const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+    expect(text).toMatch(/full-text match/i);
+  });
+
+  it('does not broaden when the caller pinned a qmode', async () => {
+    const router = vi.fn(async () => ({ data: [], totalResults: 0, lastModifiedVersion: 0 }));
+    await searchItems.handler({ q: 'acados', qmode: 'titleCreatorYear' }, ctx(router));
+    expect(router).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not broaden when the default search already has hits', async () => {
+    const router = vi.fn(async () => ({ data: [sampleItem], totalResults: 1, lastModifiedVersion: 1 }));
+    await searchItems.handler({ q: 'deep learning' }, ctx(router));
+    expect(router).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not broaden when paging past the first page', async () => {
+    const router = vi.fn(async () => ({ data: [], totalResults: 0, lastModifiedVersion: 0 }));
+    await searchItems.handler({ q: 'acados', start: 25 }, ctx(router));
+    expect(router).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a not-conclusive note when an explicit everything-mode search is empty', async () => {
+    const router = vi.fn(async () => ({ data: [], totalResults: 0, lastModifiedVersion: 0 }));
+    const res = await searchItems.handler({ q: 'enrico', qmode: 'everything' }, ctx(router));
+    expect(router).toHaveBeenCalledTimes(1);
+    const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+    expect(text).toMatch(/not conclusive evidence of absence/i);
+    expect(text.toLowerCase()).toMatch(/scanned|un-synced|not-yet-synced/);
+  });
+
+  it('broadens then reports not-conclusive when full text is also empty', async () => {
+    const router = vi.fn(async () => ({ data: [], totalResults: 0, lastModifiedVersion: 0 }));
+    const res = await searchItems.handler({ q: 'enrico' }, ctx(router));
+    expect(router).toHaveBeenCalledTimes(2);
+    expect(res.structuredContent?.broadened).toBe(true);
+    const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+    expect(text).toMatch(/not conclusive evidence of absence/i);
+  });
 });

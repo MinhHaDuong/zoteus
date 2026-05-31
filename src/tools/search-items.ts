@@ -34,7 +34,7 @@ const searchItems: ToolDefinition = {
   name: 'zotero_search_items',
   title: 'Search Zotero items',
   description:
-    'Search or list items in a Zotero library or collection. Supports full-text/quick search via `q` (`qmode`: titleCreatorYear=default, everything=includes notes & attachment full text), boolean `itemType` filters (use `||` for OR, repeat or `&&` for AND, leading `-` to negate, e.g. "journalArticle || book", "-attachment"), boolean `tag` filters (same syntax; escape a literal leading hyphen as "\\-"), `since` (version) for incremental queries, `sort`/`direction`, and `limit`/`start` paging. Set `response_format` to "detailed" to also return technical fields (version, tags, collections, DOI, url) needed before chaining a write; the default "concise" returns high-signal projections (key, itemType, title, creators, date). Reads are served from the fast desktop local API when available, otherwise the cloud Web API. Returns `totalResults` so you can tell when to page rather than assuming you saw everything. For conceptual/"papers about X" queries by meaning rather than exact fields, use zotero_semantic_search instead.',
+    'Search or list items in a Zotero library or collection. Quick search via `q` (`qmode`: titleCreatorYear=default, matches title/creator/year only; everything=also searches notes & attachment full text). For presence checks ("is X in my library?"): a default-mode `q` that matches nothing auto-retries once in `everything` mode, so terms appearing only inside PDF text don\'t false-negative — pin `qmode` explicitly to disable. An empty `everything` result is reported as strong-but-not-conclusive, since un-indexed/scanned/un-synced PDFs aren\'t full-text searchable. Also supports boolean `itemType` filters (use `||` for OR, repeat or `&&` for AND, leading `-` to negate, e.g. "journalArticle || book", "-attachment"), boolean `tag` filters (same syntax; escape a literal leading hyphen as "\\-"), `since` (version) for incremental queries, `sort`/`direction`, and `limit`/`start` paging. Set `response_format` to "detailed" to also return technical fields (version, tags, collections, DOI, url) needed before chaining a write; the default "concise" returns high-signal projections (key, itemType, title, creators, date). Reads are served from the fast desktop local API when available, otherwise the cloud Web API. Returns `totalResults` so you can tell when to page rather than assuming you saw everything. For conceptual/"papers about X" queries by meaning rather than exact fields, use zotero_semantic_search instead.',
   inputSchema: {
     q: z.string().optional().describe('Quick/full-text search string.'),
     qmode: z.enum(['titleCreatorYear', 'everything']).optional(),
@@ -58,7 +58,7 @@ const searchItems: ToolDefinition = {
     const library = args.library_id
       ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
       : undefined;
-    const result = await ctx.router.searchItems({
+    const baseQuery = {
       q: args.q,
       qmode: args.qmode,
       itemType: args.itemType,
@@ -72,16 +72,53 @@ const searchItems: ToolDefinition = {
       limit: args.limit ?? 25,
       start: args.start,
       library,
-    });
+    };
+    let result = await ctx.router.searchItems(baseQuery);
+
+    // Auto-broaden on empty: the default `titleCreatorYear` mode matches only
+    // title/creator/year, so "is X in my library" checks false-negative on terms that
+    // live only inside PDF text. When the caller didn't pin a mode and the precise
+    // first page found nothing, retry once in `everything` mode (notes + attachment
+    // full text) before reporting absence. An explicit `qmode` is always respected.
+    const broadened =
+      Boolean(args.q) && args.qmode === undefined && !args.start && result.totalResults === 0;
+    if (broadened) {
+      result = await ctx.router.searchItems({ ...baseQuery, qmode: 'everything' });
+    }
+    const effectiveQmode = broadened ? 'everything' : (args.qmode ?? 'titleCreatorYear');
+
     const items = result.data.map((i) => project(i, detailed));
     const shown = items.length;
-    const summary =
-      `Found ${result.totalResults} item(s); showing ${shown}.` +
-      (result.totalResults > shown + (args.start ?? 0)
+    const more =
+      result.totalResults > shown + (args.start ?? 0)
         ? ' More available — narrow with q/tag/itemType or page with start.'
-        : '');
+        : '';
+
+    let summary: string;
+    if (broadened && result.totalResults > 0) {
+      summary =
+        `No title/author/year match; found ${result.totalResults} full-text match(es) ` +
+        `(searched notes & attachment text); showing ${shown}.` +
+        more;
+    } else if (effectiveQmode === 'everything' && result.totalResults === 0) {
+      // Calibrate the negative: full-text search only covers indexed text, so a miss
+      // is strong evidence of absence but never proof.
+      summary =
+        "No match in titles, authors, or indexed full text. Scanned, un-OCR'd, or " +
+        "not-yet-synced PDFs aren't full-text searchable, so this is strong but not " +
+        'conclusive evidence of absence.';
+    } else {
+      summary = `Found ${result.totalResults} item(s); showing ${shown}.` + more;
+    }
+
     return ok(
-      { items, totalResults: result.totalResults, libraryVersion: result.lastModifiedVersion },
+      {
+        items,
+        totalResults: result.totalResults,
+        libraryVersion: result.lastModifiedVersion,
+        qmode: effectiveQmode,
+        broadened,
+      },
       summary,
     );
   },
