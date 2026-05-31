@@ -479,6 +479,12 @@ Zotero account, and re-checked (cached) on every `/mcp` request and token refres
 `ZOTEUS_OAUTH_STORE=file` (bindings must persist). Subscribers get **write access**, so set
 `ZOTEUS_READ_ONLY=false` — see the GDPR note at the end.
 
+> **Upgrading a box that previously ran the free passcode tier?** The gate denies legacy
+> passcode-era tokens (they carry no Zotero identity), but enabling it does not otherwise
+> invalidate previously-issued tokens. When you first switch a **reused** `/data` volume to the
+> paid tier, **rotate `ZOTEUS_OAUTH_TOKEN_SECRET`** (see §11): a new secret fail-closes the
+> encrypted store to empty, forcing every user to re-authenticate through the subscription gate.
+
 ### Polar setup (one-time)
 
 1. Create an organization at <https://polar.sh> (a true merchant-of-record — it registers and

@@ -4,7 +4,7 @@ import pkceChallenge from 'pkce-challenge';
 import { ZoteusOAuthProvider } from '../../src/auth/provider.js';
 import { MemoryStore } from '../../src/auth/store.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { MemoryEntitlementStore } from '../../src/billing/store.js';
+import { MemoryEntitlementStore, type EntitlementStore } from '../../src/billing/store.js';
 import { EntitlementCache } from '../../src/billing/entitlement-cache.js';
 import type { EntitlementProvider } from '../../src/billing/entitlement.js';
 
@@ -385,9 +385,12 @@ describe('provider CIMD client resolution', () => {
   });
 });
 
-function licenseProvider(impl: EntitlementProvider['validate']): { p: ZoteusOAuthProvider; store: MemoryEntitlementStore } {
+function licenseProvider(
+  impl: EntitlementProvider['validate'],
+  opts: { store?: EntitlementStore; zoteroFetch?: typeof fetch } = {},
+): { p: ZoteusOAuthProvider; store: EntitlementStore } {
   const provider: EntitlementProvider = { validate: impl };
-  const store = new MemoryEntitlementStore();
+  const store: EntitlementStore = opts.store ?? new MemoryEntitlementStore();
   const p = new ZoteusOAuthProvider({
     mode: 'zotero',
     accessTokenTtlSec: 3600,
@@ -399,7 +402,7 @@ function licenseProvider(impl: EntitlementProvider['validate']): { p: ZoteusOAut
       callbackUrl: 'https://z.example/oauth/zotero/callback',
       readOnly: false,
       baseUrl: 'https://www.zotero.org',
-      fetchImpl: mockZoteroFetch(),
+      fetchImpl: opts.zoteroFetch ?? mockZoteroFetch(),
     },
     license: {
       provider,
@@ -475,5 +478,73 @@ describe('ZoteusOAuthProvider — license gate (zotero mode)', () => {
     expect(cb.statusCode).toBe(403);
     expect(cb.body).toContain('already linked to another Zotero account');
     expect(cb.redirectedTo).toBeUndefined();
+  });
+
+  it('denies refresh for an identity-less token when the gate is active (no legacy-token bypass)', async () => {
+    const { p } = licenseProvider(async () => ({ active: true }));
+    const client = await registerClient(p);
+    // Simulate a legacy passcode-era refresh token lingering in a reused OAuth store (no identity).
+    (p as never as { store: { setRefresh: (t: string, r: unknown) => void } }).store.setRefresh('legacy', {
+      clientId: client.client_id,
+      scopes: ['zoteus'],
+      expiresAt: Date.now() + 60_000,
+    });
+    await expect(p.exchangeRefreshToken(client, 'legacy')).rejects.toThrow(/subscription/i);
+  });
+
+  it('renders 403 (not an unhandled throw) when the key is claimed by another account mid-bind (TOCTOU)', async () => {
+    // A store that reports the key unbound at read time but throws on bind — a lost bind race.
+    const racingStore: EntitlementStore = {
+      getBinding: () => undefined,
+      bind: () => {
+        throw new Error('license key already bound to another Zotero account');
+      },
+      unbind: () => {},
+      findByUser: () => undefined,
+      flush: async () => {},
+    };
+    const { p } = licenseProvider(async () => ({ active: true }), { store: racingStore });
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    await p.completeLicense(authIdFrom(res1.body), 'LK', fakeRes());
+    const cb = fakeRes();
+    await expect(p.completeZoteroCallback('REQTOK', 'VERIF', cb)).resolves.toBeUndefined();
+    expect(cb.statusCode).toBe(403);
+    expect(cb.body).toContain('already linked to another Zotero account');
+  });
+
+  it('renders 503 (not an unhandled throw) when the Zotero request-token call fails', async () => {
+    const failingFetch = (async (url: string) => {
+      if (String(url).includes('/oauth/request')) throw new Error('zotero down');
+      return new Response('not found', { status: 404 });
+    }) as typeof fetch;
+    const { p } = licenseProvider(async () => ({ active: true }), { zoteroFetch: failingFetch });
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    const res2 = fakeRes();
+    await expect(p.completeLicense(authIdFrom(res1.body), 'LK', res2)).resolves.toBeUndefined();
+    expect(res2.statusCode).toBe(503);
+    expect(res2.redirectedTo).toBeUndefined();
+  });
+
+  it('caps repeated inactive license attempts on one auth_id (429 after the limit)', async () => {
+    const { p } = licenseProvider(async () => ({ active: false, reason: 'expired' }));
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    const authId = authIdFrom(res1.body);
+    for (let i = 0; i < 4; i++) {
+      const r = fakeRes();
+      await p.completeLicense(authId, 'LK', r);
+      expect(r.statusCode).toBe(403);
+    }
+    const fifth = fakeRes();
+    await p.completeLicense(authId, 'LK', fifth);
+    expect(fifth.statusCode).toBe(429);
+    const after = fakeRes(); // pending now deleted → stale auth_id → 400
+    await p.completeLicense(authId, 'LK', after);
+    expect(after.statusCode).toBe(400);
   });
 });

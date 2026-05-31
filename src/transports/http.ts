@@ -167,7 +167,14 @@ export async function startHttp(
             | { zoteroUserId?: number }
             | undefined;
           const zoteroUserId = extra?.zoteroUserId;
-          if (zoteroUserId === undefined) return next(); // operator/no-identity path
+          // With the gate active, every legitimately-minted token is Zotero-bound. An identity-less
+          // token (e.g. a legacy passcode-era token in a reused store) has no subscription → deny.
+          if (zoteroUserId === undefined) {
+            res
+              .status(403)
+              .json({ error: 'subscription_required', error_description: 'No active subscription is linked to this account.' });
+            return;
+          }
           const found = gate.store.findByUser?.(zoteroUserId);
           if (!found) {
             res

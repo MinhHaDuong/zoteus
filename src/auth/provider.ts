@@ -260,16 +260,30 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     }
     if (!status.active) {
       this.opts.onEvent?.('auth_failed');
+      pc.attempts += 1;
+      if (pc.attempts >= MAX_CONSENT_ATTEMPTS) {
+        this.pending.delete(authId);
+        this.sendLicense(res, 429, authId, pc.clientName, hostOf(pc.redirectUri), 'Too many attempts — please reconnect from the client.');
+        return;
+      }
       this.sendLicense(res, 403, authId, pc.clientName, hostOf(pc.redirectUri), 'Subscription not active. Subscribe or renew, then paste your key.');
       return;
     }
-    // Active → consume the pre-license entry and begin Zotero OAuth, carrying the key.
-    this.pending.delete(authId);
+    // Active → start Zotero OAuth, carrying the key. Keep the pending entry until the request
+    // token is in hand so a Zotero outage lets the user retry the same auth_id.
     const z = this.opts.zotero!;
-    const { oauthToken, oauthTokenSecret } = await requestToken(
-      { clientKey: z.clientKey, clientSecret: z.clientSecret, callbackUrl: z.callbackUrl },
-      { baseUrl: z.baseUrl, fetchImpl: z.fetchImpl },
-    );
+    let oauthToken: string;
+    let oauthTokenSecret: string;
+    try {
+      ({ oauthToken, oauthTokenSecret } = await requestToken(
+        { clientKey: z.clientKey, clientSecret: z.clientSecret, callbackUrl: z.callbackUrl },
+        { baseUrl: z.baseUrl, fetchImpl: z.fetchImpl },
+      ));
+    } catch {
+      this.sendLicense(res, 503, authId, pc.clientName, hostOf(pc.redirectUri), "Couldn't start Zotero sign-in right now. Please try again.");
+      return;
+    }
+    this.pending.delete(authId);
     this.pending.set(oauthToken, {
       clientId: pc.clientId,
       clientName: pc.clientName,
@@ -369,7 +383,13 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
         return;
       }
       if (verdict.bind) {
-        gate.store.bind(pc.licenseKey, identity.zoteroUserId);
+        try {
+          gate.store.bind(pc.licenseKey, identity.zoteroUserId);
+        } catch {
+          // Lost a bind race: another account claimed this key between the read and the write.
+          this.sendLicense(res, 403, oauthToken, pc.clientName, hostOf(pc.redirectUri), 'This subscription is already linked to another Zotero account.');
+          return;
+        }
         void gate.store.flush();
       }
     }
@@ -436,13 +456,16 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     this.store.deleteRefresh(refreshToken); // rotate
     const grantScopes = scopes && scopes.length ? scopes : r.scopes;
     const identity = identityOf(r);
-    if (this.opts.license && identity) {
+    if (this.opts.license) {
+      // With the gate active, only an entitled, Zotero-bound token may refresh. An identity-less
+      // (legacy passcode-era) token or a missing binding has no subscription behind it → deny,
+      // matching the per-request /mcp guard (fail closed, never open).
+      if (!identity) throw new InvalidGrantError('Subscription required');
       const found = this.findBindingForUser(identity.zoteroUserId);
-      if (found) {
-        const status = await this.opts.license.cache.check(identity.zoteroUserId, found.key);
-        const verdict = decide(status, found.binding, found.key, identity.zoteroUserId);
-        if (!verdict.allow) throw new InvalidGrantError('Subscription is no longer active');
-      }
+      if (!found) throw new InvalidGrantError('Subscription required');
+      const status = await this.opts.license.cache.check(identity.zoteroUserId, found.key);
+      const verdict = decide(status, found.binding, found.key, identity.zoteroUserId);
+      if (!verdict.allow) throw new InvalidGrantError('Subscription is no longer active');
     }
     return this.issueTokens(r.clientId, grantScopes, r.resource, identity);
   }

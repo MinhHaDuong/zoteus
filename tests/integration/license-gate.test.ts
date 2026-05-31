@@ -48,7 +48,7 @@ function installMockZotero(): void {
 
 const authIdFrom = (html: string): string => /name="auth_id" value="([^"]+)"/.exec(html)![1]!;
 
-async function setup(provider: EntitlementProvider): Promise<{ base: string; dir: string }> {
+async function setup(provider: EntitlementProvider): Promise<{ base: string; dir: string; oauth: NonNullable<Awaited<ReturnType<typeof buildOAuth>>> }> {
   const dir = await mkdtemp(join(tmpdir(), 'zoteus-lic-'));
   const port = await getFreePort();
   const base = `http://127.0.0.1:${port}`;
@@ -72,7 +72,7 @@ async function setup(provider: EntitlementProvider): Promise<{ base: string; dir
   const { ctx } = await buildServer(config);
   const cache = new ContextCache(config, ctx);
   httpServer = await startHttp(async (authInfo) => createServer(await cache.resolve(authInfo)), { port, host: '127.0.0.1', oauth });
-  return { base, dir };
+  return { base, dir, oauth };
 }
 
 describe('license gate (integration)', () => {
@@ -163,6 +163,23 @@ describe('license gate (integration)', () => {
         body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
       });
       expect(lapsed.status).toBe(403);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('denies /mcp for an identity-less token in the shared store (no legacy-token bypass)', async () => {
+    const provider: EntitlementProvider = { validate: async (): Promise<EntitlementStatus> => ({ active: false, reason: 'expired' }) };
+    const { base, dir, oauth } = await setup(provider);
+    try {
+      // A legacy passcode-era access token lingering in the reused OAuth store: valid bearer, no identity.
+      oauth.store.setAccess('STALE', { clientId: 'legacy', scopes: ['zoteus'], expiresAt: Math.floor(Date.now() / 1000) + 3600 });
+      const res = await realFetch(`${base}/mcp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', Authorization: 'Bearer STALE' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'c', version: '0' } } }),
+      });
+      expect(res.status).toBe(403);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
