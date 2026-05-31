@@ -110,6 +110,44 @@ describe('OAuth 1.0a flow helpers (mocked fetch)', () => {
     expect(res).toEqual({ zoteroUserId: 12345, username: 'alice', zoteroKey: 'USERKEY' });
   });
 
+  it('returns the key the Zotero Web API accepts (validates via /keys/current)', async () => {
+    // /oauth/access hands back two different candidate values; only oauth_token is a
+    // key Zotero honors. The wrong guess used to be stored, yielding "Invalid key".
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes('/oauth/access')) {
+        return form('oauth_token=GOODKEY&oauth_token_secret=BADKEY&userID=777&username=bob');
+      }
+      if (u.includes('/keys/current')) {
+        const key = (init?.headers as Record<string, string>)?.['Zotero-API-Key'];
+        return new Response(key === 'GOODKEY' ? '{"userID":777}' : 'Forbidden', {
+          status: key === 'GOODKEY' ? 200 : 403,
+        });
+      }
+      return new Response('unexpected', { status: 500 });
+    }) as typeof fetch;
+    const res = await accessToken(
+      { clientKey: 'ck', clientSecret: 'cs', oauthToken: 'REQTOK', oauthTokenSecret: 'REQSEC', verifier: 'VERIF' },
+      { baseUrl: 'https://www.zotero.org', apiBaseUrl: 'https://api.zotero.org', fetchImpl },
+    );
+    expect(res.zoteroKey).toBe('GOODKEY');
+    expect(res.zoteroUserId).toBe(777);
+  });
+
+  it('throws if neither candidate key is accepted (surfaces a bad setup loudly)', async () => {
+    const fetchImpl = (async (url: string) => {
+      const u = String(url);
+      if (u.includes('/oauth/access')) return form('oauth_token=A&oauth_token_secret=B&userID=5&username=x');
+      return new Response('Forbidden', { status: 403 }); // /keys/current rejects everything
+    }) as typeof fetch;
+    await expect(
+      accessToken(
+        { clientKey: 'ck', clientSecret: 'cs', oauthToken: 'REQTOK', oauthTokenSecret: 'REQSEC', verifier: 'V' },
+        { baseUrl: 'https://www.zotero.org', apiBaseUrl: 'https://api.zotero.org', fetchImpl },
+      ),
+    ).rejects.toThrow(/rejected by the Zotero/);
+  });
+
   it('buildAuthorizeUrl sets read-only permission params', () => {
     const url = new URL(buildAuthorizeUrl('REQTOK', { baseUrl: 'https://www.zotero.org', readOnly: true }));
     expect(url.origin + url.pathname).toBe('https://www.zotero.org/oauth/authorize');

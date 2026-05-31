@@ -1,6 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
 const ZOTERO_BASE = 'https://www.zotero.org';
+const ZOTERO_API_BASE = 'https://api.zotero.org';
 
 /** RFC 3986 percent-encoding (OAuth 1.0a §3.6): only A-Z a-z 0-9 - . _ ~ stay literal. */
 export function percentEncode(s: string): string {
@@ -63,6 +64,8 @@ function authorizationHeader(input: SignedHeaderInput): string {
 
 export interface ZoteroOAuthOptions {
   baseUrl?: string;
+  /** Web API base used to validate the issued key (defaults to https://api.zotero.org). */
+  apiBaseUrl?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -138,11 +141,36 @@ export async function accessToken(
   });
   const parsed = await postForm(url, header, fetchImpl);
   const userId = Number(parsed.userID);
-  if (!parsed.oauth_token_secret || !Number.isFinite(userId)) {
-    throw new Error('Zotero OAuth /oauth/access returned no userID/key');
+  if (!Number.isFinite(userId)) {
+    throw new Error('Zotero OAuth /oauth/access returned no numeric userID');
   }
-  // Per Zotero docs the oauth_token_secret IS the permanent Zotero API key.
-  return { zoteroUserId: userId, username: parsed.username ?? String(userId), zoteroKey: parsed.oauth_token_secret };
+  // Zotero's docs say the API key is returned as oauth_token_secret, but in practice the
+  // permanent key has been observed under oauth_token. A wrong guess silently degrades to
+  // an unusable, "Invalid key" context (users/0) — so don't trust one field blindly:
+  // return whichever candidate the Zotero Web API actually accepts (/keys/current).
+  const apiBaseUrl = opts.apiBaseUrl ?? ZOTERO_API_BASE;
+  const candidates = [parsed.oauth_token_secret, parsed.oauth_token]
+    .map((v) => (v ?? '').trim())
+    .filter((v, i, arr) => v.length > 0 && arr.indexOf(v) === i);
+  for (const key of candidates) {
+    if (await keyAccepted(apiBaseUrl, key, fetchImpl)) {
+      return { zoteroUserId: userId, username: parsed.username ?? String(userId), zoteroKey: key };
+    }
+  }
+  throw new Error('Zotero OAuth succeeded but the returned key was rejected by the Zotero Web API');
+}
+
+/** Validate a candidate key against the Web API (/keys/current → 200 when Zotero accepts it). */
+async function keyAccepted(apiBaseUrl: string, key: string, fetchImpl: typeof fetch): Promise<boolean> {
+  try {
+    const res = await fetchImpl(`${apiBaseUrl}/keys/current`, {
+      method: 'GET',
+      headers: { 'Zotero-API-Key': key, 'Zotero-API-Version': '3' },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Step 2: the URL the user's browser visits to approve. read-only scopes by default. */

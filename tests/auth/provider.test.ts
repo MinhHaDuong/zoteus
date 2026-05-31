@@ -249,6 +249,7 @@ function mockZoteroFetch(): typeof fetch {
       new Response(s, { status: 200, headers: { 'content-type': 'application/x-www-form-urlencoded' } });
     if (u.endsWith('/oauth/request')) return form('oauth_token=REQTOK&oauth_token_secret=REQSEC&oauth_callback_confirmed=true');
     if (u.endsWith('/oauth/access')) return form('oauth_token=UT&oauth_token_secret=USERKEY-77&userID=77&username=carol');
+    if (u.endsWith('/keys/current')) return new Response('{"userID":77}', { status: 200 }); // Zotero accepts the key
     return new Response('not found', { status: 404 });
   }) as typeof fetch;
 }
