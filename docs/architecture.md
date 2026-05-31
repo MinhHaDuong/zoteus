@@ -1,6 +1,6 @@
 # Architecture
 
-Zoteus is a single TypeScript (Node 18+, ESM) package with clean internal layers.
+Zoteus is a single TypeScript (Node 20+, ESM) package with clean internal layers.
 
 ```
 Transport          stdio (default) │ Streamable HTTP (--http)   (OAuth: future)
