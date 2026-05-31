@@ -10,6 +10,8 @@ export interface EntitlementStore {
   bind(key: string, zoteroUserId: number): void;
   /** Operator reset (e.g. a legitimate account move). */
   unbind(key: string): void;
+  /** Reverse lookup: the binding (and key) for a user, for ongoing entitlement re-checks. */
+  findByUser?(zoteroUserId: number): { key: string; binding: Binding } | undefined;
   flush(): Promise<void>;
 }
 
@@ -34,6 +36,10 @@ export class MemoryEntitlementStore implements EntitlementStore {
   }
   unbind(key: string): void {
     if (this.bindings.delete(key)) this.touch();
+  }
+  findByUser(zoteroUserId: number): { key: string; binding: Binding } | undefined {
+    for (const [key, binding] of this.bindings) if (binding.zoteroUserId === zoteroUserId) return { key, binding };
+    return undefined;
   }
   async flush(): Promise<void> {
     /* no-op for memory */

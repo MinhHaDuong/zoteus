@@ -4,6 +4,9 @@ import pkceChallenge from 'pkce-challenge';
 import { ZoteusOAuthProvider } from '../../src/auth/provider.js';
 import { MemoryStore } from '../../src/auth/store.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
+import { MemoryEntitlementStore } from '../../src/billing/store.js';
+import { EntitlementCache } from '../../src/billing/entitlement-cache.js';
+import type { EntitlementProvider } from '../../src/billing/entitlement.js';
 
 function makeProvider(): ZoteusOAuthProvider {
   return new ZoteusOAuthProvider({
@@ -379,5 +382,98 @@ describe('provider CIMD client resolution', () => {
       refreshTokenTtlSec: 600,
     });
     expect(await p.clientsStore.getClient(url)).toBeUndefined();
+  });
+});
+
+function licenseProvider(impl: EntitlementProvider['validate']): { p: ZoteusOAuthProvider; store: MemoryEntitlementStore } {
+  const provider: EntitlementProvider = { validate: impl };
+  const store = new MemoryEntitlementStore();
+  const p = new ZoteusOAuthProvider({
+    mode: 'zotero',
+    accessTokenTtlSec: 3600,
+    refreshTokenTtlSec: 2592000,
+    store: new MemoryStore(),
+    zotero: {
+      clientKey: 'ck',
+      clientSecret: 'cs',
+      callbackUrl: 'https://z.example/oauth/zotero/callback',
+      readOnly: false,
+      baseUrl: 'https://www.zotero.org',
+      fetchImpl: mockZoteroFetch(),
+    },
+    license: {
+      provider,
+      store,
+      cache: new EntitlementCache(provider, { ttlMs: 0, graceMs: 0 }),
+      checkoutUrl: 'https://buy.polar.sh/x',
+    },
+  });
+  return { p, store };
+}
+
+describe('ZoteusOAuthProvider — license gate (zotero mode)', () => {
+  it('authorize() renders the license page (no Zotero redirect yet)', async () => {
+    const { p } = licenseProvider(async () => ({ active: true }));
+    const c = await registerClient(p);
+    const res = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res);
+    expect(res.body).toContain('name="license_key"');
+    expect(res.redirectedTo).toBeUndefined();
+  });
+
+  it('an active key starts Zotero OAuth (302 to zotero.org)', async () => {
+    const { p } = licenseProvider(async () => ({ active: true }));
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    const res2 = fakeRes();
+    await p.completeLicense(authIdFrom(res1.body), 'LK-active', res2);
+    expect(res2.statusCode).toBe(302);
+    expect(res2.redirectedTo).toContain('zotero.org/oauth/authorize');
+  });
+
+  it('an inactive key re-renders 403 with the subscribe link, no redirect', async () => {
+    const { p } = licenseProvider(async () => ({ active: false, reason: 'expired' }));
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    const res2 = fakeRes();
+    await p.completeLicense(authIdFrom(res1.body), 'LK-expired', res2);
+    expect(res2.statusCode).toBe(403);
+    expect(res2.body).toContain('https://buy.polar.sh/x');
+    expect(res2.redirectedTo).toBeUndefined();
+  });
+
+  it('binds the key to the user on callback; refresh re-checks and rejects a lapse', async () => {
+    let active = true;
+    const { p, store } = licenseProvider(async () => (active ? { active: true } : { active: false, reason: 'expired' }));
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    await p.completeLicense(authIdFrom(res1.body), 'LK', fakeRes());
+    const cb = fakeRes();
+    await p.completeZoteroCallback('REQTOK', 'VERIF', cb);
+    expect(cb.statusCode).toBe(302);
+    expect(store.getBinding('LK')?.zoteroUserId).toBe(77); // bound on callback
+    const code = new URL(cb.redirectedTo!).searchParams.get('code')!;
+    const t1 = await p.exchangeAuthorizationCode(c, code, undefined, c.redirect_uris[0]);
+    const t2 = await p.exchangeRefreshToken(c, t1.refresh_token!); // still active → ok
+    expect(t2.access_token).toBeTruthy();
+    active = false; // subscription lapses
+    await expect(p.exchangeRefreshToken(c, t2.refresh_token!)).rejects.toThrow(/no longer active/i);
+  });
+
+  it('rejects a key already bound to another Zotero account (anti-sharing)', async () => {
+    const { p, store } = licenseProvider(async () => ({ active: true }));
+    store.bind('LK', 999); // pre-bound to a different user
+    const c = await registerClient(p);
+    const res1 = fakeRes();
+    await p.authorize(c, { redirectUri: c.redirect_uris[0], codeChallenge: 'cc', scopes: ['zoteus'] }, res1);
+    await p.completeLicense(authIdFrom(res1.body), 'LK', fakeRes());
+    const cb = fakeRes();
+    await p.completeZoteroCallback('REQTOK', 'VERIF', cb);
+    expect(cb.statusCode).toBe(403);
+    expect(cb.body).toContain('already linked to another Zotero account');
+    expect(cb.redirectedTo).toBeUndefined();
   });
 });

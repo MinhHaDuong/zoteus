@@ -15,6 +15,12 @@ describe('MemoryEntitlementStore', () => {
     s.unbind('LK');
     expect(s.getBinding('LK')).toBeUndefined();
   });
+  it('finds a binding by user (reverse lookup)', () => {
+    const s = new MemoryEntitlementStore();
+    s.bind('LK', 111);
+    expect(s.findByUser(111)).toEqual({ key: 'LK', binding: expect.objectContaining({ zoteroUserId: 111 }) });
+    expect(s.findByUser(222)).toBeUndefined();
+  });
 });
 
 describe('FileEntitlementStore (encrypted at rest)', () => {
