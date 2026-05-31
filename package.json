@@ -47,6 +47,9 @@
     "prepublishOnly": "npm run build"
   },
   "mcpName": "io.github.oscardvs/zoteus",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "citeproc": "^2.4.63",
