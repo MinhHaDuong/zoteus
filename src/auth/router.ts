@@ -47,6 +47,14 @@ export async function buildOAuth(
     refreshTokenTtlSec: config.oauth.refreshTokenTtlSec,
     store,
     onEvent: hooks.onEvent,
+    cimd: config.cimd.enabled
+      ? {
+          enabled: true,
+          cacheTtlSec: config.cimd.cacheTtlSec,
+          maxBytes: config.cimd.maxBytes,
+          allowedRedirectSchemes: config.cimd.allowedRedirectSchemes,
+        }
+      : undefined,
     zotero:
       config.oauth.mode === 'zotero'
         ? {
@@ -96,6 +104,17 @@ export async function buildOAuth(
           const oauthToken = typeof req.query.oauth_token === 'string' ? req.query.oauth_token : '';
           const verifier = typeof req.query.oauth_verifier === 'string' ? req.query.oauth_verifier : '';
           void provider.completeZoteroCallback(oauthToken, verifier, res);
+        });
+      }
+      // Advertise CIMD support (RFC: client_id_metadata_document_supported) by augmenting the
+      // SDK's authorization-server metadata. The SDK serves the document on GET; we intercept,
+      // let it produce the body, then merge the flag in. Only active when CIMD is enabled.
+      if (config.cimd.enabled) {
+        app.get('/.well-known/oauth-authorization-server', (_req, res, next) => {
+          const orig = res.json.bind(res);
+          res.json = ((body: Record<string, unknown>) =>
+            orig({ ...body, client_id_metadata_document_supported: true })) as typeof res.json;
+          next();
         });
       }
       app.use(
