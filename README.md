@@ -150,10 +150,8 @@ state. See **[docs/deployment.md](docs/deployment.md)** for the end-to-end runbo
 
 ### Publishing (maintainers)
 
-```bash
-npm run build && npm publish --access public   # npm
-# MCP registry: edit server.json, then `mcp-publisher login github && mcp-publisher publish`
-```
+Full release runbook — npm publish, MCP registry, DXT, git tag, and the claude.ai connector
+directory (CIMD): **[docs/distribution.md](docs/distribution.md)**.
 
 ## 🗺️ Status & roadmap
 
