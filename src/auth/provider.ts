@@ -11,10 +11,6 @@ import type {
 } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { renderConsentPage } from './consent.js';
-import { renderLicensePage } from './license-page.js';
-import { decide, type EntitlementProvider, type EntitlementStatus } from '../billing/entitlement.js';
-import type { EntitlementStore } from '../billing/store.js';
-import type { EntitlementCache } from '../billing/entitlement-cache.js';
 import { MemoryStore, type OAuthStore, type StoredAccess, type StoredRefresh } from './store.js';
 import { requestToken, accessToken, buildAuthorizeUrl } from './zotero-oauth.js';
 import { isClientIdMetadataUrl, fetchClientMetadata, InMemoryCimdCache } from '../lib/cimd.js';
@@ -49,12 +45,6 @@ export interface ZoteusOAuthProviderOptions {
   zotero?: ZoteroBridgeOptions;
   onEvent?: (event: 'token_issued' | 'auth_failed') => void;
   cimd?: CimdOptions;
-  license?: {
-    provider: EntitlementProvider;
-    store: EntitlementStore;
-    cache: EntitlementCache;
-    checkoutUrl?: string;
-  };
 }
 
 interface ZoteroIdentity {
@@ -75,10 +65,6 @@ interface PendingConsent {
   expiresAt: number; // ms
   /** zotero mode: secret for the request token (the pending entry is keyed by the request token). */
   zoteroReqTokenSecret?: string;
-  /** zotero+license mode: the validated subscription key, carried to the callback to bind. */
-  licenseKey?: string;
-  /** zotero+license mode: pending entries created before the license step are keyed by auth_id. */
-  preLicenseAuthId?: string;
 }
 interface StoredCode {
   clientId: string;
@@ -172,10 +158,7 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
     this.sweep();
-    if (this.opts.mode === 'zotero') {
-      if (this.opts.license) return this.authorizeWithLicense(client, params, res);
-      return this.authorizeViaZotero(client, params, res);
-    }
+    if (this.opts.mode === 'zotero') return this.authorizeViaZotero(client, params, res);
     const authId = randomUUID();
     this.pending.set(authId, {
       clientId: client.client_id,
@@ -212,100 +195,6 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
       zoteroReqTokenSecret: oauthTokenSecret,
     });
     res.redirect(302, buildAuthorizeUrl(oauthToken, { baseUrl: z.baseUrl, readOnly: z.readOnly }));
-  }
-
-  /** zotero+license: stash the pending consent under a fresh auth_id and render the gate page. */
-  private async authorizeWithLicense(
-    client: OAuthClientInformationFull,
-    params: AuthorizationParams,
-    res: Response,
-  ): Promise<void> {
-    const authId = randomUUID();
-    this.pending.set(authId, {
-      clientId: client.client_id,
-      clientName: client.client_name ?? client.client_id,
-      redirectUri: params.redirectUri,
-      codeChallenge: params.codeChallenge,
-      state: params.state,
-      scopes: params.scopes ?? [],
-      resource: params.resource?.href,
-      attempts: 0,
-      expiresAt: Date.now() + CONSENT_TTL_MS,
-      preLicenseAuthId: authId,
-    });
-    this.sendLicense(res, 200, authId, client.client_name ?? client.client_id, params.redirectUri);
-  }
-
-  /**
-   * Custom endpoint: validate the subscription key for a pending authorization. Active →
-   * start the existing Zotero OAuth (re-keying the pending entry by the Zotero request token,
-   * carrying the key). Inactive/invalid → re-render the gate with an error (never reveal
-   * whether a key exists).
-   */
-  async completeLicense(authId: string, licenseKey: string, res: Response): Promise<void> {
-    this.sweep();
-    const pc = this.pending.get(authId);
-    if (!pc || pc.expiresAt < Date.now() || !pc.preLicenseAuthId) {
-      this.pending.delete(authId);
-      this.sendLicense(res, 400, authId, 'this client', '', 'Session expired — please reconnect from the client.');
-      return;
-    }
-    const gate = this.opts.license!;
-    let status: EntitlementStatus;
-    try {
-      status = await gate.provider.validate(licenseKey);
-    } catch {
-      this.sendLicense(res, 503, authId, pc.clientName, hostOf(pc.redirectUri), "Couldn't verify your subscription right now. Please try again.");
-      return;
-    }
-    if (!status.active) {
-      this.opts.onEvent?.('auth_failed');
-      pc.attempts += 1;
-      if (pc.attempts >= MAX_CONSENT_ATTEMPTS) {
-        this.pending.delete(authId);
-        this.sendLicense(res, 429, authId, pc.clientName, hostOf(pc.redirectUri), 'Too many attempts — please reconnect from the client.');
-        return;
-      }
-      this.sendLicense(res, 403, authId, pc.clientName, hostOf(pc.redirectUri), 'Subscription not active. Subscribe or renew, then paste your key.');
-      return;
-    }
-    // Active → start Zotero OAuth, carrying the key. Keep the pending entry until the request
-    // token is in hand so a Zotero outage lets the user retry the same auth_id.
-    const z = this.opts.zotero!;
-    let oauthToken: string;
-    let oauthTokenSecret: string;
-    try {
-      ({ oauthToken, oauthTokenSecret } = await requestToken(
-        { clientKey: z.clientKey, clientSecret: z.clientSecret, callbackUrl: z.callbackUrl },
-        { baseUrl: z.baseUrl, fetchImpl: z.fetchImpl },
-      ));
-    } catch {
-      this.sendLicense(res, 503, authId, pc.clientName, hostOf(pc.redirectUri), "Couldn't start Zotero sign-in right now. Please try again.");
-      return;
-    }
-    this.pending.delete(authId);
-    this.pending.set(oauthToken, {
-      clientId: pc.clientId,
-      clientName: pc.clientName,
-      redirectUri: pc.redirectUri,
-      codeChallenge: pc.codeChallenge,
-      state: pc.state,
-      scopes: pc.scopes,
-      resource: pc.resource,
-      attempts: 0,
-      expiresAt: Date.now() + CONSENT_TTL_MS,
-      zoteroReqTokenSecret: oauthTokenSecret,
-      licenseKey,
-    });
-    res.redirect(302, buildAuthorizeUrl(oauthToken, { baseUrl: z.baseUrl, readOnly: z.readOnly }));
-  }
-
-  private sendLicense(res: Response, status: number, authId: string, clientName: string, redirectUri: string, error?: string): void {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    res.status(status).send(
-      renderLicensePage({ authId, clientName, redirectHost: hostOf(redirectUri), error, checkoutUrl: this.opts.license?.checkoutUrl }),
-    );
   }
 
   /**
@@ -366,32 +255,6 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     } catch {
       this.sendConsent(res, 502, oauthToken, pc.clientName, hostOf(pc.redirectUri), 'Could not complete Zotero sign-in. Please try again.');
       return;
-    }
-    if (this.opts.license && pc.licenseKey) {
-      const gate = this.opts.license;
-      const binding = gate.store.getBinding(pc.licenseKey);
-      const status = await gate.provider
-        .validate(pc.licenseKey)
-        .catch((): EntitlementStatus => ({ active: false, reason: 'unknown' }));
-      const verdict = decide(status, binding, pc.licenseKey, identity.zoteroUserId);
-      if (!verdict.allow) {
-        const msg =
-          verdict.reason === 'bound_to_other'
-            ? 'This subscription is already linked to another Zotero account.'
-            : 'Subscription not active. Subscribe or renew, then reconnect.';
-        this.sendLicense(res, 403, oauthToken, pc.clientName, hostOf(pc.redirectUri), msg);
-        return;
-      }
-      if (verdict.bind) {
-        try {
-          gate.store.bind(pc.licenseKey, identity.zoteroUserId);
-        } catch {
-          // Lost a bind race: another account claimed this key between the read and the write.
-          this.sendLicense(res, 403, oauthToken, pc.clientName, hostOf(pc.redirectUri), 'This subscription is already linked to another Zotero account.');
-          return;
-        }
-        void gate.store.flush();
-      }
     }
     const code = this.mintCode(pc, identity);
     this.redirectWithCode(res, pc, code);
@@ -456,17 +319,6 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     this.store.deleteRefresh(refreshToken); // rotate
     const grantScopes = scopes && scopes.length ? scopes : r.scopes;
     const identity = identityOf(r);
-    if (this.opts.license) {
-      // With the gate active, only an entitled, Zotero-bound token may refresh. An identity-less
-      // (legacy passcode-era) token or a missing binding has no subscription behind it → deny,
-      // matching the per-request /mcp guard (fail closed, never open).
-      if (!identity) throw new InvalidGrantError('Subscription required');
-      const found = this.findBindingForUser(identity.zoteroUserId);
-      if (!found) throw new InvalidGrantError('Subscription required');
-      const status = await this.opts.license.cache.check(identity.zoteroUserId, found.key);
-      const verdict = decide(status, found.binding, found.key, identity.zoteroUserId);
-      if (!verdict.allow) throw new InvalidGrantError('Subscription is no longer active');
-    }
     return this.issueTokens(r.clientId, grantScopes, r.resource, identity);
   }
 
@@ -557,11 +409,6 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
       this.store.deleteClient(ids[i]!);
       i += 1;
     }
-  }
-
-  /** Find the license binding (and key) for a user, for ongoing re-checks. */
-  private findBindingForUser(zoteroUserId: number) {
-    return this.opts.license?.store.findByUser?.(zoteroUserId);
   }
 }
 

@@ -12,7 +12,6 @@ import { requestLogger } from '../lib/request-logger.js';
 import { liveness, type Readiness } from '../lib/health.js';
 import type { Metrics } from '../lib/metrics.js';
 import type { BuiltOAuth } from '../auth/router.js';
-import { decide } from '../billing/entitlement.js';
 
 /**
  * A factory that produces a fresh McpServer per MCP session. Receives the session's
@@ -157,45 +156,6 @@ export async function startHttp(
     ? [requireBearerAuth({ verifier: opts.oauth.provider, resourceMetadataUrl: opts.oauth.resourceMetadataUrl })]
     : [];
 
-  // When the license gate is on, every authenticated /mcp request re-checks entitlement.
-  // Authenticated-but-inactive → 403 (distinct from the 401 the bearer guard returns).
-  const entitlementGuard: express.RequestHandler[] = opts.oauth?.entitlementGate
-    ? [
-        async (req, res, next) => {
-          const gate = opts.oauth!.entitlementGate!;
-          const extra = (req as express.Request & { auth?: AuthInfo }).auth?.extra as
-            | { zoteroUserId?: number }
-            | undefined;
-          const zoteroUserId = extra?.zoteroUserId;
-          // With the gate active, every legitimately-minted token is Zotero-bound. An identity-less
-          // token (e.g. a legacy passcode-era token in a reused store) has no subscription → deny.
-          if (zoteroUserId === undefined) {
-            res
-              .status(403)
-              .json({ error: 'subscription_required', error_description: 'No active subscription is linked to this account.' });
-            return;
-          }
-          const found = gate.store.findByUser?.(zoteroUserId);
-          if (!found) {
-            res
-              .status(403)
-              .json({ error: 'subscription_required', error_description: 'No active subscription is linked to this account.' });
-            return;
-          }
-          const status = await gate.cache.check(zoteroUserId, found.key);
-          const verdict = decide(status, found.binding, found.key, zoteroUserId);
-          if (!verdict.allow) {
-            opts.metrics?.inc('entitlement_denied_total');
-            res
-              .status(403)
-              .json({ error: 'subscription_inactive', error_description: 'Your subscription is not active. Renew to continue.' });
-            return;
-          }
-          next();
-        },
-      ]
-    : [];
-
   const wrap = (req: express.Request, res: express.Response): void => {
     route(req, res).catch((err) => {
       opts.metrics?.inc('http_errors_total');
@@ -231,9 +191,9 @@ export async function startHttp(
   // CORS for web-based MCP clients + OPTIONS preflight (before bearer auth so
   // preflight is not rejected). The SDK already CORS-enables its own routes.
   app.use(path, cors());
-  app.post(path, ...limiter, ...guards, ...entitlementGuard, express.json({ limit: '8mb' }), wrap);
-  app.get(path, ...limiter, ...guards, ...entitlementGuard, wrap);
-  app.delete(path, ...limiter, ...guards, ...entitlementGuard, wrap);
+  app.post(path, ...limiter, ...guards, express.json({ limit: '8mb' }), wrap);
+  app.get(path, ...limiter, ...guards, wrap);
+  app.delete(path, ...limiter, ...guards, wrap);
   app.use((_req, res) => res.status(404).json({ error: `Not found. MCP endpoint is ${path}.` }));
 
   const httpServer = await new Promise<http.Server>((resolve) => {

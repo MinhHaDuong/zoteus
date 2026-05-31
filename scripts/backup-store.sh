@@ -12,7 +12,6 @@ ARCHIVE="$DEST/zoteus-$STAMP.tar.gz"
 
 tar -czf "$ARCHIVE" -C "$DATA_DIR" \
   oauth-store.json \
-  $(cd "$DATA_DIR" && ls entitlements.json 2>/dev/null || true) \
   $(cd "$DATA_DIR" && ls search-index*.json 2>/dev/null || true)
 
 echo "wrote $ARCHIVE"
