@@ -144,32 +144,52 @@ export async function accessToken(
   if (!Number.isFinite(userId)) {
     throw new Error('Zotero OAuth /oauth/access returned no numeric userID');
   }
-  // Zotero's docs say the API key is returned as oauth_token_secret, but in practice the
-  // permanent key has been observed under oauth_token. A wrong guess silently degrades to
-  // an unusable, "Invalid key" context (users/0) — so don't trust one field blindly:
-  // return whichever candidate the Zotero Web API actually accepts (/keys/current).
+  // Per Zotero's OAuth docs, the access response's oauth_token and oauth_token_secret are the
+  // same value: the permanent Zotero API key. We verify it against the Web API, but a
+  // *non-definitive* failure (timeout, 429/5xx throttle) must NOT hard-fail a valid key — only
+  // a definitive 401/403 means the key is bad. Otherwise fall back to the documented field so a
+  // momentary Zotero throttle can't turn a good key into a 502.
   const apiBaseUrl = opts.apiBaseUrl ?? ZOTERO_API_BASE;
+  const documentedKey = (parsed.oauth_token_secret ?? '').trim() || (parsed.oauth_token ?? '').trim();
   const candidates = [parsed.oauth_token_secret, parsed.oauth_token]
     .map((v) => (v ?? '').trim())
     .filter((v, i, arr) => v.length > 0 && arr.indexOf(v) === i);
+  if (candidates.length === 0) {
+    throw new Error('Zotero OAuth /oauth/access returned no key');
+  }
+  let sawTransient = false;
   for (const key of candidates) {
-    if (await keyAccepted(apiBaseUrl, key, fetchImpl)) {
+    const verdict = await keyVerdict(apiBaseUrl, key, fetchImpl);
+    if (verdict === 'valid') {
       return { zoteroUserId: userId, username: parsed.username ?? String(userId), zoteroKey: key };
     }
+    if (verdict === 'unknown') sawTransient = true;
+  }
+  // Nothing confirmed valid. If a check was inconclusive (throttle/network), degrade to the
+  // documented key rather than failing the user; only throw when Zotero *definitively* rejected
+  // every candidate (so a genuinely broken setup still surfaces loudly).
+  if (sawTransient) {
+    return { zoteroUserId: userId, username: parsed.username ?? String(userId), zoteroKey: documentedKey };
   }
   throw new Error('Zotero OAuth succeeded but the returned key was rejected by the Zotero Web API');
 }
 
-/** Validate a candidate key against the Web API (/keys/current → 200 when Zotero accepts it). */
-async function keyAccepted(apiBaseUrl: string, key: string, fetchImpl: typeof fetch): Promise<boolean> {
+/** Probe a candidate key: 'valid' (200), 'invalid' (definitive 401/403), or 'unknown' (transient). */
+async function keyVerdict(
+  apiBaseUrl: string,
+  key: string,
+  fetchImpl: typeof fetch,
+): Promise<'valid' | 'invalid' | 'unknown'> {
   try {
     const res = await fetchImpl(`${apiBaseUrl}/keys/current`, {
       method: 'GET',
       headers: { 'Zotero-API-Key': key, 'Zotero-API-Version': '3' },
     });
-    return res.ok;
+    if (res.ok) return 'valid';
+    if (res.status === 401 || res.status === 403) return 'invalid';
+    return 'unknown';
   } catch {
-    return false;
+    return 'unknown';
   }
 }
 
@@ -181,7 +201,9 @@ export function buildAuthorizeUrl(
   const baseUrl = opts.baseUrl ?? ZOTERO_BASE;
   const url = new URL(`${baseUrl}/oauth/authorize`);
   url.searchParams.set('oauth_token', oauthToken);
-  url.searchParams.set('identity', '1');
+  // NB: do NOT set `identity=1` — that puts Zotero in identity-only mode and returns the
+  // literal sentinel "identity" instead of a real API key (every request then 403s → users/0).
+  // The userID/username come back in the /oauth/access response regardless of this param.
   url.searchParams.set('name', opts.name ?? 'Zoteus');
   url.searchParams.set('library_access', '1');
   // notes are readable library content; visibility is always granted. write_access /

@@ -148,10 +148,27 @@ describe('OAuth 1.0a flow helpers (mocked fetch)', () => {
     ).rejects.toThrow(/rejected by the Zotero/);
   });
 
+  it('falls back to the documented key on a transient /keys/current failure (no hard 502)', async () => {
+    // Zotero throttles the validation call (429). The key is fine; we must not reject it.
+    const fetchImpl = (async (url: string) => {
+      const u = String(url);
+      if (u.includes('/oauth/access')) return form('oauth_token=K&oauth_token_secret=K&userID=9&username=z');
+      return new Response('Too Many Requests', { status: 429 }); // /keys/current throttled
+    }) as typeof fetch;
+    const res = await accessToken(
+      { clientKey: 'ck', clientSecret: 'cs', oauthToken: 'REQTOK', oauthTokenSecret: 'REQSEC', verifier: 'V' },
+      { baseUrl: 'https://www.zotero.org', apiBaseUrl: 'https://api.zotero.org', fetchImpl },
+    );
+    expect(res).toEqual({ zoteroUserId: 9, username: 'z', zoteroKey: 'K' });
+  });
+
   it('buildAuthorizeUrl sets read-only permission params', () => {
     const url = new URL(buildAuthorizeUrl('REQTOK', { baseUrl: 'https://www.zotero.org', readOnly: true }));
     expect(url.origin + url.pathname).toBe('https://www.zotero.org/oauth/authorize');
     expect(url.searchParams.get('oauth_token')).toBe('REQTOK');
+    // Regression: `identity=1` puts Zotero in identity-only mode (returns the "identity"
+    // sentinel, never a real key). It must never be set.
+    expect(url.searchParams.has('identity')).toBe(false);
     expect(url.searchParams.get('library_access')).toBe('1');
     // notes stay readable even read-only (write_access/all_groups are the mutation gates)
     expect(url.searchParams.get('notes_access')).toBe('1');
