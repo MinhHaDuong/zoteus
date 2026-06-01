@@ -2,185 +2,98 @@
 
 # ⚡ Zoteus
 
-### The everything **Zotero MCP server** — your research library, fully wired into Claude.
+### Your Zotero library, inside every AI conversation — with real citations, not hallucinations.
 
-A TypeScript [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents (Claude Code, Claude Desktop, and any MCP client) complete, **safe** access to your [Zotero](https://www.zotero.org) library: search, read, write, cite, import-by-DOI, semantic search, and a scholarly-context graph — local-first and privacy-preserving.
+The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https://modelcontextprotocol.io) client complete, **safe** access to your [Zotero](https://www.zotero.org) library — search papers, add by DOI, format bibliographies in ~2,800 styles, run semantic search over your own PDFs, and ground every answer in a source you actually own. **Local-first. Private. One command.**
 
+[![npm](https://img.shields.io/npm/v/@oscardvs/zoteus.svg?color=2ea44f)](https://www.npmjs.com/package/@oscardvs/zoteus)
+[![npm downloads](https://img.shields.io/npm/dm/@oscardvs/zoteus.svg)](https://www.npmjs.com/package/@oscardvs/zoteus)
 [![License: MIT](https://img.shields.io/badge/License-MIT-2ea44f.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-v1.0.0-brightgreen.svg)](#-status--roadmap)
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-server-6E56CF.svg)](https://modelcontextprotocol.io)
-[![npm version](https://img.shields.io/npm/v/@oscardvs/zoteus.svg)](https://www.npmjs.com/package/@oscardvs/zoteus)
-[![Made for Zotero](https://img.shields.io/badge/Zotero-Web%20API%20v3%20%2B%20Local%20API-CC2936.svg)](https://www.zotero.org/support/dev/web_api/v3/basics)
+[![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-6E56CF.svg)](https://registry.modelcontextprotocol.io)
+
+<!-- TODO(launch): swap to the demo GIF once recorded → ![Zoteus demo — ask Claude to find papers in your Zotero library and cite them](https://zoteus.com/demo.gif) -->
+[![Zoteus — your Zotero library, inside every AI conversation](https://zoteus.com/og/home/image.png)](https://zoteus.com)
+
+```bash
+npx -y @oscardvs/zoteus
+```
 
 </div>
 
-> **Keywords:** Zotero MCP server · Zotero Model Context Protocol · Zotero for Claude · Zotero AI · reference manager MCP · citations MCP · bibliography · Zotero Web API v3 · Zotero local API.
+---
+
+## Install in 30 seconds
+
+| Client | Command |
+|---|---|
+| **Claude Code** | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` |
+| **Cursor / VS Code / Claude Desktop / Codex / Zed…** | `npx add-mcp @oscardvs/zoteus` |
+| **Claude Desktop (one-click)** | download `zoteus.mcpb` from the [latest release](https://github.com/oscardvs/zoteus/releases/latest) → double-click |
+| **claude.ai (web)** | Add custom connector → your hosted URL (OAuth) |
+
+Add your cloud key for writes/sync/groups (optional — reads work key-free against the desktop app):
+
+```bash
+claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscardvs/zoteus
+```
+
+> Get a key at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). For key-free local reads, enable **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** in the desktop app.
 
 ---
 
 ## Why Zoteus?
 
-There are several Zotero MCP servers. Zoteus is the one that combines **everything** — and adds the parts everyone else skips.
+There are several Zotero MCP servers now. Zoteus is the one that does **everything** — and adds the parts everyone else skips. The difference that matters: **Zoteus treats your library as the source of truth, not a search index.** When you ask Claude to "draft a methods paragraph citing the five most relevant papers in my collection," it runs that against *your verified, already-curated references* — no invented citations, no Python stack, nothing leaves your machine.
 
-| Capability | Most existing servers | **Zoteus** |
-|---|:---:|:---:|
-| Complete Web API v3 coverage (items, collections, tags, search, files, sync, groups, schema) | partial | ✅ |
-| **Local-first** reads + full PDFs (no API key needed) | some | ✅ auto-detected |
-| **Safe transactional writes** (versioned, 412-retry, reversible trash, gated delete) | rare / hacky | ✅ |
-| **Citation pipeline** — add by DOI/ISBN/PMID/arXiv + format in ~2,800 CSL styles | export-only | ✅ |
-| **Hybrid semantic search** — BM25 + *local* embeddings, page-cited | rare, often cloud-only | ✅ local-default |
-| **Scholarly-context graph** — OpenAlex / Crossref / Semantic Scholar | almost none | ✅ |
-| **MCP Resources + Prompts** (not just tools) | nobody | ✅ |
-| **Code-execution pattern** ([Anthropic](https://www.anthropic.com/engineering/code-execution-with-mcp)) | nobody | ✅ |
-| Tests, CI, releases, MCP Inspector | few | ✅ |
+| | **Zoteus** | Other Zotero MCP servers | Web AI (Elicit/SciSpace) |
+|---|:---:|:---:|:---:|
+| Operates on **your own** library | ✅ | ✅ (varies) | ❌ (web-wide) |
+| Complete Web API v3 **+** desktop local API | ✅ | partial | n/a |
+| **Safe** transactional writes (reversible, gated) | ✅ | rare | ❌ |
+| CSL bibliographies (~2,800 styles) | ✅ | rare | ❌ |
+| Local hybrid semantic search over PDFs | ✅ | some (cloud) | varies |
+| No Python — TypeScript, one `npx` | ✅ | varies | n/a |
+| MCP Resources + Prompts + code-execution | ✅ | ❌ | n/a |
+| Local-first / private · Open-source (MIT) | ✅ | varies | ❌ |
 
-## ✨ Highlights
+## What you can do
 
-- **Local + cloud, automatically.** Zoteus probes your running Zotero desktop app and uses its fast, key-free [local API](https://www.zotero.org/support/dev/web_api/v3/basics) for reads (full PDFs, real saved-search results), falling back to the cloud [Web API v3](https://www.zotero.org/support/dev/web_api/v3/basics) for writes, sync, and group libraries.
-- **Safe by default.** Reversible trash is the default; permanent deletion is opt-in and confirmation-gated. Optimistic-locking conflicts, rate limits, 50-item batch chunking, and partial-success parsing are handled *in the client* so the model never has to.
-- **Cite anything.** Add a paper by DOI/ISBN/PMID/arXiv and format a bibliography in any CSL style — no account required for the import → format path.
-- **Find anything.** Hybrid keyword + semantic search across metadata, full text, and annotations, with results that cite the page.
-- **Ground claims with page locators.** `zotero_get_fulltext` retrieves relevant passages from a PDF with character offsets, nearest section heading, and a page number (approximate by default; exact with the optional `pdfjs-dist` dependency).
-- **Audit your tag vocabulary.** `zotero_tag_audit` checks all library tags against a controlled vocabulary with required tiers, flags off-taxonomy and auto-applied tags, and reports items missing a required-tier tag — optionally scoped per collection.
-- **Better BibTeX export.** `zotero_export` now supports `format:"better-biblatex"` (applies your BBT citation-key and export options; requires desktop Zotero + the Better BibTeX plugin; degrades to built-in `biblatex` otherwise).
-- **Built for agents.** ~28 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, with structured outputs and a generated TypeScript tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
+- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search across metadata, full text, and annotations, returned **with the page number**.
+- **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
+- **Add a paper by identifier.** Drop in a DOI/ISBN/PMID/arXiv id and Zoteus fetches the metadata and files it — no account needed for the import → format path.
+- **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
+- **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, nearest heading, and a page locator.
+- **Follow the scholarship.** A scholarly-context graph over OpenAlex / Crossref / Semantic Scholar.
+- **Built for agents.** ~28 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, structured outputs, and a generated tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
 
-## 🚀 Quickstart
+## How it works
 
-| Client | How | Auth |
-|---|---|---|
-| **Claude Code** (CLI) | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` | Zotero API key (env) |
-| **Claude Desktop** | one-click `.dxt` (GitHub Release), or `npx` in `claude_desktop_config.json` | Zotero API key |
-| **claude.ai** (web) | Add custom connector → `https://<host>/mcp` | OAuth 2.1 + PKCE (passcode or per-user Zotero login) |
-| **Self-hosted HTTP** | `zoteus --http --port 3939` (loopback) or `--host 0.0.0.0` + OAuth | bearer / OAuth |
+1. **Install** — one `npx` command (or the one-click `.mcpb`).
+2. **Connect** — paste your Zotero API key (or just run the desktop app for key-free local reads).
+3. **Ask** — your AI can now search, cite, add, and organize your library.
 
-> Zoteus is published to npm — `npx -y @oscardvs/zoteus` just works. To hack on it, clone the repo and run `npm install && npm run build`, then point your client at `node /path/to/zoteus/dist/index.js`.
+Zoteus auto-detects your running Zotero desktop app and uses its fast, key-free **local API** for reads (full PDFs, real saved-search results), falling back to the cloud **Web API v3** for writes, sync, and group libraries.
 
-**Claude Code**
-
-```bash
-claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus
-# add your cloud key for writes/sync/groups:
-claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscardvs/zoteus
-```
-
-**Claude Desktop** (`claude_desktop_config.json`)
-
-```json
-{
-  "mcpServers": {
-    "zoteus": {
-      "command": "npx",
-      "args": ["-y", "@oscardvs/zoteus"],
-      "env": { "ZOTERO_API_KEY": "xxxxx" }
-    }
-  }
-}
-```
-
-Get a Zotero API key at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). For local-API reads, enable **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** in the desktop app.
-
-**Remote / team (Streamable HTTP)**
-
-```bash
-zoteus --http --port 3939        # serves MCP at http://127.0.0.1:3939/mcp
-```
-
-Runs on loopback for a trusted network or behind your own auth proxy. For a public, authenticated remote (claude.ai web), enable OAuth — see below. **Claude Desktop one-click:** download the prebuilt `zoteus.dxt` from the [latest GitHub Release](https://github.com/oscardvs/zoteus/releases/latest) and double-click it (maintainers: build it via [`docs/distribution.md` §5](./docs/distribution.md) — packing `dxt/` alone is not enough).
-
-**Claude.ai (web) — custom connector**
-
-claude.ai connects to remote MCP servers from the cloud, so it needs a **public HTTPS URL** (not `localhost`) and **OAuth 2.1 + PKCE** ([docs](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp)). Since **v0.9.0** Zoteus ships its own OAuth 2.1 authorization server in front of `/mcp`, so it is a turn-key connector — claude.ai self-registers (Dynamic Client Registration) and runs the auth-code + PKCE flow; a one-step **passcode** gates the consent.
-
-**Single- or multi-tenant.** The default (`ZOTEUS_OAUTH_MODE=passcode`) shares one operator Zotero key behind a passcode. For a multi-user hosted connector, set `ZOTEUS_OAUTH_MODE=zotero` so each user logs into **their own Zotero account** — the issued token carries that user's per-user key (encrypted at rest with `ZOTEUS_OAUTH_STORE=file` + `ZOTEUS_OAUTH_TOKEN_SECRET`), and every call runs against their own library. See [`docs/remote-oauth.md`](./docs/remote-oauth.md).
-
-```bash
-ZOTERO_API_KEY=zzz \
-ZOTEUS_OAUTH_ENABLED=true \
-ZOTEUS_PUBLIC_URL=https://zoteus.example.com \
-ZOTEUS_OAUTH_PASSCODE="$(openssl rand -base64 24)" \
-ZOTEUS_READ_ONLY=true \
-zoteus --http --port 3939 --host 0.0.0.0      # put HTTPS (Caddy / cloudflared / Fly) in front
-```
-
-Then in claude.ai: **Settings → Connectors → Add custom connector** → URL `https://<host>/mcp` → **Connect** → enter the passcode → the tools appear. A [`Dockerfile`](./Dockerfile) is included for deployment.
-
-The same OAuth remote also works from the **Claude Code CLI** — `claude mcp add --transport http zoteus https://<host>/mcp`, then `/mcp` → **Authenticate** (enter the passcode in the browser).
-
-Full walkthrough (deploy options, TLS/tunnel, Claude Code remote, security notes): [`docs/remote-oauth.md`](./docs/remote-oauth.md).
-
-> **Connector directory (hosted):** directory-listed connectors use a single shared client app
-> via a **Client ID Metadata Document (CIMD)** or Anthropic-held credentials — not per-connection
-> Dynamic Client Registration. Zoteus advertises `client_id_metadata_document_supported` and
-> resolves a URL `client_id` to its metadata document (set `ZOTEUS_CIMD_ENABLED=true`). DCR keeps
-> working for custom (non-directory) connectors. To pursue a directory listing, prepare the hosted
-> instance (see `docs/deployment.md`) and follow `docs/distribution.md` (contact `mcp-review@anthropic.com`).
-
-> Without OAuth, `--http` stays on `127.0.0.1` and Zoteus **refuses** to bind a public interface (an unauthenticated MCP endpoint would expose your library). For a brief local-only test you can still tunnel the loopback port, but prefer the OAuth path above. Keep `ZOTEUS_ALLOW_DELETE=false` and prefer `ZOTEUS_READ_ONLY=true`.
-
-## ⚙️ Configuration
+## Configuration
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZOTERO_API_KEY` | — | Cloud auth (writes/sync/groups; optional for local-only reads) |
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop local API |
-| `ZOTEUS_TRANSLATION_SERVER_URL` | `http://127.0.0.1:1969` | Add-by-identifier/URL (optional) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
-| `ZOTEUS_OAUTH_ENABLED` | `false` | Turn `/mcp` into an OAuth 2.1 + PKCE protected remote (claude.ai) |
-| `ZOTEUS_PUBLIC_URL` | — | Public HTTPS origin (OAuth issuer); required when OAuth is enabled |
-| `ZOTEUS_OAUTH_PASSCODE` | — | Consent passcode (≥ 12 chars); required when OAuth is enabled |
 
-Full table in [`docs/configuration.md`](./docs/configuration.md); remote-OAuth walkthrough in [`docs/remote-oauth.md`](./docs/remote-oauth.md).
+Full table in [`docs/configuration.md`](./docs/configuration.md). Running a shared/remote instance? See [`docs/remote-oauth.md`](./docs/remote-oauth.md) (self-host the OAuth remote on loopback or behind your own proxy).
 
-## Deploy (hosted connector)
+## Documentation
 
-Run Zoteus as an always-on connector at a stable HTTPS domain with persistent, encrypted
-state. See **[docs/deployment.md](docs/deployment.md)** for the end-to-end runbook
-(free-tier VM + Caddy, secrets, health checks, backups, rotation, and the connector test).
+📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md)
 
-## 📚 Documentation
+## Contributing
 
-- [Architecture](./docs/architecture.md) · [Configuration](./docs/configuration.md)
-- [Writing (safe writes)](./docs/writing.md) · [Files, full-text & sync](./docs/files-and-sync.md)
-- [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md)
-- [Full-text grounding, tag audit, BBT export](./docs/grounding.md) (M12)
-- [Prompts](./docs/prompts.md) · [Code execution with MCP](./docs/code-execution.md)
-- Full design spec: [`docs/superpowers/specs/2026-05-29-zoteus-design.md`](./docs/superpowers/specs/2026-05-29-zoteus-design.md)
+Contributions welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md). MIT licensed.
 
-### Publishing (maintainers)
+## Acknowledgements
 
-Full release runbook — npm publish, MCP registry, DXT, git tag, and the claude.ai connector
-directory (CIMD): **[docs/distribution.md](docs/distribution.md)**.
-
-## 🗺️ Status & roadmap
-
-**v1.0.0 — published.** All milestones through M14 (public distribution) shipped: on npm (`npx -y @oscardvs/zoteus`), in the MCP registry, with a Claude Desktop DXT, a hardened hosted connector, and CIMD support for the claude.ai connector directory.
-
-New in **v0.12.0 (M13 — production deploy & ops):** `/healthz` + `/readyz` probes, graceful `SIGTERM`/`SIGINT` shutdown (drain sessions → flush the encrypted store + indexes), structured **secret-redacted** JSON logging, request logging + `/metrics` counters, per-IP `/mcp` rate limiting, a volume-backed persistent store, backups, a CI image publish, and an end-to-end [deploy runbook](./docs/deployment.md).
-
-New in **v0.11.0 (M12):** `zotero_get_fulltext` (passage retrieval with page locators), `zotero_tag_audit` (controlled-vocabulary hygiene), `zotero_list_tags`, `zotero_list_collections`, `zotero_export format:"better-biblatex"` (local BBT with degrade), `zotero_update_item dry_run` (before→after diff), and query-centred search snippets.
-
-- [x] **0** Scaffold + CI
-- [x] **1** Zotero API clients (cloud + local) + capability probe
-- [x] **2** MCP core + read tools + resources (stdio)
-- [x] **3** Safe writes
-- [x] **4** Files / full-text / sync / groups / export
-- [x] **5** Citation pipeline (add-by-identifier + CSL formatting)
-- [x] **6** Hybrid semantic search
-- [x] **7** Scholarly-context graph
-- [x] **8** Code-execution layer + Prompts
-- [x] **9** HTTP transport + DXT + MCP registry + docs polish
-- [x] **10** OAuth 2.1 + PKCE + hosted remote (claude.ai connector)
-- [x] **11** Read+grounding path — full-text passages, tag audit, BBT export, dry-run diff
-- [x] **＋** Multi-tenant — per-user Zotero login for hosted connectors (`ZOTEUS_OAUTH_MODE=zotero`), encrypted at-rest token/key store
-- [x] **＋** Production deploy & ops — health/readiness, graceful shutdown, structured logging, metrics, `/mcp` rate limiting, backups, CI image publish (v0.12.0)
-- [x] **12** Public distribution — npm v1.0.0, MCP registry, DXT, CIMD + claude.ai connector directory
-
-## 🤝 Contributing
-
-Contributions are welcome! See [`CONTRIBUTING.md`](./CONTRIBUTING.md). This is an open-source project under the [MIT License](./LICENSE).
-
-## 🙏 Acknowledgements
-
-Built on the [Model Context Protocol](https://modelcontextprotocol.io), the [Zotero Web API](https://www.zotero.org/support/dev/web_api/v3/basics), [citeproc-js](https://citeproc-js.readthedocs.io), and the [Citation Style Language](https://citationstyles.org) project.
+Built on the [Model Context Protocol](https://modelcontextprotocol.io), the [Zotero Web API](https://www.zotero.org/support/dev/web_api/v3/basics), [citeproc-js](https://citeproc-js.readthedocs.io), and the [Citation Style Language](https://citationstyles.org). Not affiliated with or endorsed by the Corporation for Digital Scholarship / Zotero.
