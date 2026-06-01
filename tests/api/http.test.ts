@@ -83,4 +83,43 @@ describe('RateLimitedFetcher', () => {
       f.fetch('https://example.test/x', undefined, { deadlineMs: 60 }),
     ).rejects.toThrow(/budget|timeout|sequential/i);
   }, 2000);
+
+  // A single slow upstream response (no 429/Backoff ever seen) must NOT be blamed on
+  // rate-limiting — that misattribution misled a caller into "retry sequentially / avoid
+  // parallel batches", which is meaningless for one expensive request (e.g. full-text
+  // qmode=everything). The message should point at the expensive query instead.
+  it('blames a slow single response on the query, not rate-limiting', async () => {
+    const fetchImpl = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          const t = setTimeout(() => resolve(jsonResponse(200, {})), 1000);
+          init?.signal?.addEventListener('abort', () => {
+            clearTimeout(t);
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          });
+        }),
+    );
+    const f = new RateLimitedFetcher({ fetchImpl });
+    const err = await f
+      .fetch('https://example.test/x', undefined, { deadlineMs: 60 })
+      .then(() => null)
+      .catch((e) => e as Error);
+    expect(err).toBeTruthy();
+    expect(err!.message).toMatch(/full-text|expensive|narrow|single request/i);
+    expect(err!.message).not.toMatch(/rate-limit|parallel batches/i);
+  }, 2000);
+
+  // When Zotero actually rate-limits (429/503/Backoff) and back-off would exceed the
+  // budget, the error SHOULD say so and give the sequential-retry guidance.
+  it('attributes a 429-driven budget overrun to rate-limiting', async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse(429, 'slow', {}));
+    const f = new RateLimitedFetcher({ fetchImpl, maxConcurrency: 4 });
+    const err = await f
+      .fetch('https://example.test/x', undefined, { deadlineMs: 100, maxRetries: 1 })
+      .then(() => null)
+      .catch((e) => e as Error);
+    expect(err).toBeTruthy();
+    expect(err!.message).toMatch(/rate-limit/i);
+    expect(err!.message).toMatch(/parallel batches|sequential/i);
+  });
 });

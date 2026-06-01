@@ -54,29 +54,35 @@ export class RateLimitedFetcher {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.max(0, remaining()));
       (timer as { unref?: () => void }).unref?.();
+      // Did Zotero actually signal rate-limiting (429/503 or a Backoff header) during THIS
+      // request? Used to attribute a budget overrun correctly: a slow single response with no
+      // such signal is an expensive query, not throttling — and they want opposite remedies.
+      let sawRateLimit = false;
       try {
         let attempt = 0;
         for (;;) {
           // Honor any global backoff, but never sleep past our deadline.
           const backoffWait = this.backoffUntil - Date.now();
           if (backoffWait > 0) {
-            if (backoffWait >= remaining()) throw this.timeoutError(deadlineMs);
+            sawRateLimit = true;
+            if (backoffWait >= remaining()) throw this.timeoutError(deadlineMs, sawRateLimit);
             await sleep(backoffWait);
           }
-          if (remaining() <= 0) throw this.timeoutError(deadlineMs);
+          if (remaining() <= 0) throw this.timeoutError(deadlineMs, sawRateLimit);
 
           let res: Response;
           try {
             res = await this.fetchImpl(url, { ...init, signal: controller.signal });
           } catch (e) {
-            if (controller.signal.aborted) throw this.timeoutError(deadlineMs);
+            if (controller.signal.aborted) throw this.timeoutError(deadlineMs, sawRateLimit);
             throw e;
           }
           this.observeBackoff(res);
           if ((res.status === 429 || res.status === 503) && attempt < maxRetries) {
+            sawRateLimit = true;
             const wait = this.retryDelayMs(res, attempt);
             // Fail fast rather than sleep past the budget into a connector timeout.
-            if (wait >= remaining()) throw this.timeoutError(deadlineMs);
+            if (wait >= remaining()) throw this.timeoutError(deadlineMs, sawRateLimit);
             this.logger?.warn(
               `Zotero ${res.status}; retrying in ${wait}ms (attempt ${attempt + 1}/${maxRetries})`,
             );
@@ -92,13 +98,23 @@ export class RateLimitedFetcher {
     });
   }
 
-  private timeoutError(deadlineMs: number): ZoteroApiError {
-    return new ZoteroApiError({
-      status: 408,
-      message:
-        `Zotero request exceeded the ${Math.round(deadlineMs / 1000)}s budget (likely rate-limiting). ` +
-        'Retry sequentially — avoid parallel batches — and keep responses concise.',
-    });
+  /**
+   * Build the budget-exceeded error. Two distinct causes need opposite remedies, so the
+   * message must not conflate them:
+   *  - `rateLimited` (saw a 429/503/Backoff): Zotero throttled us; back off and serialize.
+   *  - otherwise: a single upstream response was simply slow (e.g. a full-text
+   *    qmode=everything scan on a large library); narrowing the query is the fix, and
+   *    "avoid parallel batches" would be misleading for one request.
+   */
+  private timeoutError(deadlineMs: number, rateLimited: boolean): ZoteroApiError {
+    const secs = Math.max(1, Math.round(deadlineMs / 1000));
+    const message = rateLimited
+      ? `Zotero rate-limited this request and the required back-off exceeded the ${secs}s budget. ` +
+        'Retry sequentially — avoid parallel batches — and keep responses concise.'
+      : `Zotero took longer than the ${secs}s budget to answer a single request, with no throttling/back-off signal. ` +
+        'This is usually an expensive query — e.g. a full-text search (qmode=everything) over a large library. ' +
+        'Narrow the query, lower the limit, or retry.';
+    return new ZoteroApiError({ status: 408, message });
   }
 
   private observeBackoff(res: Response): void {
