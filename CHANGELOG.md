@@ -6,6 +6,25 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-06-01
+
+### Fixed
+- `zotero_bibliography` and `zotero_export` now mirror their rendered output into
+  `structuredContent`, not only `content`. MCP clients that read the structured channel
+  (e.g. the claude.ai connector) were surfacing just a summary (`{style, itemCount}` /
+  `{format, length}`) and dropping the actual bibliography/export text.
+  `zotero_format_bibliography` also returns the joined `bibliography` string alongside
+  `entries` for consistency.
+- Zotero fetcher: a slow single request that exceeds the time budget is no longer reported
+  as rate-limiting. The 408 now distinguishes genuine throttling (a 429/503/`Backoff` was
+  observed → back off and retry sequentially) from an expensive query that was simply slow
+  (e.g. a full-text `qmode=everything` scan over a large library → narrow the query or lower
+  the limit), so the guidance matches the real cause.
+- OAuth (`MODE=zotero`): removed `identity=1` from the Zotero authorize URL, which forced
+  identity-only mode and prevented a real API key from being issued.
+
+## [1.0.1] — 2026-06-01
+
 ### Changed
 - `zotero_search_items`: a quick search (`q`) with no pinned `qmode` that returns nothing now
   auto-retries once in `everything` mode (notes + attachment full text) before reporting
