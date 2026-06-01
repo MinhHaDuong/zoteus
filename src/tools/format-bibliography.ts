@@ -46,7 +46,9 @@ const formatBib: ToolDefinition = {
     });
     return {
       content: [{ type: 'text', text: bibliography || '(empty bibliography)' }],
-      structuredContent: { styleId, entryCount: entries.length, entries },
+      // `entries` already carries the payload; include the joined `bibliography`
+      // string too so struct-only clients get the ready-to-use rendered text.
+      structuredContent: { styleId, entryCount: entries.length, entries, bibliography },
     };
   },
 };

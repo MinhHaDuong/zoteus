@@ -54,7 +54,7 @@ const exportTool: ToolDefinition = {
             const text = await bbt.exportItems({ citekeys, translator: 'better-biblatex' });
             return {
               content: [{ type: 'text', text }],
-              structuredContent: { format: 'better-biblatex', length: text.length, source: 'local-bbt' },
+              structuredContent: { format: 'better-biblatex', length: text.length, source: 'local-bbt', text },
             };
           }
         } catch (e) {
@@ -77,7 +77,7 @@ const exportTool: ToolDefinition = {
             text: `[Better BibTeX unavailable — returned Zotero's built-in biblatex instead. Run desktop Zotero with the Better BibTeX plugin for BBT-specific formatting.]\n\n${text}`,
           },
         ],
-        structuredContent: { format: 'biblatex', length: text.length, degradedToBuiltIn: true },
+        structuredContent: { format: 'biblatex', length: text.length, degradedToBuiltIn: true, text },
       };
     }
 
@@ -91,7 +91,9 @@ const exportTool: ToolDefinition = {
     });
     return {
       content: [{ type: 'text', text }],
-      structuredContent: { format: args.format, length: text.length },
+      // Mirror the raw export into structuredContent so struct-only clients get
+      // the payload, not just {format,length}. See `ok()` in registry.ts.
+      structuredContent: { format: args.format, length: text.length, text },
     };
   },
 };

@@ -27,7 +27,14 @@ const bibliography: ToolDefinition = {
     });
     return {
       content: [{ type: 'text', text }],
-      structuredContent: { style: style ?? 'chicago-note-bibliography', itemCount: args.item_keys.length },
+      // Mirror the rendered text into structuredContent: clients that read only
+      // the struct channel (e.g. the claude.ai connector) would otherwise see
+      // the summary and none of the actual bibliography. See `ok()` in registry.ts.
+      structuredContent: {
+        style: style ?? 'chicago-note-bibliography',
+        itemCount: args.item_keys.length,
+        bibliography: text,
+      },
     };
   },
 };
