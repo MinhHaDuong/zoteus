@@ -6,6 +6,14 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.4] — 2026-07-20
+
+### Fixed
+- `/healthz` and MCP `serverInfo` now report the real package version. Two hardcoded
+  `VERSION` constants were missed by every release bump since 1.0.1, so deployed servers
+  self-reported a stale version and made deploys look outdated. The version is now read
+  from `package.json` at runtime.
+
 ## [1.0.3] — 2026-07-20
 
 ### Fixed
