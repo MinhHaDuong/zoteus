@@ -6,6 +6,18 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.3] — 2026-07-20
+
+### Fixed
+- `zotero_update_item` / `zotero_create_items`: writing array-valued fields (`creators`,
+  `tags`, `collections`) no longer fails with Zotero's "property must be an array" when the
+  client sends them in a degraded shape (a JSON-encoded string, a single un-wrapped object,
+  a numeric-keyed object, or a wrapper object around the real array). The structured fields
+  are now explicitly typed in the advertised tool schema so clients know the expected shape
+  up front, and the common degradations are repaired at the tool boundary before the write
+  reaches Zotero. Reported in
+  [#1](https://github.com/oscardvs/zoteus/issues/1).
+
 ## [1.0.2] — 2026-06-01
 
 ### Fixed
