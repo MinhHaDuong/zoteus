@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok, requireCloudLibrary } from '../registry/registry.js';
 import { ZoteroApiError } from '../api/errors.js';
+import { itemPatchSchema } from '../schema/item-payload.js';
 
 function versionOf(item: any): number | undefined {
   return item?.version ?? item?.data?.version;
@@ -28,7 +29,9 @@ const updateItem: ToolDefinition = {
     'Partially update one item (HTTP PATCH — only the fields you supply change; omitted fields are preserved). Provide `item_key` and a `patch` object of the fields to change (e.g. {"title":"New","extra":"note"} or {"tags":[{"tag":"reviewed"}]}). Optimistic concurrency is handled for you: if you pass the item\'s `version` it is used; otherwise the current version is fetched first. If the item changed on the server in the meantime (412), the update is automatically re-fetched and retried once. Writes go to the cloud Web API. Set `dry_run:true` to preview the field-level before→after diff without writing (arrays like tags/collections are replaced wholesale by PATCH, not merged; a dry_run call performs no write).',
   inputSchema: {
     item_key: z.string().describe('The 8-character item key.'),
-    patch: z.record(z.any()).describe('Object of fields to change (PATCH semantics).'),
+    patch: itemPatchSchema.describe(
+      'Object of fields to change (PATCH semantics). Structured fields (creators, tags, collections, relations) must be real JSON arrays/objects, not JSON-encoded strings.',
+    ),
     version: z.number().int().optional().describe('Known current version; fetched automatically if omitted.'),
     dry_run: z.boolean().optional().describe('Preview the field-level before→after diff without writing.'),
     library_type: z.enum(['user', 'group']).optional(),

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok, requireCloudLibrary } from '../registry/registry.js';
+import { itemsArraySchema } from '../schema/item-payload.js';
 
 const createItems: ToolDefinition = {
   name: 'zotero_create_items',
@@ -8,10 +9,9 @@ const createItems: ToolDefinition = {
   description:
     'Create new items or update existing ones in a single batch (the server auto-chunks into groups of 50). Each entry in `items` is a Zotero item-data object: include `itemType` plus its valid fields, `creators` (each `{creatorType, firstName, lastName}` or `{creatorType, name}`), `tags` (`[{tag}]`), and `collections` (array of collection keys). To UPDATE an existing item, also include its `key` and current `version`; to CREATE, omit both. Every item is validated against the Zotero schema before anything is sent — if any item is invalid, nothing is written and the problems are returned. Use zotero_schema to discover valid fields/creator types for an itemType. Writes go to the cloud Web API (requires ZOTERO_API_KEY).',
   inputSchema: {
-    items: z
-      .array(z.record(z.any()))
-      .min(1)
-      .describe('Array of Zotero item-data objects (itemType + fields; include key+version to update).'),
+    items: itemsArraySchema.describe(
+      'Array of Zotero item-data objects (itemType + fields; include key+version to update).',
+    ),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
