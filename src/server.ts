@@ -19,8 +19,11 @@ import { registerAllTools, type ToolContext, type ToolDefinition } from './regis
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 import { tools } from './tools/index.js';
+import { createRequire } from 'node:module';
 
-const VERSION = '1.0.1';
+// Read from package.json so release bumps can't leave a stale hardcoded string
+// (healthz/serverInfo reported 1.0.1 for several releases).
+const VERSION: string = createRequire(import.meta.url)('../package.json').version;
 
 export interface ContextOverrides {
   /** Per-user Zotero API key (multi-tenant); defaults to config.apiKey. */

@@ -9,6 +9,7 @@ import { createMetrics } from './lib/metrics.js';
 import { makeReadiness, storeCheck, zoteroPingCheck } from './lib/health.js';
 import { installShutdownHandlers } from './lib/lifecycle.js';
 import type { Server } from 'node:http';
+import { createRequire } from 'node:module';
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -17,7 +18,7 @@ function flag(name: string): string | undefined {
   return next && !next.startsWith('--') ? next : '';
 }
 
-const VERSION = '1.0.1';
+const VERSION: string = createRequire(import.meta.url)('../package.json').version;
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
