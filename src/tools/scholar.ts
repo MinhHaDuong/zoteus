@@ -24,12 +24,12 @@ const scholar: ToolDefinition = {
   name: 'zotero_scholar',
   title: 'Scholarly context (references, citations, related)',
   description:
-    'Explore the scholarly graph around a paper via OpenAlex (open; Crossref fallback) and see what is — or is not yet — in your library. Provide a `doi` and an `action`: "lookup" (metadata + citation count), "references" (works this paper cites), "citations" (works that cite this paper, most-cited first), or "related" (similar works). With `include_in_library` (default true), each result is flagged `inLibrary` by matching DOIs against your library, so you can spot gaps ("cited works I haven\'t saved"). `limit` caps results (default 20). Read-only; calls external scholarly APIs.',
+    'Explore the EXTERNAL scholarly graph around a paper (OpenAlex, Crossref fallback). This does NOT search, list, or read your Zotero library — it queries the open web, and results are works from the scholarly web, not your items. To search or inspect YOUR library use zotero_search_items, zotero_semantic_search, zotero_get_item, or zotero_list_tags instead. Provide a `doi` and an `action`: "lookup" (metadata + citation count), "references" (works this paper cites), "citations" (works that cite this paper, most-cited first), or "related" (similar works). Set `include_in_library: true` to additionally flag which results your library already holds (off by default because it scans the library); otherwise every result is just a web record. `limit` caps results (default 20). Read-only; calls external scholarly APIs.',
   inputSchema: {
     action: z.enum(['lookup', 'references', 'citations', 'related']),
     doi: z.string().describe('The DOI of the paper (with or without the https://doi.org/ prefix).'),
     limit: z.number().int().min(1).max(100).optional().describe('Max results (default 20).'),
-    include_in_library: z.boolean().optional().describe('Flag results already in your library (default true).'),
+    include_in_library: z.boolean().optional().describe('Also scan the library and flag results already saved (default false; scanning is expensive).'),
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
@@ -56,7 +56,9 @@ const scholar: ToolDefinition = {
     }
 
     const canMatch = ctx.capabilities.cloud != null || ctx.capabilities.localApi;
-    if (args.include_in_library !== false && canMatch) {
+    // Opt-in (default false): the library scan pages every item, so only pay for it
+    // when the caller explicitly wants inLibrary flags.
+    if (args.include_in_library === true && canMatch) {
       const dois = await libraryDoiSet(ctx);
       if (primary) primary = markInLibrary([primary], dois)[0]!;
       results = markInLibrary(results, dois);
@@ -67,8 +69,8 @@ const scholar: ToolDefinition = {
     }
     const inLib = results.filter((w) => w.inLibrary).length;
     const summary = `${results.length} ${args.action} for ${args.doi}` +
-      (args.include_in_library !== false && canMatch ? ` (${inLib} already in your library, ${results.length - inLib} not).` : '.');
-    return ok({ action: args.action, doi: args.doi, results, count: results.length, inLibrary: inLib }, summary);
+      (args.include_in_library === true && canMatch ? ` (${inLib} already in your library, ${results.length - inLib} not).` : '.');
+    return ok({ action: args.action, doi: args.doi, results, count: results.length, inLibrary: args.include_in_library === true ? inLib : undefined }, summary);
   },
 };
 

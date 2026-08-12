@@ -44,7 +44,8 @@ const indexTool: ToolDefinition = {
     );
     return ok(
       { ...status },
-      `Indexed ${status.documents} passages over ${status.items} items (embedder=${status.embedder}).`,
+      `Indexed ${status.documents} passages over ${status.items} items (embedder=${status.embedder}). ` +
+        'The index is ready — run zotero_semantic_search now to search the library by meaning.',
     );
   },
 };

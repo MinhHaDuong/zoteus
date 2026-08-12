@@ -4,6 +4,8 @@ import searchItems from '../../src/tools/search-items.js';
 import fulltext from '../../src/tools/fulltext.js';
 import bibliography from '../../src/tools/bibliography.js';
 import formatBib from '../../src/tools/format-bibliography.js';
+import scholar from '../../src/tools/scholar.js';
+import indexTool from '../../src/tools/index-tool.js';
 
 describe('tool descriptions disambiguate overlapping pairs', () => {
   it('semantic_search points to search_items for exact filters', () => {
@@ -27,5 +29,17 @@ describe('tool descriptions disambiguate overlapping pairs', () => {
   it('format_bibliography points to bibliography and notes citeproc/arbitrary CSL', () => {
     expect(formatBib.description).toMatch(/zotero_bibliography/);
     expect(formatBib.description.toLowerCase()).toMatch(/citeproc|arbitrary|any csl/);
+  });
+  it('scholar disclaims being a library search and steers to the library tools', () => {
+    // Regression: the client previously mistook zotero_scholar for a library-search
+    // tool (it even scans the library for inLibrary flags), producing sessions that
+    // "searched the library" via OpenAlex with no library items ever returned.
+    expect(scholar.description.toLowerCase()).toMatch(/does not search|not search.*library|external/);
+    expect(scholar.description).toMatch(/zotero_search_items/);
+    expect(scholar.description).toMatch(/zotero_semantic_search/);
+    expect(scholar.inputSchema.include_in_library?.description).toMatch(/default false/);
+  });
+  it('index build output points to semantic_search as the next step', () => {
+    expect(indexTool.description).toMatch(/zotero_semantic_search/);
   });
 });

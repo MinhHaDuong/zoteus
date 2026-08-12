@@ -9,7 +9,9 @@ Provide a `doi` and an `action`:
 - `citations` — works that cite this paper (most-cited first).
 - `related` — similar works.
 
-With `include_in_library` (default `true`), each result is flagged `inLibrary` by matching DOIs against your library, so you can immediately spot **citation gaps** — e.g. "papers this work cites that I haven't saved yet." `limit` caps results (default 20).
+> **Note:** `zotero_scholar` queries the external scholarly web (OpenAlex/Crossref) — it does **not** search or read your library. To find items in your library use `zotero_search_items`, `zotero_semantic_search` (after `zotero_index build`), or `zotero_get_item`.
+
+With `include_in_library: true` (opt-in; off by default because it scans the library), each result is flagged `inLibrary` by matching DOIs against your library, so you can spot **citation gaps** — e.g. "papers this work cites that I haven't saved yet." `limit` caps results (default 20).
 
 ## Providers
 - **OpenAlex** (primary) — open, no API key; uses the polite pool via `ZOTEUS_CONTACT_EMAIL`. Provides references, citations, related works, and metadata.

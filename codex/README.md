@@ -45,6 +45,7 @@ These files are generated from the tool registry — regenerate with `npm run ge
 | `groups()` | `zotero_groups` | List Zotero groups |
 | `exportTool()` | `zotero_export` | Export Zotero items |
 | `fulltext()` | `zotero_fulltext` | Attachment full-text |
+| `getFulltext()` | `zotero_get_fulltext` | Get attachment full text / passages (read-only) |
 | `sync()` | `zotero_sync` | Incremental sync delta |
 | `attachment()` | `zotero_attachment` | Zotero attachments (files) |
 | `importTool()` | `zotero_import` | Import items by identifier or URL |
@@ -55,3 +56,6 @@ These files are generated from the tool registry — regenerate with `npm run ge
 | `semanticSearch()` | `zotero_semantic_search` | Semantic / hybrid library search |
 | `scholar()` | `zotero_scholar` | Scholarly context (references, citations, related) |
 | `searchTools()` | `search_tools` | Discover Zotero tools |
+| `listTags()` | `zotero_list_tags` | List Zotero tags (read-only) |
+| `listCollections()` | `zotero_list_collections` | List Zotero collections (read-only) |
+| `tagAudit()` | `zotero_tag_audit` | Audit tags against a controlled vocabulary |

@@ -104,7 +104,7 @@ export function createServer(ctx: ToolContext): McpServer {
         prompts: { listChanged: true },
       },
       instructions:
-        'Zoteus exposes your Zotero library. Call zotero_whoami first to resolve identity. Prefer zotero_search_items for discovery and zotero_get_item for full records. Use zotero_schema before constructing items. Call tools sequentially rather than in large parallel batches — Zotero rate-limits, and parallel or very long calls can time out.',
+        'Zoteus exposes your Zotero library. Call zotero_whoami first to resolve identity. Prefer zotero_search_items for discovery and zotero_get_item for full records. Use zotero_schema before constructing items. Library search tools: zotero_search_items (keyword/field/tag), zotero_semantic_search (by meaning; run zotero_index action:"build" first), zotero_get_item (full record). IMPORTANT: zotero_scholar searches the EXTERNAL scholarly web (OpenAlex/Crossref) — it does NOT search or read your library; never use it to find items in the library. Call tools sequentially rather than in large parallel batches — Zotero rate-limits, and parallel or very long calls can time out.',
     },
   );
   registerAllTools(server, selectActiveTools(ctx.config), ctx);
