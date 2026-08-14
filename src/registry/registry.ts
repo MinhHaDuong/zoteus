@@ -11,6 +11,7 @@ import type { StyleResolver } from '../features/citation/styles.js';
 import type { TranslationServerClient } from '../features/citation/translation-server.js';
 import type { SearchIndex } from '../features/search/index-manager.js';
 import type { ScholarGraph } from '../features/scholar/graph.js';
+import type { RateLimitedFetcher } from '../api/http.js';
 import { ZoteroApiError } from '../api/errors.js';
 
 export interface ToolContext {
@@ -24,6 +25,8 @@ export interface ToolContext {
   translation: TranslationServerClient;
   search: SearchIndex;
   scholar: ScholarGraph;
+  /** Shared rate-limited fetcher (used by built-in import resolution). */
+  fetcher: RateLimitedFetcher;
   logger: Logger;
   /** Absolute path to this context's semantic-search index file (per-user in multi-tenant mode). */
   searchIndexPath: string;

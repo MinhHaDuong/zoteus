@@ -19,6 +19,26 @@ describe('validateItem', () => {
     expect(validateItem(schema, {}).valid).toBe(false);
   });
 
+  it('rejects an empty-object itemType with a corrective message', () => {
+    const r = validateItem(schema, { itemType: {} });
+    expect(r.valid).toBe(false);
+    expect(r.errors[0]).toMatch(/empty object/);
+    expect(r.errors[0]).toContain('"itemType": "journalArticle"');
+  });
+
+  it('rejects a wrapper-object itemType naming exactly what was sent', () => {
+    const r = validateItem(schema, { itemType: { itemType: 'report' } });
+    expect(r.valid).toBe(false);
+    expect(r.errors[0]).toMatch(/wrapper object/);
+    expect(r.errors[0]).toContain('"report"');
+  });
+
+  it('rejects a boolean itemType', () => {
+    const r = validateItem(schema, { itemType: true });
+    expect(r.valid).toBe(false);
+    expect(r.errors[0]).toMatch(/plain string/);
+  });
+
   it('rejects an unknown itemType', () => {
     const r = validateItem(schema, { itemType: 'spaceship' });
     expect(r.valid).toBe(false);

@@ -6,6 +6,30 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- `zotero_import` no longer dies when the translation-server is unreachable: DOI and arXiv
+  ids now resolve through a built-in server-side fallback (OpenAlex/Crossref for DOIs, the
+  export.arxiv.org Atom feed for arXiv ids), with a `source` field on results for
+  provenance. ISBN/PMID/bibcode and URL scraping still require a translation-server and say
+  so explicitly. See `docs/resolver.md`. arXiv calls are paced (~1 per 3s, per arXiv API
+  etiquette) and back off on HTTP 429/503; a persistently throttled id now raises a
+  rate-limit error instead of being misreported as "no record".
+- Tool descriptions/examples for `zotero_create_items` and `zotero_update_item` now embed a
+  complete, correct payload example, and validation errors for a missing/wrong `itemType`
+  show exactly what was sent (e.g. "got a wrapper object {itemType: \"report\"}") so
+  clients can self-correct instead of re-sampling the same bad shape.
+
+### Fixed
+- `zotero_create_items` / `zotero_update_item`: item-data payloads sent with nested
+  "wedding-cake" field wrappers (`{"itemType": {"itemType": "report"}, "title":
+  {"title": "…"}}`) are now repaired server-side into the flat shape Zotero expects, turning
+  a confusing "Missing required itemType" into a successful write. This is the same class
+  of degraded-encoding repair added for array fields in 1.0.3, applied to scalar fields.
+  Repair also covers corrupted field NAMES observed in the same transcripts:
+  `Quote`-suffixed keys (`creatorsQuote`, `collectionsQuote`, `collectionQuote`) and
+  singular spellings (`collection`, `creator`, `tag`) are normalized to the real Zotero
+  field names instead of failing the whole batch with "Invalid property".
+
 ## [1.0.4] — 2026-07-20
 
 ### Fixed

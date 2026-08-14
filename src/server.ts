@@ -81,6 +81,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     translation,
     search,
     scholar,
+    fetcher,
     logger,
     searchIndexPath,
   };

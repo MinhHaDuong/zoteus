@@ -26,11 +26,11 @@ const updateItem: ToolDefinition = {
   name: 'zotero_update_item',
   title: 'Update a Zotero item',
   description:
-    'Partially update one item (HTTP PATCH — only the fields you supply change; omitted fields are preserved). Provide `item_key` and a `patch` object of the fields to change (e.g. {"title":"New","extra":"note"} or {"tags":[{"tag":"reviewed"}]}). Optimistic concurrency is handled for you: if you pass the item\'s `version` it is used; otherwise the current version is fetched first. If the item changed on the server in the meantime (412), the update is automatically re-fetched and retried once. Writes go to the cloud Web API. Set `dry_run:true` to preview the field-level before→after diff without writing (arrays like tags/collections are replaced wholesale by PATCH, not merged; a dry_run call performs no write).',
+    'Partially update one item (HTTP PATCH — only the fields you supply change; omitted fields are preserved). Provide `item_key` and a `patch` object of the fields to change (e.g. {"title":"New","extra":"note"} or {"tags":[{"tag":"reviewed"}]}). All field values are plain JSON strings/numbers/booleans/arrays — never wrapped in nested objects (e.g. `"title": "New"`, NOT `"title": {"title": "New"}`). Optimistic concurrency is handled for you: if you pass the item\'s `version` it is used; otherwise the current version is fetched first. If the item changed on the server in the meantime (412), the update is automatically re-fetched and retried once. Writes go to the cloud Web API. Set `dry_run:true` to preview the field-level before→after diff without writing (arrays like tags/collections are replaced wholesale by PATCH, not merged; a dry_run call performs no write).',
   inputSchema: {
     item_key: z.string().describe('The 8-character item key.'),
     patch: itemPatchSchema.describe(
-      'Object of fields to change (PATCH semantics). Structured fields (creators, tags, collections, relations) must be real JSON arrays/objects, not JSON-encoded strings.',
+      'Object of fields to change (PATCH semantics), e.g. {"title": "New title", "date": "2024-02-01", "tags": [{"tag": "reviewed"}], "collections": ["ABCD1234"]}. Structured fields (creators, tags, collections, relations) must be real JSON arrays/objects, not JSON-encoded strings. Values are plain, never wrapped in nested objects.',
     ),
     version: z.number().int().optional().describe('Known current version; fetched automatically if omitted.'),
     dry_run: z.boolean().optional().describe('Preview the field-level before→after diff without writing.'),

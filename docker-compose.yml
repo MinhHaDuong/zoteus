@@ -1,5 +1,14 @@
 # Zoteus hosted deploy: app + Caddy (auto-TLS, preserves Host). Free-VM friendly.
 # Secrets come from a git-ignored .env in this directory (see .env.example).
+#
+# NOTE — translation-server (optional, for zotero_import by_url + ISBN/PMID/
+# bibcode): the official `zotero/translation-server` image on Docker Hub is
+# published for linux/arm64 ONLY. On amd64/x86_64 hosts it fails with
+# "exec format error". If your host is amd64:
+#   - compile it yourself (https://github.com/zotero/translation-server), or
+#   - rely on the built-in fallback: zotero_import by_identifier still resolves
+#     DOI and arXiv ids server-side when translation-server is unreachable
+#     (see docs/resolver.md).
 services:
   zoteus:
     image: ghcr.io/oscardvs/zoteus:latest

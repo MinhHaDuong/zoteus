@@ -20,11 +20,46 @@ const RESERVED = new Set([
   'deleted',
 ]);
 
+/** A readable rendering of any value, so error messages show what a client actually sent. */
+function show(v: unknown): string {
+  if (typeof v === 'string') return JSON.stringify(v);
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
 /** Validate an item-data object against the cached Zotero schema before a write. */
 export function validateItem(schema: ZoteroSchema, item: any): ValidationResult {
   const errors: string[] = [];
   const itemType = item?.itemType;
-  if (!itemType) return { valid: false, errors: ['Missing required "itemType".'] };
+
+  if (itemType === undefined || itemType === null || itemType === '') {
+    return { valid: false, errors: ['Missing required "itemType": include a plain string like "journalArticle" or "book" (e.g. {"itemType": "journalArticle", "title": "…"}).'] };
+  }
+  if (typeof itemType !== 'string') {
+    // Distinguish the two realistic mistakes so the model can self-correct:
+    // a wrapper object {"itemType": "report"} vs an outright empty object.
+    if (typeof itemType === 'object' && !Array.isArray(itemType)) {
+      const keys = Object.keys(itemType as Record<string, unknown>);
+      if (keys.length === 1) {
+        return {
+          valid: false,
+          errors: [
+            `Invalid itemType: expected a plain string like "journalArticle", got a wrapper object {${keys[0]}: ${show((itemType as Record<string, unknown>)[keys[0]!])}}. Pass "itemType": "journalArticle" directly (no nested object).`,
+          ],
+        };
+      }
+      if (keys.length === 0) {
+        return {
+          valid: false,
+          errors: ['Invalid itemType: got an empty object {}. Pass a plain string like "itemType": "journalArticle".'],
+        };
+      }
+    }
+    return { valid: false, errors: [`Invalid itemType: expected a plain string like "journalArticle", got ${show(itemType)}.`] };
+  }
 
   const def = schema.itemTypes.find((t) => t.itemType === itemType);
   if (!def) {
