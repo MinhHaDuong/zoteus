@@ -3,7 +3,7 @@
 Zoteus is a single TypeScript (Node 20+, ESM) package with clean internal layers.
 
 ```
-Transport          stdio (default) │ Streamable HTTP (--http)   (OAuth: future)
+Transport          stdio (default) │ Streamable HTTP (--http)   (OAuth: docs/remote-oauth.md)
       │
 MCP Server         McpServer — registers Tools · Resources · Prompts
       │
@@ -31,14 +31,15 @@ Feature modules    SchemaService · citation (translation-server, CSL, citeproc)
 | `src/config.ts` | env → typed, zod-validated `ZoteusConfig` |
 | `src/api/` | `http.ts` (rate-limited fetch), `web-client.ts` (cloud v3), `local-client.ts`, `attachments.ts`, `errors.ts` |
 | `src/router/` | `capabilities.ts` (probe), `library-router.ts` (local-vs-cloud reads) |
-| `src/schema/` | `schema-service.ts` (cache), `validate.ts` (pre-write validation) |
+| `src/schema/` | `schema-service.ts` (cache), `validate.ts` (pre-write validation), `item-payload.ts` (repairs degraded client payloads) |
 | `src/registry/` | `ToolDefinition`/`ToolContext` + `registerAllTools` adapter |
-| `src/tools/` | one file per tool (24 total) |
+| `src/tools/` | one file per tool (28 total) |
 | `src/resources/` | `zotero://` resources |
 | `src/prompts/` | 7 workflow prompts |
 | `src/features/citation` | translation-server client, CSL style resolver, citeproc engine |
 | `src/features/search` | tokenizer, BM25, vector store, embeddings, chunker, index manager |
 | `src/features/scholar` | OpenAlex + Crossref clients, scholar graph |
+| `src/features/resolve` | built-in DOI/arXiv import resolution (translation-server fallback), see `docs/resolver.md` |
 | `src/codex/` | generates the code-execution wrapper tree from the registry |
 | `src/transports/` | `stdio.ts`, `http.ts` |
 

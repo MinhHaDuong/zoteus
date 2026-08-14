@@ -103,7 +103,7 @@ Notes:
 - The callback is an ephemeral `http://localhost:<port>/callback` that Claude Code owns; Zoteus accepts loopback redirects port-agnostically, so no `--callback-port` is needed.
 - Manage with `claude mcp list` / `claude mcp get zoteus` / `claude mcp remove zoteus`.
 
-## Multi-tenant: per-user Zotero accounts (M11)
+## Multi-tenant: per-user Zotero accounts
 
 By default Zoteus runs **single-tenant** (`ZOTEUS_OAUTH_MODE=passcode`): every connected
 client uses the one operator `ZOTERO_API_KEY`, gated by a shared passcode.
@@ -158,7 +158,7 @@ issued bearer token. No `ZOTERO_API_KEY` and no `ZOTEUS_OAUTH_PASSCODE` are need
 ## Security notes & v1 limitations
 
 - **The passcode is the trust boundary.** Use a high-entropy value and rotate it (restart with a new `ZOTEUS_OAUTH_PASSCODE`). `/consent` is rate-limited and locks a pending authorization after repeated wrong attempts.
-- **Single tenant.** Every connected client acts as the one operator `ZOTERO_API_KEY`. Per-user Zotero accounts (multi-tenant) are a future milestone (M11).
+- **Single tenant.** Every connected client acts as the one operator `ZOTERO_API_KEY`. For per-user Zotero accounts, switch to multi-tenant mode (`ZOTEUS_OAUTH_MODE=zotero`, see above).
 - **State persistence.** By default (`ZOTEUS_OAUTH_STORE=memory`) registered clients and tokens live in memory only — they do not survive a restart. Set `ZOTEUS_OAUTH_STORE=file` (with `ZOTEUS_OAUTH_TOKEN_SECRET`) to persist clients, tokens, and per-user Zotero keys across restarts, encrypted at rest under the data dir. Either way, state is local to one instance (no shared-replica store). Short-lived pending consents and auth codes always stay in memory; a mid-flow restart just re-prompts.
 - **Per-session transports.** Each MCP session gets its own Streamable HTTP transport (keyed by `Mcp-Session-Id`), sharing one Zotero context — so multiple/reconnecting claude.ai sessions are isolated and do not collide.
 - **Dynamic Client Registration.** Claude registers a fresh public client per connection; Zoteus caps the in-memory client store (FIFO) and sweeps expired state. For very high-traffic use, a Client ID Metadata Document (CIMD) flow would avoid per-connection registrations (future enhancement).

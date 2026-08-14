@@ -1,8 +1,5 @@
-import { z } from 'zod';
-
-const VALID_ITEMS = new Set(['doi', 'arxiv', 'pmid', 'isbn', 'bibcode']);
-
-export type IdentifierType = (typeof VALID_ITEMS extends Set<infer T> ? T : never) | string;
+/** Known identifier families; `(string & {})` keeps literal autocomplete while allowing extras. */
+export type IdentifierType = 'doi' | 'arxiv' | 'pmid' | 'isbn' | 'bibcode' | (string & {});
 
 /**
  * Classify a bare identifier or identifier-URL into {type, value}. Returns

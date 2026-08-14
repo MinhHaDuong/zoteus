@@ -6,6 +6,11 @@ import { loadConfig } from '../../src/config.js';
 import type { WebApiClient } from '../../src/api/web-client.js';
 import type { ToolContext } from '../../src/registry/registry.js';
 
+// These tests boot a REAL server (startup capability probe hits api.zotero.org).
+// Under Zotero rate-limiting the probe backs off, so give them a real budget
+// instead of the 5s default — otherwise a throttled IP fails them spuriously.
+vi.setConfig({ testTimeout: 30_000 });
+
 async function connect(overrides: Partial<ToolContext> = {}) {
   const config = loadConfig({
     ZOTEUS_LOCAL: 'off',

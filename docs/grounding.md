@@ -1,6 +1,6 @@
-# Full-text grounding, tag audit, and BBT export (M12)
+# Full-text grounding, tag audit, and BBT export
 
-M12 adds tools for research grounding: retrieve PDF passages with page locators, audit tag hygiene against a controlled vocabulary, and export with Better BibTeX formatting.
+Zoteus adds tools for research grounding: retrieve PDF passages with page locators, audit tag hygiene against a controlled vocabulary, and export with Better BibTeX formatting.
 
 ## `zotero_get_fulltext` — retrieve PDF text for grounding
 
@@ -134,7 +134,7 @@ Lists collections with key, name, parent collection key, and item count. Optiona
 
 ## Read-only mode summary
 
-Under `ZOTEUS_READ_ONLY=true`, the following M12 tools remain available:
+Under `ZOTEUS_READ_ONLY=true`, the following tools remain available:
 
 | Tool | Purpose |
 |---|---|

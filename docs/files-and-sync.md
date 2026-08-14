@@ -7,7 +7,7 @@ Lists the group libraries your key can access (id, name, type, item count, edit 
 
 ## `zotero_export`
 Exports items in a machine-readable bibliographic format and returns the raw text:
-`bibtex`, `biblatex`, `ris`, `csljson`, `csv`, `mods`, `tei`, `coins`, `rdf_bibliontology`, `rdf_dc`, `rdf_zotero`, `refer`, `wikipedia`, `bookmarks`. Narrow with `item_keys`, `collection_key`, `q`, or `item_type`. A `limit` is always applied (export formats require it). For styled, human-readable citations in a CSL style (APA, IEEE, …), use the citation tools (M5).
+`bibtex`, `biblatex`, `ris`, `csljson`, `csv`, `mods`, `tei`, `coins`, `rdf_bibliontology`, `rdf_dc`, `rdf_zotero`, `refer`, `wikipedia`, `bookmarks`. Narrow with `item_keys`, `collection_key`, `q`, or `item_type`. A `limit` is always applied (export formats require it). For styled, human-readable citations in a CSL style (APA, IEEE, …), use the citation tools.
 
 ## `zotero_fulltext`
 Read or write attachment full text (only attachment items have it):

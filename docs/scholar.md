@@ -1,6 +1,6 @@
 # Scholarly-context graph
 
-M7 adds `zotero_scholar` — explore the wider literature around a paper and see what's already in your library.
+`zotero_scholar` explores the wider literature around a paper and shows what is already in your library.
 
 ## `zotero_scholar`
 Provide a `doi` and an `action`:

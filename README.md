@@ -61,7 +61,7 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 
 - **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search across metadata, full text, and annotations, returned **with the page number**.
 - **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
-- **Add a paper by identifier.** Drop in a DOI/ISBN/PMID/arXiv id and Zoteus fetches the metadata and files it — no account needed for the import → format path.
+- **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
 - **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
 - **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, nearest heading, and a page locator.
 - **Follow the scholarship.** A scholarly-context graph over OpenAlex / Crossref / Semantic Scholar.
@@ -88,7 +88,7 @@ Full table in [`docs/configuration.md`](./docs/configuration.md). Running a shar
 
 ## Documentation
 
-📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md)
+📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md)
 
 ## Contributing
 

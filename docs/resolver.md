@@ -59,6 +59,15 @@ handles the two most common identifiers and deliberately does not scrape web
 pages (disambiguation, paywalls, site rules). When you need that, run a
 translation-server.
 
+## Rate limiting
+
+arXiv asks for at most ~1 request per 3 seconds. Zoteus paces its arXiv calls
+accordingly and backs off on HTTP 429/503 (honouring `Retry-After`). If arXiv
+keeps throttling even after back-offs, the tool says so explicitly —
+"arXiv is rate-limiting us … wait a minute and retry" — instead of claiming the
+id does not exist. When importing a long list of identifiers, just retry the
+failed ones a little later.
+
 ## Running translation-server
 
 ```sh
