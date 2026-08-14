@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-08-14
+
 ### Added
 - `zotero_import` no longer dies when the translation-server is unreachable: DOI and arXiv
   ids now resolve through a built-in server-side fallback (OpenAlex/Crossref for DOIs, the
