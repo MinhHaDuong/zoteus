@@ -4,7 +4,7 @@
 
 ### Your Zotero library, inside every AI conversation — with real citations, not hallucinations.
 
-The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https://modelcontextprotocol.io) client complete, **safe** access to your [Zotero](https://www.zotero.org) library — search papers, add by DOI, format bibliographies in ~2,800 styles, run semantic search over your own PDFs, and ground every answer in a source you actually own. **Local-first. Private. One command.**
+The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https://modelcontextprotocol.io) client complete, **safe** access to your [Zotero](https://www.zotero.org) library — search papers, add by DOI, format bibliographies in ~2,800 styles, run semantic search over your library's metadata and abstracts, pull exact passages from your PDFs, and ground every answer in a source you actually own. **Local-first. Private. One command.**
 
 [![npm](https://img.shields.io/npm/v/@oscardvs/zoteus.svg?color=2ea44f)](https://www.npmjs.com/package/@oscardvs/zoteus)
 [![npm downloads](https://img.shields.io/npm/dm/@oscardvs/zoteus.svg)](https://www.npmjs.com/package/@oscardvs/zoteus)
@@ -25,11 +25,13 @@ npx -y @oscardvs/zoteus
 
 ## Install in 30 seconds
 
+For normal use there is **nothing to download or unzip from GitHub** — your AI app fetches Zoteus automatically when it first runs. New to this? Follow the no-code getting-started guide → [`docs/getting-started.md`](./docs/getting-started.md)
+
 | Client | Command |
 |---|---|
+| **Claude Desktop (one-click)** | download `zoteus.mcpb` from the [latest release](https://github.com/oscardvs/zoteus/releases/latest) → double-click |
 | **Claude Code** | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` |
 | **Cursor / VS Code / Claude Desktop / Codex / Zed…** | `npx add-mcp @oscardvs/zoteus` |
-| **Claude Desktop (one-click)** | download `zoteus.mcpb` from the [latest release](https://github.com/oscardvs/zoteus/releases/latest) → double-click |
 | **claude.ai (web)** | Add custom connector → your hosted URL (OAuth) |
 
 Add your cloud key for writes/sync/groups (optional — reads work key-free against the desktop app):
@@ -52,14 +54,14 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 | Complete Web API v3 **+** desktop local API | ✅ | partial | n/a |
 | **Safe** transactional writes (reversible, gated) | ✅ | rare | ❌ |
 | CSL bibliographies (~2,800 styles) | ✅ | rare | ❌ |
-| Local hybrid semantic search over PDFs | ✅ | some (cloud) | varies |
+| Local hybrid semantic search + full-text PDF retrieval | ✅ | some (cloud) | varies |
 | No Python — TypeScript, one `npx` | ✅ | varies | n/a |
 | MCP Resources + Prompts + code-execution | ✅ | ❌ | n/a |
 | Local-first / private · Open-source (MIT) | ✅ | varies | ❌ |
 
 ## What you can do
 
-- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search across metadata, full text, and annotations, returned **with the page number**.
+- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search over your library's titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned **with the page number**.
 - **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
 - **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
 - **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
@@ -88,7 +90,7 @@ Full table in [`docs/configuration.md`](./docs/configuration.md). Running a shar
 
 ## Documentation
 
-📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md)
+📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Getting started](./docs/getting-started.md) · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md)
 
 ## Contributing
 
