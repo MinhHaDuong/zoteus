@@ -19,8 +19,20 @@ function makeCtx(search: SearchIndex): any {
       listItems: vi.fn(async () => ({ data: sampleItems, totalResults: 2, lastModifiedVersion: 1 })),
     },
     search,
+    searchIndexPath: join(tmpdir(), `zoteus-idx-${process.pid}-${Math.random().toString(36).slice(2)}.json`),
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
+}
+
+/** Poll the status action until the background build leaves the "building" state. */
+async function pollUntilSettled(ctx: any, attempts = 100): Promise<any> {
+  let status;
+  for (let i = 0; i < attempts; i++) {
+    status = await indexTool.handler({ action: 'status' }, ctx);
+    if (status.structuredContent?.state !== 'building') return status;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  return status;
 }
 
 describe('zotero_index', () => {
@@ -29,8 +41,10 @@ describe('zotero_index', () => {
     const ctx = makeCtx(search);
     const res = await indexTool.handler({ action: 'build' }, ctx);
     expect(ctx.web.listItems).toHaveBeenCalled();
-    expect(res.structuredContent?.items).toBe(2);
-    const status = await indexTool.handler({ action: 'status' }, ctx);
+    // build is asynchronous now: it starts a background job and returns immediately.
+    expect(res.structuredContent?.state).toBe('building');
+    const status = await pollUntilSettled(ctx);
+    expect(status.structuredContent?.state).toBe('done');
     expect(status.structuredContent?.items).toBe(2);
   });
 });

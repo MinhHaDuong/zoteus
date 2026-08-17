@@ -29,11 +29,21 @@ export class FakeEmbeddingProvider implements EmbeddingProvider {
 /** Local on-device embeddings via @huggingface/transformers (optional, lazy). */
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'local';
+  /** Texts handed to the transformers pipeline in a single call. */
+  static readonly BATCH_SIZE = 32;
   private extractor: any;
-  constructor(private readonly model = 'Xenova/all-MiniLM-L6-v2') {}
+  constructor(
+    private readonly model = 'Xenova/all-MiniLM-L6-v2',
+    /** Injectable extractor factory (tests); defaults to the transformers.js pipeline. */
+    private readonly loadExtractor?: () => Promise<any>,
+  ) {}
 
   private async ensure(): Promise<any> {
     if (this.extractor) return this.extractor;
+    if (this.loadExtractor) {
+      this.extractor = await this.loadExtractor();
+      return this.extractor;
+    }
     let transformers: any;
     try {
       transformers = await import('@huggingface/transformers' as any);
@@ -46,12 +56,27 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     return this.extractor;
   }
 
+  /**
+   * Embed texts in batches through the pipeline (one call per batch instead of one
+   * per text), yielding to the event loop between batches so long builds stay
+   * responsive and interruptible. Returns exactly one vector per input text.
+   */
   async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
     const extractor = await this.ensure();
     const out: number[][] = [];
-    for (const t of texts) {
-      const tensor = await extractor(t, { pooling: 'mean', normalize: true });
-      out.push(Array.from(tensor.data as Float32Array));
+    for (let i = 0; i < texts.length; i += LocalEmbeddingProvider.BATCH_SIZE) {
+      const batch = texts.slice(i, i + LocalEmbeddingProvider.BATCH_SIZE);
+      const tensor = await extractor(batch, { pooling: 'mean', normalize: true });
+      const data = tensor.data as Float32Array;
+      const dims: number[] | undefined = tensor.dims;
+      const dim = dims && dims.length > 1 ? dims[dims.length - 1]! : data.length / batch.length;
+      for (let b = 0; b < batch.length; b++) {
+        out.push(Array.from(data.slice(b * dim, (b + 1) * dim)));
+      }
+      if (i + LocalEmbeddingProvider.BATCH_SIZE < texts.length) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     }
     return out;
   }

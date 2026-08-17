@@ -20,6 +20,53 @@ export interface SearchIndexStatus {
   builtFromVersion: number;
 }
 
+/** Lifecycle of the asynchronous background index build. */
+export type BuildState = 'idle' | 'building' | 'done' | 'error';
+
+/**
+ * Live build/status snapshot. Backward compatible with SearchIndexStatus (it keeps
+ * documents/vectors/items/embedder/builtFromVersion) and adds build progress.
+ */
+export interface IndexBuildStatus extends SearchIndexStatus {
+  state: BuildState;
+  /** Items pulled from the Zotero API so far. */
+  itemsFetched: number;
+  /** Total items expected (0 = not yet known). Capped by the build limit. */
+  itemsTotal: number;
+  /** Passages indexed so far (alias of documents). */
+  passages: number;
+  /** Set when state === 'error'. */
+  lastError?: string;
+}
+
+/** One page of library items plus the library-wide total (for progress). */
+export interface PageResult {
+  items: any[];
+  totalResults: number;
+}
+
+/** Fetch a page of items starting at offset `start` (the Web API pages 100-at-a-time). */
+export type PageFetcher = (start: number) => Promise<PageResult>;
+
+export interface IncrementalBuildOptions {
+  /** Hard cap on items to index (defaults to no cap beyond the fetcher). */
+  maxItems?: number;
+  /** Embedding batch size (texts handed to the provider per call). */
+  embedBatchSize?: number;
+  /** Persist partial progress every N items. */
+  persistEveryItems?: number;
+  /** Persist partial progress at least every N ms. */
+  persistEveryMs?: number;
+  /** Log/report progress every N items. */
+  progressEveryItems?: number;
+  /** Log/report progress at least every N ms. */
+  progressEveryMs?: number;
+  /** Atomically persist the current (partial) index; called periodically and at the end. */
+  persist?: () => Promise<void>;
+  /** Optional progress hook (e.g. MCP notifications) fired alongside the logger. */
+  onProgress?: (status: IndexBuildStatus) => void;
+}
+
 interface ChunkRecord {
   id: string;
   itemKey: string;
@@ -88,6 +135,13 @@ export class SearchIndex {
   private items = new Set<string>();
   private builtFromVersion = 0;
 
+  // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
+  private buildState: BuildState = 'idle';
+  private itemsFetched = 0;
+  private itemsTotal = 0;
+  private lastBuildError: string | undefined = undefined;
+  private cancelToken: { cancelled: boolean } | null = null;
+
   constructor(private readonly opts: SearchIndexOptions) {}
 
   get embedderName(): string {
@@ -96,6 +150,35 @@ export class SearchIndex {
 
   get hasEmbedder(): boolean {
     return Boolean(this.opts.embedder);
+  }
+
+  /** True while a background build is running. */
+  get isBuilding(): boolean {
+    return this.buildState === 'building';
+  }
+
+  /** Full live status: index size + build progress. Backward compatible with status(). */
+  buildStatus(): IndexBuildStatus {
+    const base = this.status();
+    const s: IndexBuildStatus = {
+      ...base,
+      passages: base.documents,
+      state: this.buildState,
+      itemsFetched: this.itemsFetched,
+      itemsTotal: this.itemsTotal,
+    };
+    if (this.buildState === 'error' && this.lastBuildError) s.lastError = this.lastBuildError;
+    return s;
+  }
+
+  /**
+   * Cooperatively cancel the running build. Returns false if nothing is building.
+   * The build halts between pages/batches and keeps whatever was already indexed.
+   */
+  requestStop(): boolean {
+    if (!this.isBuilding || !this.cancelToken) return false;
+    this.cancelToken.cancelled = true;
+    return true;
   }
 
   /** Embed arbitrary texts with the configured provider (empty array if none). */
@@ -155,6 +238,156 @@ export class SearchIndex {
     }
     this.builtFromVersion = opts.version ?? 0;
     return this.status();
+  }
+
+  /**
+   * Asynchronous, incremental, resumable index build.
+   *
+   * Pages items via `fetchPage`, chunks/keyword-indexes them as they arrive, embeds in
+   * small batches, and atomically persists partial progress along the way — so a
+   * timeout, crash, or `requestStop()` never leaves a corrupt index and whatever was
+   * saved stays queryable. Returns the final build status; the caller should kick this
+   * off without awaiting (fire-and-forget) and poll `buildStatus()`.
+   */
+  async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
+    if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
+    this.buildState = 'building';
+    this.lastBuildError = undefined;
+    this.itemsFetched = 0;
+    this.itemsTotal = 0;
+    const token = { cancelled: false };
+    this.cancelToken = token;
+    this.reset();
+
+    const embedBatchSize = opts.embedBatchSize ?? 32;
+    const persistEveryItems = opts.persistEveryItems ?? 200;
+    const persistEveryMs = opts.persistEveryMs ?? 10_000;
+    const progressEveryItems = opts.progressEveryItems ?? 500;
+    const progressEveryMs = opts.progressEveryMs ?? 10_000;
+    const maxItems = opts.maxItems;
+
+    const pending: ChunkRecord[] = []; // passages awaiting embedding
+    let start = 0;
+    let itemsSincePersist = 0;
+    let lastPersistAt = Date.now();
+    let itemsSinceLog = 0;
+    let lastLogAt = Date.now();
+    let embeddingDisabled = false;
+    let warnedEmbed = false;
+
+    const persistNow = async (): Promise<void> => {
+      itemsSincePersist = 0;
+      lastPersistAt = Date.now();
+      if (!opts.persist) return;
+      try {
+        await opts.persist();
+      } catch (e) {
+        this.opts.logger?.warn(`Could not persist index: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    const maybePersist = async (): Promise<void> => {
+      if (itemsSincePersist >= persistEveryItems || Date.now() - lastPersistAt >= persistEveryMs) await persistNow();
+    };
+    const maybeLog = (): void => {
+      if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
+      itemsSinceLog = 0;
+      lastLogAt = Date.now();
+      const s = this.buildStatus();
+      const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
+      this.opts.logger?.info(
+        `index build: ${s.itemsFetched}/${total} items, ${s.passages} passages, ${s.vectors} vectors (embedder=${s.embedder})`,
+      );
+      opts.onProgress?.(s);
+    };
+    const embedPending = async (force: boolean): Promise<void> => {
+      if (!this.hasEmbedder || embeddingDisabled) {
+        pending.length = 0;
+        return;
+      }
+      while (pending.length >= (force ? 1 : embedBatchSize)) {
+        if (token.cancelled) return;
+        const batch = pending.splice(0, Math.min(embedBatchSize, pending.length));
+        try {
+          const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text));
+          batch.forEach((r, i) => {
+            if (vecs[i]) this.vectors.add(r.id, vecs[i]!);
+          });
+        } catch (e) {
+          embeddingDisabled = true;
+          pending.length = 0;
+          if (!warnedEmbed) {
+            warnedEmbed = true;
+            this.opts.logger?.warn(
+              `Embedding failed; falling back to keyword-only. ${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+        }
+        // Yield so long embedding runs stay interruptible and the event loop breathes.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+
+    try {
+      for (;;) {
+        if (token.cancelled) break;
+        if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
+        const page = await fetchPage(start);
+        const pageItems = page.items ?? [];
+        if (pageItems.length === 0) break;
+        if (!this.itemsTotal && page.totalResults) {
+          this.itemsTotal = maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
+        }
+        for (const item of pageItems) {
+          if (token.cancelled) break;
+          if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
+          this.addOneItem(item, pending);
+          this.itemsFetched++;
+          itemsSincePersist++;
+          itemsSinceLog++;
+        }
+        start += pageItems.length;
+        await embedPending(false);
+        maybeLog();
+        await maybePersist();
+        if (start >= page.totalResults) break;
+      }
+      if (!token.cancelled) await embedPending(true);
+      this.builtFromVersion = this.itemsFetched;
+      await persistNow();
+      this.buildState = 'done';
+      const final = this.buildStatus();
+      const total = final.itemsTotal > 0 ? String(final.itemsTotal) : '?';
+      this.opts.logger?.info(
+        `index build ${token.cancelled ? 'stopped' : 'complete'}: ` +
+          `${final.itemsFetched}/${total} items, ${final.passages} passages, ${final.vectors} vectors (embedder=${final.embedder})`,
+      );
+      opts.onProgress?.(final);
+      return final;
+    } catch (e) {
+      this.buildState = 'error';
+      this.lastBuildError = e instanceof Error ? e.message : String(e);
+      this.opts.logger?.error(`index build failed: ${this.lastBuildError}`);
+      // Keep whatever partial data we already indexed, and persist it best-effort.
+      await persistNow().catch(() => {});
+      opts.onProgress?.(this.buildStatus());
+      return this.buildStatus();
+    } finally {
+      this.cancelToken = null;
+    }
+  }
+
+  /** Chunk a single library item into the keyword index and queue passages for embedding. */
+  private addOneItem(item: any, pending: ChunkRecord[]): void {
+    const d = item.data ?? item;
+    const key = item.key ?? d.key;
+    if (!key) return;
+    this.items.add(key);
+    for (const ch of chunkText(itemText(d))) {
+      const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
+      this.chunks.set(rec.id, rec);
+      this.bm25.addDoc(rec.id, rec.text);
+      if (this.hasEmbedder) pending.push(rec);
+    }
   }
 
   async query(q: string, opts: { limit?: number; mode?: 'auto' | 'keyword' | 'semantic' } = {}): Promise<SearchHit[]> {
