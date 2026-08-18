@@ -23,7 +23,7 @@ export interface ToolContext {
   schema: SchemaService;
   web: WebApiClient;
   local?: LocalApiClient;
-  /** Zotero 9+ desktop local-API writes (user-granted key); undefined when unavailable. */
+  /** Zotero 10+ desktop local-API writes (user-granted key); undefined when unavailable. */
   localWrites?: LocalWriteClient;
   /** Desktop connector-API writes (Zotero 7+): saveItems/saveAttachment/updateSession. */
   connectorWrites?: ConnectorWriteClient;
@@ -86,9 +86,10 @@ export function ok(structured: Record<string, unknown>, summary: string): ToolHa
 }
 
 /**
- * Resolve the library a WRITE should target. Writes only go to the cloud Web API
- * (the local API is read-only), so this throws a friendly error when no API key is
- * configured. The thrown message is surfaced to the model as an isError result.
+ * Resolve the library a WRITE should target on the cloud Web API. Group libraries (and
+ * any library the running desktop app cannot reach) are cloud-only, so this throws a
+ * friendly error when no API key is configured. The thrown message is surfaced to the
+ * model as an isError result.
  */
 export function requireCloudLibrary(
   ctx: ToolContext,
@@ -99,7 +100,7 @@ export function requireCloudLibrary(
   if (!cloud) {
     throw new Error(
       'This operation writes to a cloud/group library and requires a cloud API key (set ZOTERO_API_KEY). ' +
-        'For the personal library, writes can instead go through the running Zotero 9+ desktop app (local API).',
+        'For the personal library, writes can instead go through the running Zotero 10+ desktop app (local API).',
     );
   }
   return { type: 'user', id: cloud.userID };
@@ -141,14 +142,18 @@ export function registerAllTools(
 
 /**
  * True when a local-API write failure means the running Zotero simply does not have
- * (or accept) local writes yet — e.g. Zotero <= 9.0 whose local API is read-only
- * ("No endpoint found", 501 "Endpoint does not support method") — as opposed to a
- * real write failure (denied grant, validation error, stale version). Callers use
- * this to fall back to the connector protocol or the cloud Web API.
+ * (or accept) local writes — i.e. Zotero 9 and earlier, whose local API is GET-only, so
+ * write paths answer "No endpoint found" (404) or 501 "Endpoint does not support
+ * method" and no response carries a Zotero-Server-ID header — as opposed to a real
+ * write failure (denied grant, validation error, stale version). Callers use this to
+ * fall back to the connector protocol or the cloud Web API.
  */
 export function isLocalWritesUnavailable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /local api/i.test(msg) && /404|no endpoint|not implemented|not supported|unreachable/i.test(msg);
+  return (
+    /local api/i.test(msg) &&
+    /404|no endpoint|not implemented|not supported|does not support|unreachable/i.test(msg)
+  );
 }
 
 

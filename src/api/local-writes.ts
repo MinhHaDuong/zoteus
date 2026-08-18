@@ -27,19 +27,38 @@ interface StoredGrant {
   grantedAt: string;
 }
 
+/** The local API caps a single write/delete batch at 50 objects. */
+const MAX_WRITE_OBJECTS = 50;
+
+function chunks(keys: string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < keys.length; i += MAX_WRITE_OBJECTS) out.push(keys.slice(i, i + MAX_WRITE_OBJECTS));
+  return out;
+}
+
 /**
- * Write client for the Zotero 9+ desktop local API.
+ * Write client for the Zotero 10+ desktop local API.
  *
- * Zotero >= 9 accepts writes (POST/PATCH/DELETE) on the same local API the reads use
- * (http://127.0.0.1:23119/api/users/0/...), gated by a *local* API key that the user
- * grants through a one-time in-Zotero dialog:
+ * Local-API write support shipped in Zotero 10 (it is absent in 9.x, whose local API is
+ * GET-only). Writes go to the same local API the reads use
+ * (http://127.0.0.1:23119/api/users/0/...), gated by a *local* API key the user grants
+ * through a one-time in-Zotero dialog. Verified against zotero/zotero @ 10.0.0,
+ * chrome/content/zotero/xpcom/server/server_localAPI.js:
  *
- *   1. Every response carries a `Zotero-Server-ID` header; writes must echo it back
- *      (428 when missing, 412 when it no longer matches the running instance).
+ *   1. Every response carries a `Zotero-Server-ID` header; every request using a write
+ *      method must echo it back — 428 when missing, 412 when it no longer matches the
+ *      running instance (`LocalAPIEndpoint._validateServerID`). This applies to
+ *      `/api/local/authorize` too, since it is itself a POST and does not opt out of
+ *      `requireServerIDOnWrite`, so the server ID must be probed with a GET first.
  *   2. `POST /api/local/authorize` with `{"appName": "..."}` shows a dialog in Zotero
- *      ("Allow" / "Always Allow" / "Deny") and returns `{key, remember}`.
+ *      ("Allow" / "Always Allow" / "Deny") and returns `{key, remember}`; a denial is
+ *      403 `{"denied":true}` and more than 5 prompts a minute is 429.
  *   3. Writes then carry `Zotero-API-Key: <key>`. A single-use key is consumed by the
  *      first successful write, so a 401 means: re-authorize.
+ *   4. Concurrency preconditions are enforced as in the Web API: multi-object DELETE
+ *      *requires* `If-Unmodified-Since-Version`, and key-based writes require either it
+ *      or a per-object `version` (428 otherwise). We send the library version we last
+ *      observed and re-probe once on 412/428.
  *
  * Keys are unrelated to zotero.org cloud keys. Grants are cached on disk so the user
  * is prompted once ("Always Allow"); single-use "Allow" grants degrade gracefully by
@@ -53,6 +72,7 @@ export class LocalWriteClient {
   private readonly appName: string;
   private key?: string;
   private serverId?: string;
+  private libraryVersion?: number;
 
   constructor(opts: LocalWriteClientOptions = {}) {
     this.base = `http://127.0.0.1:${opts.port ?? 23119}/api`;
@@ -72,34 +92,64 @@ export class LocalWriteClient {
     return Boolean(this.loadGrant()?.key);
   }
 
-  /** Stable ID of the running Zotero instance (required on every write). */
-  async getServerId(): Promise<string> {
-    if (this.serverId) return this.serverId;
+  /**
+   * One GET against the local API yields both things every write needs: the stable
+   * `Zotero-Server-ID` of the running instance and the library's current version
+   * (`Last-Modified-Version`), used as the concurrency precondition on writes.
+   */
+  private async probe(force = false): Promise<{ serverId: string; libraryVersion: number }> {
+    if (!force && this.serverId !== undefined && this.libraryVersion !== undefined) {
+      return { serverId: this.serverId, libraryVersion: this.libraryVersion };
+    }
     const res = await this.fetcher.fetch(
       `${this.base}/users/0/items?limit=1`,
       { method: 'GET', headers: this.readHeaders() },
       { maxRetries: 0 },
     );
-    if (!res.ok) throw new Error(`Local API unreachable (HTTP ${res.status}) — is Zotero running?`);
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error(`Local API unreachable (HTTP ${res.status}) — is Zotero running?`);
+    }
     const id = res.headers.get('zotero-server-id');
+    const version = Number(res.headers.get('last-modified-version'));
     await res.body?.cancel().catch(() => {});
-    if (!id) throw new Error('Local API did not return a Zotero-Server-ID header (Zotero >= 9 required for writes).');
+    if (!id) {
+      throw new Error(
+        'Local API writes are not supported by this Zotero: no Zotero-Server-ID header. ' +
+          'Desktop writes need Zotero 10 or newer (9.x has a read-only local API).',
+      );
+    }
     this.serverId = id;
-    return id;
+    this.libraryVersion = Number.isFinite(version) ? version : 0;
+    return { serverId: id, libraryVersion: this.libraryVersion };
+  }
+
+  /** Stable ID of the running Zotero instance (required on every write). */
+  async getServerId(): Promise<string> {
+    return (await this.probe()).serverId;
+  }
+
+  /** Personal-library version last seen, used as the write precondition. */
+  private async getLibraryVersion(): Promise<number> {
+    return (await this.probe()).libraryVersion;
   }
 
   /**
    * Ask Zotero to grant this app a local API key. Blocks until the user answers the
    * dialog in Zotero ("Always Allow" recommended). Returns the key, or throws with a
    * human-readable reason on denial/error.
+   *
+   * `/api/local/authorize` is a POST, so Zotero applies the same server-ID precondition
+   * it applies to any write: the header is mandatory (428) and must match (412).
    */
-  async authorize(): Promise<string> {
+  async authorize(retried = false): Promise<string> {
+    const serverId = await this.getServerId();
     this.logger?.info(`Requesting local API write access from Zotero (appName="${this.appName}")…`);
     const res = await this.fetcher.fetch(
       `${this.base}/local/authorize`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Zotero-API-Version': '3' },
+        headers: { ...this.readHeaders(), 'Content-Type': 'application/json', 'Zotero-Server-ID': serverId },
         body: JSON.stringify({ appName: this.appName }),
       },
       { maxRetries: 0, deadlineMs: 300_000 },
@@ -111,9 +161,14 @@ export class LocalWriteClient {
     if (res.status === 429) {
       throw new Error('Too many local-API authorization prompts; wait a minute and try again.');
     }
+    if ((res.status === 412 || res.status === 428) && !retried) {
+      // Zotero restarted (or was never probed) between the probe and the grant.
+      await this.probe(true);
+      return this.authorize(true);
+    }
     if (!res.ok) {
       throw new Error(`Local API authorize failed (HTTP ${res.status}): ${text || res.statusText}. ` +
-        'Writes need Zotero 9+ with the local API enabled.');
+        'Writes need Zotero 10+ with the local API enabled.');
     }
     const { key, remember } = JSON.parse(text) as { key: string; remember?: boolean };
     this.key = key;
@@ -127,10 +182,13 @@ export class LocalWriteClient {
   }
 
   private async writeHeaders(): Promise<Record<string, string>> {
+    // Probe first: authorize() itself needs the server ID, so resolving it up front
+    // keeps a single round trip regardless of whether a grant is still needed.
+    const serverId = await this.getServerId();
     return {
       ...this.readHeaders(),
       'Zotero-API-Key': this.key ?? (await this.authorize()),
-      'Zotero-Server-ID': await this.getServerId(),
+      'Zotero-Server-ID': serverId,
     };
   }
 
@@ -165,17 +223,29 @@ export class LocalWriteClient {
   /**
    * Run a write request against the local API, transparently handling the two
    * re-auth/re-probe cases: 401 (key consumed/unknown -> authorize again) and
-   * 412/428 (server-id stale/missing -> refresh it).
+   * 412/428 (server-id or library version stale/missing -> refresh both).
+   *
+   * `libraryPrecondition` adds `If-Unmodified-Since-Version`, which Zotero requires for
+   * multi-object deletes and for key-based writes (it stands in for a per-object
+   * `version`). It is recomputed on retry so a refreshed version is actually used.
    */
   private async request(
     method: 'POST' | 'PATCH' | 'DELETE',
     path: string,
-    init: { json?: unknown; form?: URLSearchParams; headers?: Record<string, string> } = {},
+    init: {
+      json?: unknown;
+      form?: URLSearchParams;
+      headers?: Record<string, string>;
+      libraryPrecondition?: boolean;
+    } = {},
     retried = false,
   ): Promise<Response> {
     await this.ensureKey();
     if (!this.key) await this.authorize();
     const headers = await this.writeHeaders();
+    if (init.libraryPrecondition) {
+      headers['If-Unmodified-Since-Version'] = String(await this.getLibraryVersion());
+    }
     if (init.json !== undefined) {
       headers['Content-Type'] = 'application/json';
     } else if (init.form) {
@@ -197,8 +267,9 @@ export class LocalWriteClient {
       return this.request(method, path, init, true);
     }
     if ((res.status === 412 || res.status === 428) && !retried) {
-      this.serverId = undefined;
       await res.body?.cancel().catch(() => {});
+      // Either the instance changed or the library moved on: refresh both preconditions.
+      await this.probe(true);
       return this.request(method, path, init, true);
     }
     return res;
@@ -206,25 +277,60 @@ export class LocalWriteClient {
 
   /** Multi-write (create/update) up to 50 items, mirroring the Web API semantics. */
   async writeItems(items: Record<string, unknown>[]): Promise<WriteResult> {
-    const res = await this.request('POST', '/users/0/items', { json: items });
-    return this.parseWriteResult(res);
+    // Only key-based writes (updates) need the precondition; sending it for pure
+    // creates would just invent a 412 whenever the library moved on in the meantime.
+    const hasKeyedWrite = items.some((it) => typeof it.key === 'string' && it.key);
+    const res = await this.request('POST', '/users/0/items', { json: items, libraryPrecondition: hasKeyedWrite });
+    const result = await this.parseWriteResult(res);
+    if (result.newLibraryVersion) this.libraryVersion = result.newLibraryVersion;
+    return result;
+  }
+
+  /**
+   * Move items to the trash (`deleted: 1`) or restore them (`deleted: 0`). This is the
+   * reversible operation — the local API's DELETE, like the Web API's, erases items
+   * outright and is exposed separately as {@link deleteItems}.
+   */
+  async setDeleted(keys: string[], deleted: 0 | 1): Promise<WriteResult> {
+    const merged: WriteResult = { successful: [], unchanged: [], failed: [], newLibraryVersion: 0 };
+    let offset = 0;
+    for (const chunk of chunks(keys)) {
+      const res = await this.writeItems(chunk.map((key) => ({ key, deleted })));
+      merged.successful.push(...res.successful.map((s) => ({ ...s, index: s.index + offset })));
+      merged.failed.push(...res.failed.map((f) => ({ ...f, index: f.index + offset })));
+      // `unchanged` is keyed by request index; resolve it back to item keys, since an
+      // item already in the requested state is "done" as far as callers care.
+      merged.unchanged.push(...res.unchanged.map((i) => chunk[Number(i)] ?? i));
+      merged.newLibraryVersion = res.newLibraryVersion || merged.newLibraryVersion;
+      offset += chunk.length;
+    }
+    return merged;
   }
 
   /** Partial single-item update. */
   async patchItem(key: string, patch: Record<string, unknown>): Promise<number> {
-    const res = await this.request('PATCH', `/users/0/items/${key}`, { json: patch });
+    const res = await this.request('PATCH', `/users/0/items/${key}`, { json: patch, libraryPrecondition: true });
     if (!res.ok) await this.throwApi(res, `PATCH /items/${key}`);
     const v = Number(res.headers.get('last-modified-version'));
     await res.body?.cancel().catch(() => {});
+    if (Number.isFinite(v)) this.libraryVersion = v;
     return Number.isFinite(v) ? v : 0;
   }
 
-  /** Trash items by key (permanent=false, the default) or delete permanently. */
-  async deleteItems(keys: string[], permanent = false): Promise<void> {
-    const path = `/users/0/items${permanent ? '/deleted' : ''}?itemKey=${keys.join(',')}`;
-    const res = await this.request('DELETE', path);
-    if (!res.ok && res.status !== 204) await this.throwApi(res, `DELETE ${path}`);
-    await res.body?.cancel().catch(() => {});
+  /**
+   * PERMANENTLY erase items by key. The local API mirrors the Web API here: DELETE
+   * removes the objects outright (no trash), and requires the library-version
+   * precondition. Use {@link setDeleted} for the reversible trash.
+   */
+  async deleteItems(keys: string[]): Promise<void> {
+    for (const chunk of chunks(keys)) {
+      const path = `/users/0/items?itemKey=${chunk.join(',')}`;
+      const res = await this.request('DELETE', path, { libraryPrecondition: true });
+      if (!res.ok && res.status !== 204) await this.throwApi(res, `DELETE ${path}`);
+      const v = Number(res.headers.get('last-modified-version'));
+      await res.body?.cancel().catch(() => {});
+      if (Number.isFinite(v)) this.libraryVersion = v;
+    }
   }
 
   /**

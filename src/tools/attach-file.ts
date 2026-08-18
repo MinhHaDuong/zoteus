@@ -5,14 +5,14 @@ import { ok, ensureLocalApi } from '../registry/registry.js';
 
 /**
  * Attach a file (local path or URL) to an item as a stored (imported_file)
- * attachment. Requires the Zotero desktop app (Zotero 9+ local API writes), since
+ * attachment. Requires the Zotero desktop app (Zotero 10+ local API writes), since
  * the cloud client here does not implement the storage upload flow.
  */
 const attachFile: ToolDefinition = {
   name: 'zotero_attach_file',
   title: 'Attach a file (PDF, snapshot) to an item',
   description:
-    'Add a stored file attachment (e.g. a PDF full text) under an existing item. Give `parent` (the item key) and either `path` (a local file the Zoteus process can read) or `url` (downloaded first). `filename` and `content_type` are inferred when omitted. Runs against the Zotero desktop app\u2019s local API (Zotero 9+; you may be asked once to allow Zoteus write access — choose "Always Allow"). Returns the new attachment key.',
+    'Add a stored file attachment (e.g. a PDF full text) under an existing item. Give `parent` (the item key) and either `path` (a local file the Zoteus process can read) or `url` (downloaded first). `filename` and `content_type` are inferred when omitted. Runs against the Zotero desktop app\u2019s local API (Zotero 10+; you may be asked once to allow Zoteus write access — choose "Always Allow"). Returns the new attachment key.',
   inputSchema: {
     parent: z.string().describe('Key of the parent item to attach the file to.'),
     path: z.string().optional().describe('Local filesystem path to the file.'),
@@ -25,7 +25,7 @@ const attachFile: ToolDefinition = {
   handler: async (args, ctx) => {
     if (!ctx.localWrites || !(await ensureLocalApi(ctx))) {
       return {
-        content: [{ type: 'text', text: 'Storing files needs Zotero desktop write access. If your Zotero has the upcoming local-API writes, provide a key via ZOTEUS_LOCAL_API_KEY (or grant it once); on current Zotero versions, attach files DURING import instead — zotero_import supports `attach_url`, which streams the file into the same save session. Otherwise set ZOTERO_API_KEY and use the cloud flow.' }],
+        content: [{ type: 'text', text: 'Storing files needs Zotero desktop write access, which the local API provides from Zotero 10. Grant it once when Zotero asks (or pre-provision ZOTEUS_LOCAL_API_KEY). On Zotero 9 and earlier, attach files DURING import instead — zotero_import supports `attach_url`, which streams the file into the same save session. Otherwise set ZOTERO_API_KEY and use the cloud flow.' }],
         isError: true,
       };
     }
@@ -47,7 +47,9 @@ const attachFile: ToolDefinition = {
       const noQuery = args.url.split('?')[0] ?? args.url;
       inferredName = decodeURIComponent(noQuery.split('/').pop() ?? 'attachment');
     }
-    const filename = args.filename ?? inferredName;
+    // Zotero rejects anything that is not a bare file name, since it joins the value
+    // onto the storage directory path when the upload lands.
+    const filename = (args.filename ?? inferredName).split(/[\\/]/).pop() || inferredName;
     const ext = filename.split('.').pop()?.toLowerCase() ?? '';
     const contentType =
       args.content_type ??

@@ -6,6 +6,42 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Zotero 10 local-API writes.** Local-API write support shipped in Zotero 10 (Zotero 9
+  and earlier expose a read-only, GET-only local API), and the shipped protocol differs
+  from what the write client was built against. Verified against `zotero/zotero @ 10.0.0`,
+  `chrome/content/zotero/xpcom/server/server_localAPI.js`:
+  - `POST /api/local/authorize` is itself a write method and does not opt out of the
+    server-ID precondition, so the grant request must carry `Zotero-Server-ID`. Zoteus
+    sent it on writes but not on the grant, which made every first-time grant fail with
+    `428 Precondition Required`. The server ID is now probed before authorizing, and a
+    stale one (412) is re-probed once.
+  - Multi-object `DELETE` *requires* `If-Unmodified-Since-Version`, and key-based writes
+    require it or a per-object `version` (428 otherwise). The client now tracks the
+    library version alongside the server ID and refreshes both on 412/428.
+  - There is no `/items/deleted` write endpoint; permanent deletes go to
+    `DELETE …/items?itemKey=…`, chunked to the local API's 50-object batch limit.
+- **Trash no longer erases on the desktop path.** `zotero_trash_items` and
+  `zotero_annotate` (`action:"delete"`) previously issued the local API's `DELETE`,
+  which — exactly like the Web API's — purges items outright rather than trashing them.
+  They now write `deleted: 1` (and `deleted: 0` to restore), which is what "trash" means
+  and what the tool descriptions promise.
+- `isLocalWritesUnavailable()` now also recognises 501 `Endpoint does not support method`
+  and the "no `Zotero-Server-ID` header" signal, so a Zotero 9 desktop correctly falls
+  back to the connector protocol instead of surfacing a hard tool error.
+- `zotero_attach_file` strips any path separators from the requested file name, which
+  Zotero rejects outright.
+
+### Added
+- `zotero_delete_items` routes permanent deletes for the personal library through the
+  running Zotero desktop app when it accepts local-API writes, falling back to the cloud
+  Web API otherwise.
+
+### Changed
+- Docs and tool descriptions now say **Zotero 10+** for desktop local-API writes (they
+  said "Zotero 9+", written against pre-release behaviour) and "Zotero 9 and earlier"
+  for the read-only local API that falls back to the connector protocol.
+
 ## [1.2.0] — 2026-08-18
 
 ### Added

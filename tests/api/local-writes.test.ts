@@ -26,14 +26,20 @@ function okJson(body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status: 200, headers });
 }
 
-describe('LocalWriteClient (Zotero 9+ desktop writes)', () => {
+/** The probe GET carries both preconditions a Zotero 10 write needs. */
+function probeResponse(serverId = SERVER_ID, libraryVersion = '17'): Response {
+  return new Response(JSON.stringify([]), {
+    status: 200,
+    headers: { 'zotero-server-id': serverId, 'last-modified-version': libraryVersion },
+  });
+}
+
+describe('LocalWriteClient (Zotero 10+ desktop writes)', () => {
   it('writes items with a pre-provisioned key and the required server-id header', async () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
       seen.push({ url, headers: (init?.headers ?? {}) as Record<string, string> });
-      if ((init?.method ?? 'GET') === 'GET') {
-        return new Response(JSON.stringify([]), { status: 200, headers: { 'zotero-server-id': SERVER_ID } });
-      }
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
       return okJson({ successful: { '0': { key: 'NEWKEY1', version: 42 } }, failed: {}, unchanged: {} }, { 'last-modified-version': '42' });
     });
     const client = makeClient(fetchImpl, { key: 'preset-key' });
@@ -47,6 +53,20 @@ describe('LocalWriteClient (Zotero 9+ desktop writes)', () => {
     expect(write).toBeTruthy();
     expect(write!.headers['Zotero-API-Key']).toBe('preset-key');
     expect(write!.headers['Zotero-Server-ID']).toBe(SERVER_ID);
+    // A pure create needs no concurrency precondition — only key-based writes do.
+    expect(write!.headers['If-Unmodified-Since-Version']).toBeUndefined();
+  });
+
+  it('sends the library-version precondition on key-based writes', async () => {
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
+      seen.push((init?.headers ?? {}) as Record<string, string>);
+      return okJson({ successful: { '0': { key: 'K1', version: 18 } }, failed: {}, unchanged: {} });
+    });
+    const client = makeClient(fetchImpl, { key: 'k' });
+    await client.writeItems([{ key: 'K1', title: 'Renamed' }]);
+    expect(seen[0]!['If-Unmodified-Since-Version']).toBe('17');
   });
 
   it('authorizes via the grant dialog when no key exists, and caches the grant on disk', async () => {
@@ -56,11 +76,12 @@ describe('LocalWriteClient (Zotero 9+ desktop writes)', () => {
       if (url.endsWith('/local/authorize')) {
         const body = JSON.parse(String(init.body));
         expect(body.appName).toBeTruthy();
+        // POST /api/local/authorize is itself a write method, so Zotero 10 rejects it
+        // with 428 unless the caller echoes the server ID it learned from a read.
+        expect((init.headers as any)['Zotero-Server-ID']).toBe(SERVER_ID);
         return okJson({ key: 'granted-key', remember: true });
       }
-      if ((init?.method ?? 'GET') === 'GET') {
-        return new Response(JSON.stringify([]), { status: 200, headers: { 'zotero-server-id': SERVER_ID } });
-      }
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
       return okJson({ successful: { '0': { key: 'K1', version: 1 } }, failed: {}, unchanged: {} });
     });
     const client = makeClient(fetchImpl, { keyStorePath });
@@ -78,9 +99,7 @@ describe('LocalWriteClient (Zotero 9+ desktop writes)', () => {
     const keyStorePath = join(dir, 'local-api-key.json');
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
       if (url.endsWith('/local/authorize')) throw new Error('authorize should not be called');
-      if ((init?.method ?? 'GET') === 'GET') {
-        return new Response(JSON.stringify([]), { status: 200, headers: { 'zotero-server-id': SERVER_ID } });
-      }
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
       expect((init.headers as any)['Zotero-API-Key']).toBe('cached-key');
       return okJson({ successful: {}, failed: {}, unchanged: {} });
     });
@@ -98,9 +117,7 @@ describe('LocalWriteClient (Zotero 9+ desktop writes)', () => {
         authorizations++;
         return okJson({ key: `key-${authorizations}`, remember: false });
       }
-      if ((init?.method ?? 'GET') === 'GET') {
-        return new Response(JSON.stringify([]), { status: 200, headers: { 'zotero-server-id': SERVER_ID } });
-      }
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
       writes++;
       if (writes === 1) return new Response('key consumed', { status: 401 });
       expect((init.headers as any)['Zotero-API-Key']).toBe('key-2');
@@ -113,33 +130,119 @@ describe('LocalWriteClient (Zotero 9+ desktop writes)', () => {
     expect(result.successful[0]?.key).toBe('K9');
   });
 
-  it('re-probes the server id on 428/412 (Zotero restarted between calls)', async () => {
+  it('re-probes the server id and library version on 428/412', async () => {
     let serverId = 'old-instance';
+    let libraryVersion = '5';
     let writes = 0;
     const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
-      if ((init?.method ?? 'GET') === 'GET') {
-        return new Response(JSON.stringify([]), { status: 200, headers: { 'zotero-server-id': serverId } });
-      }
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse(serverId, libraryVersion);
       writes++;
       if (writes === 1) {
         expect((init.headers as any)['Zotero-Server-ID']).toBe('old-instance');
+        expect((init.headers as any)['If-Unmodified-Since-Version']).toBe('5');
         serverId = 'new-instance'; // Zotero restarted: the old id is now stale
+        libraryVersion = '6'; // ...and the library moved on
         return new Response('precondition failed', { status: 412 });
       }
       expect((init.headers as any)['Zotero-Server-ID']).toBe('new-instance');
+      expect((init.headers as any)['If-Unmodified-Since-Version']).toBe('6');
       return okJson({ successful: {}, failed: {}, unchanged: {} });
     });
     const client = makeClient(fetchImpl, { key: 'k' });
-    await client.writeItems([{ itemType: 'book', title: 'T' }]);
+    await client.writeItems([{ key: 'K1', title: 'T' }]);
     expect(writes).toBe(2);
   });
 
   it('surfaces a human-readable error when the user denies the grant dialog', async () => {
     const fetchImpl = vi.fn(async (url: string, _init: RequestInit) => {
       if (url.endsWith('/local/authorize')) return new Response('denied', { status: 403 });
-      return new Response(JSON.stringify([]), { status: 200, headers: { 'zotero-server-id': SERVER_ID } });
+      return probeResponse();
     });
     const client = makeClient(fetchImpl);
     await expect(client.writeItems([{ itemType: 'book' }])).rejects.toThrow(/denied/i);
+  });
+
+  it('re-probes once when authorize is rejected for a stale server id (412)', async () => {
+    let serverId = 'old-instance';
+    let attempts = 0;
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.endsWith('/local/authorize')) {
+        attempts++;
+        if (attempts === 1) {
+          serverId = 'new-instance';
+          return new Response('Zotero-Server-ID does not match this server', { status: 412 });
+        }
+        expect((init.headers as any)['Zotero-Server-ID']).toBe('new-instance');
+        return okJson({ key: 'granted', remember: true });
+      }
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse(serverId);
+      return okJson({ successful: { '0': { key: 'K1', version: 1 } }, failed: {}, unchanged: {} });
+    });
+    const client = makeClient(fetchImpl);
+    await client.writeItems([{ itemType: 'book', title: 'T' }]);
+    expect(attempts).toBe(2);
+  });
+
+  it('trashes by writing deleted:1 — never by DELETE, which erases outright', async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method, body: init.body ? String(init.body) : undefined });
+      if (method === 'GET') return probeResponse();
+      return okJson(
+        { successful: { '0': { key: 'K1', version: 9 } }, failed: {}, unchanged: { '1': 'K2' } },
+        { 'last-modified-version': '9' },
+      );
+    });
+    const client = makeClient(fetchImpl, { key: 'k' });
+    const result = await client.setDeleted(['K1', 'K2'], 1);
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false);
+    const post = calls.find((c) => c.method === 'POST');
+    expect(post!.url).toMatch(/\/users\/0\/items$/);
+    expect(JSON.parse(post!.body!)).toEqual([
+      { key: 'K1', deleted: 1 },
+      { key: 'K2', deleted: 1 },
+    ]);
+    expect(result.successful.map((s) => s.key)).toEqual(['K1']);
+    // `unchanged` is index-keyed on the wire; it comes back resolved to item keys.
+    expect(result.unchanged).toEqual(['K2']);
+  });
+
+  it('permanently deletes via ?itemKey= with the version precondition (no /deleted path)', async () => {
+    const calls: Array<{ url: string; method: string; headers: Record<string, string> }> = [];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      calls.push({ url, method, headers: (init?.headers ?? {}) as Record<string, string> });
+      if (method === 'GET') return probeResponse();
+      return new Response(null, { status: 204, headers: { 'last-modified-version': '18' } });
+    });
+    const client = makeClient(fetchImpl, { key: 'k' });
+    await client.deleteItems(['K1', 'K2']);
+    const del = calls.find((c) => c.method === 'DELETE')!;
+    expect(del.url).toContain('/users/0/items?itemKey=K1,K2');
+    expect(del.url).not.toContain('/deleted');
+    expect(del.headers['If-Unmodified-Since-Version']).toBe('17');
+    expect(del.headers['Zotero-Server-ID']).toBe(SERVER_ID);
+  });
+
+  it('chunks deletes at the local API batch limit of 50', async () => {
+    const deletes: string[] = [];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
+      deletes.push(url);
+      return new Response(null, { status: 204 });
+    });
+    const client = makeClient(fetchImpl, { key: 'k' });
+    await client.deleteItems(Array.from({ length: 120 }, (_, i) => `K${i}`));
+    expect(deletes).toHaveLength(3);
+    expect(deletes[0]!.split(',')).toHaveLength(50);
+    expect(deletes[2]!.split(',')).toHaveLength(20);
+  });
+
+  it('reports a read-only local API (Zotero 9 and earlier) as "not supported"', async () => {
+    // 9.x answers reads fine but never sends Zotero-Server-ID, since writes do not exist.
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
+    const client = makeClient(fetchImpl, { key: 'k' });
+    await expect(client.writeItems([{ itemType: 'book' }])).rejects.toThrow(/not supported/i);
   });
 });

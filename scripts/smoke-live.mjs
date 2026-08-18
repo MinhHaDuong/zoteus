@@ -20,7 +20,7 @@
  *
  * Everything created is titled "Zoteus live smoke <stamp>", tagged `zoteus-smoke-test`,
  * and moved to the TRASH at the end — never permanently deleted. Steps the running
- * Zotero cannot support (read-only local API <= 9.0 + no connector acceptance, and no
+ * Zotero cannot support (read-only local API on Zotero 9 and earlier + no connector acceptance, and no
  * cloud key) report SKIP with the server's actionable error text, not FAIL; only real
  * failures set a nonzero exit code. When cleanup itself has to be skipped the script
  * prints the keys to trash by hand.
@@ -59,14 +59,14 @@ const note = (text) => console.log(`     ${text}`);
 
 /**
  * A tool error that means "the running Zotero (or this configuration) cannot do this
- * write", as opposed to a Zoteus bug: read-only local API (<= 9.0 has no
+ * write", as opposed to a Zoteus bug: read-only local API (Zotero 9 and earlier has no
  * /api/local/authorize), a connector that refuses the object, or a cloud-only fallback
  * with no ZOTERO_API_KEY. These report SKIP with the server's own text.
  */
 const UNSUPPORTED = [
   /needs zotero desktop write access/i,
   /local api is read-only/i,
-  /cannot grant yet/i,
+  /cannot grant/i,
   /requires a cloud api key/i,
   /ZOTERO_API_KEY/,
   /authorize failed \(HTTP \d+\)/i,
@@ -408,13 +408,15 @@ try {
         (unsupported(deleted.text) ? skip : fail)('zotero_annotate deletes the annotation', brief(deleted.text));
       } else {
         const gone = await localGet(`/users/0/items/${annotationKeys[0]}`).catch(() => ({ ok: false, json: null }));
-        const stillLive = gone.ok && !(gone.json?.data?.deleted ?? gone.json?.deleted);
+        // As with items, "delete" means trashed (deleted=1) and therefore recoverable.
+        const inTrash = gone.ok && Boolean(gone.json?.data?.deleted ?? gone.json?.deleted);
         check(
-          'zotero_annotate deletes the annotation',
-          !stillLive,
+          'zotero_annotate trashes the annotation (reversibly)',
+          inTrash,
           `target=${deleted.data.target} trashed=${JSON.stringify(deleted.data.trashed ?? [])}`,
         );
-        if (stillLive) note('the annotation is still live in the local API after the delete call.');
+        if (!gone.ok) note('the annotation is GONE from the local API — delete must trash it, never erase.');
+        else if (!inTrash) note('the annotation is still live in the local API after the delete call.');
       }
     }
   }
@@ -428,10 +430,13 @@ try {
       (unsupported(res.text) ? skip : fail)('zotero_trash_items trashes the test item', brief(res.text));
     } else {
       const after = await localGet(`/users/0/items/${itemKey}`).catch(() => ({ ok: false, json: null }));
-      const inTrash = !after.ok || Boolean(after.json?.data?.deleted ?? after.json?.deleted);
+      // Trash must be REVERSIBLE: the item still exists and carries deleted=1. An item
+      // that vanished was erased, which is a bug, not a pass.
+      const inTrash = after.ok && Boolean(after.json?.data?.deleted ?? after.json?.deleted);
       trashed = true;
-      check('zotero_trash_items trashes the test item', inTrash, `target=${res.data.target} item=${itemKey}`);
-      if (!inTrash) note('the item is not flagged deleted in the local API yet (Zotero may still be syncing the change).');
+      check('zotero_trash_items trashes the test item (reversibly)', inTrash, `target=${res.data.target} item=${itemKey}`);
+      if (!after.ok) note('the item is GONE from the local API — trash must set deleted=1, never erase.');
+      else if (!inTrash) note('the item is not flagged deleted in the local API yet (Zotero may still be syncing the change).');
     }
   }
 } finally {

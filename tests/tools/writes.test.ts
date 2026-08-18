@@ -121,6 +121,23 @@ describe('zotero_trash_items', () => {
       { key: 'K1', version: 3, deleted: 0 },
     ]);
   });
+
+  it('uses the desktop deleted-flag write, never the local API DELETE (which erases)', async () => {
+    const setDeleted = vi.fn(async () => ({
+      successful: [{ index: 0, key: 'K1', version: 9 }],
+      unchanged: ['K2'],
+      failed: [],
+      newLibraryVersion: 9,
+    }));
+    const deleteItemsLocal = vi.fn(async () => undefined);
+    const ctx = makeCtx({ top: { localWrites: { setDeleted, deleteItems: deleteItemsLocal } } });
+    ctx.capabilities.localApi = true;
+    const res = await trashItems.handler({ item_keys: ['K1', 'K2'] }, ctx);
+    expect(setDeleted).toHaveBeenCalledWith(['K1', 'K2'], 1);
+    expect(deleteItemsLocal).not.toHaveBeenCalled();
+    expect(ctx.web.writeItems).not.toHaveBeenCalled();
+    expect(res.structuredContent?.updated).toEqual(['K1', 'K2']);
+  });
 });
 
 describe('zotero_delete_items', () => {
@@ -142,6 +159,28 @@ describe('zotero_delete_items', () => {
     const ctx = makeCtx({ config: { allowDelete: true } });
     const res = await deleteItems.handler({ item_keys: ['K1', 'K2'], confirm: true }, ctx);
     expect(ctx.web.deleteItems).toHaveBeenCalledWith({ type: 'user', id: 19552201 }, ['K1', 'K2'], 100);
+    expect(res.isError).toBeUndefined();
+  });
+
+  it('purges through the desktop app when it accepts local-API writes', async () => {
+    const localDelete = vi.fn(async () => undefined);
+    const ctx = makeCtx({ config: { allowDelete: true }, top: { localWrites: { deleteItems: localDelete } } });
+    ctx.capabilities.localApi = true;
+    const res = await deleteItems.handler({ item_keys: ['K1'], confirm: true }, ctx);
+    expect(localDelete).toHaveBeenCalledWith(['K1']);
+    expect(ctx.web.deleteItems).not.toHaveBeenCalled();
+    expect(res.structuredContent?.target).toBe('local');
+  });
+
+  it('falls back to the cloud when the running Zotero has no local-API writes', async () => {
+    const localDelete = vi.fn(async () => {
+      throw new Error('Local API writes are not supported by this Zotero: no Zotero-Server-ID header.');
+    });
+    const ctx = makeCtx({ config: { allowDelete: true }, top: { localWrites: { deleteItems: localDelete } } });
+    ctx.capabilities.localApi = true;
+    const res = await deleteItems.handler({ item_keys: ['K1'], confirm: true }, ctx);
+    expect(localDelete).toHaveBeenCalled();
+    expect(ctx.web.deleteItems).toHaveBeenCalledWith({ type: 'user', id: 19552201 }, ['K1'], 100);
     expect(res.isError).toBeUndefined();
   });
 });

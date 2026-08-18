@@ -105,8 +105,13 @@ const annotateTool: ToolDefinition = {
       }
       if (!args.library_id && (await ensureLocalApi(ctx)) && ctx.localWrites) {
         try {
-          await ctx.localWrites.deleteItems(keys, false);
-          return ok({ trashed: keys, target: 'local' }, `Trashed ${keys.length} annotation(s) via the Zotero desktop app.`);
+          // `deleted: 1` (reversible trash), not DELETE — the local API's DELETE erases.
+          const result = await ctx.localWrites.setDeleted(keys, 1);
+          const trashed = [...result.successful.map((s) => s.key), ...result.unchanged];
+          return ok(
+            { trashed, failed: result.failed, target: 'local' },
+            `Trashed ${trashed.length} annotation(s) via the Zotero desktop app.`,
+          );
         } catch (e) {
           if (!isLocalWritesUnavailable(e)) throw e;
           // Running Zotero has no local-API writes; fall through to cloud/guidance.
@@ -128,7 +133,7 @@ const annotateTool: ToolDefinition = {
       return {
         content: [{
           type: 'text',
-          text: 'Deleting annotations needs write access this Zotero cannot grant yet: the running app\u2019s local API is read-only (Zotero < 9.1) and the connector protocol cannot delete. Set ZOTERO_API_KEY for cloud writes, upgrade Zotero when local writes ship, or delete the annotations manually in Zotero\u2019s PDF reader.',
+          text: 'Deleting annotations needs write access this Zotero cannot grant: the running app\u2019s local API is read-only (local-API writes ship in Zotero 10) and the connector protocol cannot delete. Set ZOTERO_API_KEY for cloud writes, upgrade to Zotero 10 or newer, or delete the annotations manually in Zotero\u2019s PDF reader.',
         }],
         isError: true,
       };
@@ -207,9 +212,9 @@ const annotateTool: ToolDefinition = {
     }
 
     // Prefer the desktop app for the personal library; fall back to the cloud.
-    // (a) Zotero with local-API write support (upcoming; needs a stored/provided key —
-    //     we never trigger the grant dialog unexpectedly), or (b) the connector protocol
-    //     that every recent Zotero exposes while running.
+    // (a) Zotero 10+ local-API writes (the first one asks for a key in-app — choose
+    //     "Always Allow" to be asked once), or (b) the connector protocol that every
+    //     recent Zotero exposes while running.
     if (!args.library_id && (await ensureLocalApi(ctx)) && ctx.localWrites) {
       try {
         const result = await ctx.localWrites.writeItems(items);

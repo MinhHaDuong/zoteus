@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { normalizePosition, buildSortIndex } from '../../src/tools/annotate.js';
+import { describe, it, expect, vi } from 'vitest';
+import annotate, { normalizePosition, buildSortIndex } from '../../src/tools/annotate.js';
 
 describe('annotate helpers', () => {
   it('normalizes shorthand [page, rect] positions', () => {
@@ -25,5 +25,26 @@ describe('annotate helpers', () => {
     expect(buildSortIndex(4, rects, { offset: 1235, pageHeight: 841.162 })).toBe('00004|001235|00636');
     expect(buildSortIndex(0, [], {})).toBe('00000|000000|00000');
     expect(buildSortIndex(12, [[0, 10, 100, 50]], { pageHeight: 792 })).toBe('00012|000000|00742');
+  });
+});
+
+describe('zotero_annotate action:"delete"', () => {
+  it('trashes annotations by flag rather than erasing them via the local API DELETE', async () => {
+    const setDeleted = vi.fn(async () => ({
+      successful: [{ index: 0, key: 'ANN1', version: 4 }],
+      unchanged: [],
+      failed: [],
+      newLibraryVersion: 4,
+    }));
+    const deleteItems = vi.fn(async () => undefined);
+    const ctx: any = {
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { setDeleted, deleteItems },
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    };
+    const res = await annotate.handler({ action: 'delete', annotation_keys: ['ANN1'] }, ctx);
+    expect(setDeleted).toHaveBeenCalledWith(['ANN1'], 1);
+    expect(deleteItems).not.toHaveBeenCalled();
+    expect(res.structuredContent?.trashed).toEqual(['ANN1']);
   });
 });

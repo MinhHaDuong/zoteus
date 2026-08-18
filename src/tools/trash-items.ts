@@ -23,16 +23,13 @@ const trashItems: ToolDefinition = {
     // Local-first for the personal library when the desktop app supports writes.
     if (ctx.localWrites && !args.library_id && (await ensureLocalApi(ctx))) {
       try {
-        if (deleted === 1) {
-          await ctx.localWrites.deleteItems(args.item_keys, false);
-          return ok({ updated: args.item_keys, target: 'local' }, `Trashed ${args.item_keys.length} item(s) via the Zotero desktop app.`);
-        }
-        const objects: any[] = [];
-        for (const key of args.item_keys) objects.push({ key, deleted: 0 });
-        const result = await ctx.localWrites.writeItems(objects);
+        // Set the `deleted` flag rather than issuing a DELETE: the local API's DELETE,
+        // like the Web API's, erases items outright, which is not what "trash" means.
+        const result = await ctx.localWrites.setDeleted(args.item_keys, deleted);
+        const updated = [...result.successful.map((s) => s.key), ...result.unchanged];
         return ok(
-          { updated: result.successful.map((s) => s.key), failed: result.failed, target: 'local' },
-          `Restored ${result.successful.length} item(s) via the Zotero desktop app.`,
+          { updated, failed: result.failed, target: 'local' },
+          `${deleted ? 'Trashed' : 'Restored'} ${updated.length} item(s) via the Zotero desktop app.`,
         );
       } catch (e) {
         if (!isLocalWritesUnavailable(e)) throw e;

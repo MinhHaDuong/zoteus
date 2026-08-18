@@ -9,7 +9,8 @@ export interface LocalApiClientOptions {
 /**
  * Read-only client for the Zotero desktop local API (Zotero 7+).
  * Base: http://127.0.0.1:<port>/api ; the personal library is always users/0.
- * Every endpoint is GET; there is no native local write support.
+ * Every endpoint here is GET. Native local-API writes exist from Zotero 10 and live in
+ * local-writes.ts, which needs the grant flow this client deliberately stays out of.
  */
 export class LocalApiClient {
   static readonly LOCAL_USER_ID = 0;
