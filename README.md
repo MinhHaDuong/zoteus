@@ -77,6 +77,8 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 
 Zoteus auto-detects your running Zotero desktop app and uses its fast, key-free **local API** for reads (full PDFs, real saved-search results), falling back to the cloud **Web API v3** for writes, sync, and group libraries.
 
+> **Semantic search — one-time setup.** The first `zotero_semantic_search` builds the library index automatically in the background (auto-build). On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until done.
+
 ## Configuration
 
 | Variable | Default | Purpose |
