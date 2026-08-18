@@ -6,6 +6,8 @@ import type { LibraryRouter } from '../router/library-router.js';
 import type { SchemaService } from '../schema/schema-service.js';
 import type { WebApiClient, LibraryRef } from '../api/web-client.js';
 import type { LocalApiClient } from '../api/local-client.js';
+import type { LocalWriteClient } from '../api/local-writes.js';
+import type { ConnectorWriteClient } from '../api/connector-writes.js';
 import type { Logger } from '../lib/logger.js';
 import type { StyleResolver } from '../features/citation/styles.js';
 import type { TranslationServerClient } from '../features/citation/translation-server.js';
@@ -21,6 +23,10 @@ export interface ToolContext {
   schema: SchemaService;
   web: WebApiClient;
   local?: LocalApiClient;
+  /** Zotero 9+ desktop local-API writes (user-granted key); undefined when unavailable. */
+  localWrites?: LocalWriteClient;
+  /** Desktop connector-API writes (Zotero 7+): saveItems/saveAttachment/updateSession. */
+  connectorWrites?: ConnectorWriteClient;
   styles: StyleResolver;
   translation: TranslationServerClient;
   search: SearchIndex;
@@ -92,7 +98,8 @@ export function requireCloudLibrary(
   const cloud = ctx.capabilities.cloud;
   if (!cloud) {
     throw new Error(
-      'This operation writes to Zotero and requires a cloud API key (set ZOTERO_API_KEY). The desktop local API is read-only.',
+      'This operation writes to a cloud/group library and requires a cloud API key (set ZOTERO_API_KEY). ' +
+        'For the personal library, writes can instead go through the running Zotero 9+ desktop app (local API).',
     );
   }
   return { type: 'user', id: cloud.userID };
@@ -129,4 +136,31 @@ export function registerAllTools(
       },
     );
   }
+}
+
+
+/**
+ * True when a local-API write failure means the running Zotero simply does not have
+ * (or accept) local writes yet — e.g. Zotero <= 9.0 whose local API is read-only
+ * ("No endpoint found", 501 "Endpoint does not support method") — as opposed to a
+ * real write failure (denied grant, validation error, stale version). Callers use
+ * this to fall back to the connector protocol or the cloud Web API.
+ */
+export function isLocalWritesUnavailable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /local api/i.test(msg) && /404|no endpoint|not implemented|not supported|unreachable/i.test(msg);
+}
+
+
+/**
+ * The local-API capability is probed at startup, but Zotero may be restarted (or
+ * briefly unresponsive) during a long-lived server process. This re-pings once and
+ * refreshes the flag so desktop write paths recover without a restart.
+ */
+export async function ensureLocalApi(ctx: ToolContext): Promise<boolean> {
+  if (ctx.capabilities.localApi) return true;
+  if (!ctx.local || ctx.config.local === 'off') return false;
+  const up = await ctx.local.ping().catch(() => false);
+  if (up) ctx.capabilities.localApi = true;
+  return up;
 }

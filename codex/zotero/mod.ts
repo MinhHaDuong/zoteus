@@ -15,6 +15,8 @@ export { fulltext } from './fulltext.js';
 export { getFulltext } from './getFulltext.js';
 export { sync } from './sync.js';
 export { attachment } from './attachment.js';
+export { annotate } from './annotate.js';
+export { attachFile } from './attachFile.js';
 export { importTool } from './importTool.js';
 export { styles } from './styles.js';
 export { formatBibliography } from './formatBibliography.js';

@@ -69,12 +69,14 @@ async function connect() {
 }
 
 describe('Zoteus server (in-process)', () => {
-  it('lists all twenty-eight tools', async () => {
+  it('lists all thirty tools', async () => {
     const { client } = await connect();
     const { tools: listed } = await client.listTools();
     const names = listed.map((t) => t.name).sort();
     expect(names).toEqual([
       'search_tools',
+      'zotero_annotate',
+      'zotero_attach_file',
       'zotero_attachment',
       'zotero_bibliography',
       'zotero_create_items',

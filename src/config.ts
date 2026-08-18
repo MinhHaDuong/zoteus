@@ -3,6 +3,8 @@ import { defaultDataDir } from './lib/paths.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
+  /** Pre-provisioned Zotero 9+ desktop local-API key (skips the grant dialog). */
+  localApiKey?: string;
   libraryId?: number;
   libraryType: 'user' | 'group';
   local: 'auto' | 'on' | 'off';
@@ -64,6 +66,7 @@ const optionalNonEmpty = () =>
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   const schema = z.object({
     ZOTERO_API_KEY: optionalNonEmpty(),
+    ZOTEUS_LOCAL_API_KEY: optionalNonEmpty(),
     ZOTERO_LIBRARY_ID: z.coerce.number().int().positive().optional(),
     ZOTERO_LIBRARY_TYPE: z.enum(['user', 'group']).default('user'),
     ZOTEUS_LOCAL: z.enum(['auto', 'on', 'off']).default('auto'),
@@ -138,6 +141,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
 
   return {
     apiKey: parsed.ZOTERO_API_KEY,
+    localApiKey: parsed.ZOTEUS_LOCAL_API_KEY,
     libraryId: parsed.ZOTERO_LIBRARY_ID,
     libraryType: parsed.ZOTERO_LIBRARY_TYPE,
     local: parsed.ZOTEUS_LOCAL,

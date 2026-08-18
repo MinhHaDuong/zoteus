@@ -48,6 +48,8 @@ These files are generated from the tool registry — regenerate with `npm run ge
 | `getFulltext()` | `zotero_get_fulltext` | Get attachment full text / passages (read-only) |
 | `sync()` | `zotero_sync` | Incremental sync delta |
 | `attachment()` | `zotero_attachment` | Zotero attachments (files) |
+| `annotate()` | `zotero_annotate` | Annotate a PDF (highlights, notes) |
+| `attachFile()` | `zotero_attach_file` | Attach a file (PDF, snapshot) to an item |
 | `importTool()` | `zotero_import` | Import items by identifier or URL |
 | `styles()` | `zotero_styles` | Resolve CSL citation styles |
 | `formatBibliography()` | `zotero_format_bibliography` | Format a bibliography (citeproc / any CSL style) |

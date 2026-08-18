@@ -5,6 +5,8 @@ import { createLogger, type Logger } from './lib/logger.js';
 import { RateLimitedFetcher } from './api/http.js';
 import { WebApiClient } from './api/web-client.js';
 import { LocalApiClient } from './api/local-client.js';
+import { LocalWriteClient } from './api/local-writes.js';
+import { ConnectorWriteClient } from './api/connector-writes.js';
 import { probeCapabilities } from './router/capabilities.js';
 import { LibraryRouter } from './router/library-router.js';
 import { SchemaService } from './schema/schema-service.js';
@@ -58,6 +60,25 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
 
   const capabilities = await probeCapabilities(config, { web, local, logger });
   const router = new LibraryRouter({ config, capabilities, web, local });
+  // Zotero 9+ accepts local-API writes behind a user-granted key. Only the operator
+  // context (never per-user tenants) talks to the desktop app. The client is created
+  // eagerly but authorizes lazily, on first write.
+  const localWrites =
+    !perUser && capabilities.localApi
+      ? new LocalWriteClient({
+          port: config.localPort,
+          fetcher,
+          logger,
+          key: config.localApiKey,
+          keyStorePath: join(config.dataDir, 'local-api-key.json'),
+        })
+      : undefined;
+  // The connector protocol works on all recent Zotero versions while the app runs,
+  // including ones whose local API is still read-only (no grant dialog involved).
+  const connectorWrites =
+    !perUser && capabilities.localApi
+      ? new ConnectorWriteClient({ port: config.localPort, fetcher, logger })
+      : undefined;
   const schema = new SchemaService({ web });
   const styles = new StyleResolver();
   const translation = new TranslationServerClient(config.translationServerUrl, fetcher);
@@ -77,6 +98,8 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     schema,
     web,
     local,
+    localWrites,
+    connectorWrites,
     styles,
     translation,
     search,

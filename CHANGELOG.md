@@ -6,6 +6,48 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **PDF annotation tools.** New `zotero_annotate` adds and deletes Zotero PDF
+  annotations — highlights, underlines, and notes — the same objects the PDF reader
+  creates (`annotationType`, `annotationText`, `annotationComment`, `annotationColor`,
+  `annotationPosition` as `{"pageIndex":N,"rects":[[x1,y1,x2,y2],...]}` in native PDF
+  points (bottom-left origin), and a reader-compatible `annotationSortIndex`). It
+  resolves the PDF attachment from any parent item, or accepts an attachment key
+  directly. New `zotero_attach_file` stores a local file or URL as an `imported_file`
+  attachment under an item where the desktop app supports local-API writes.
+- **Desktop writes, two paths.** `zotero_annotate`, `zotero_attach_file`,
+  `zotero_trash_items` and `zotero_import` (save) now write straight to the running
+  Zotero desktop app for the personal library — no cloud key required:
+  - On Zotero builds with local-API write support, writes use the user-granted local
+    key (`POST /api/local/authorize`; cached under the data dir as
+    `local-api-key.json`, pre-provisionable via `ZOTEUS_LOCAL_API_KEY`), carrying the
+    required `Zotero-Server-ID` header and transparently re-authorizing on 401 /
+    re-probing on 412/428.
+  - On Zotero versions whose local API is still read-only (≤ 9.0), writes fall back to
+    the desktop connector protocol (`saveItems`/`saveAttachment`/`updateSession`) — no
+    grant dialog; created keys are recovered by polling the local API. `zotero_import`
+    gained `attach_url`/`attach_title` to stream a file (e.g. an arXiv PDF) into the
+    same save session, and `collection_key` targeting for desktop saves.
+  - The cloud Web API remains the fallback when the desktop app is not running or a
+    group/other library is targeted.
+- **PDF full-text fallback.** `zotero_get_fulltext` now serves text even when Zotero
+  has not indexed a PDF: it downloads the attachment and extracts text on the fly
+  (optional pdfjs-dist), with exact page locators (`fulltextSource:"pdf"`). Opt out
+  with `fallback:false`. OOM size guard shared with `precise_pages`.
+- **Semantic-search first-use UX.** `zotero_semantic_search` auto-starts the index
+  build on first use (`auto_build`, default true) and reports progress instead of
+  failing silently; `zotero_index` builds now run as a background job (poll
+  `action:"status"`, cancel with `action:"stop"`), persisting partial progress
+  atomically.
+
+### Fixed
+- Child-item listing on the desktop read path returned the **entire library**: the
+  local API silently ignores the `parentItem` query param, so `zotero_get_item`
+  (`include_children`) and `zotero_annotate`'s PDF-attachment resolution scored every
+  item in the library. Children are now fetched via `/items/<key>/children`.
+- Import save errors now surface as actionable results instead of unhandled
+  rejections (`await maybeSave`); pdfjs no longer detaches caller buffers.
+
 ## [1.1.0] — 2026-08-14
 
 ### Added

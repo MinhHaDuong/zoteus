@@ -1,0 +1,147 @@
+import { describe, it, expect, vi } from 'vitest';
+import importTool from '../../src/tools/import.js';
+
+/** Minimal ctx for the DOI built-in resolution path (translation-server down). */
+function makeCtx(over: any = {}): any {
+  return {
+    config: { translationServerUrl: 'http://127.0.0.1:1969' },
+    capabilities: { cloud: null, localApi: false },
+    translation: { isUp: vi.fn(async () => false) },
+    scholar: {
+      lookup: vi.fn(async () => ({
+        title: 'A Scholarly Work',
+        authors: ['Ada Lovelace'],
+        year: 2024,
+        venue: 'Nature',
+      })),
+    },
+    fetcher: { fetch: vi.fn() },
+    web: {
+      writeItems: vi.fn(async () => ({
+        successful: [{ index: 0, key: 'CLOUDKEY', version: 1 }],
+        unchanged: [],
+        failed: [],
+        newLibraryVersion: 1,
+      })),
+    },
+    localWrites: undefined,
+    connectorWrites: undefined,
+    local: undefined,
+    router: { defaultLibrary: () => ({ type: 'user', id: 0 }) },
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    ...over,
+  };
+}
+
+const localWriteResult = {
+  successful: [{ index: 0, key: 'LOCALKEY1', version: 7 }],
+  unchanged: [],
+  failed: [],
+  newLibraryVersion: 7,
+};
+
+describe('zotero_import save target (DOI without translation-server)', () => {
+  it('saves via the desktop local API when a stored grant key exists', async () => {
+    const writeItems = vi.fn(async () => localWriteResult);
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems },
+    });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(writeItems).toHaveBeenCalledTimes(1);
+    expect(ctx.web.writeItems).not.toHaveBeenCalled();
+    const sc = res.structuredContent as any;
+    expect(sc.target).toBe('local');
+    expect(sc.created).toEqual(['LOCALKEY1']);
+    expect(sc.source).toBe('scholar');
+    // provenance tag is attached to the item sent to Zotero
+    expect(writeItems.mock.calls[0][0][0].extra).toContain('resolved:scholar');
+  });
+
+  it('saves via the connector protocol when the desktop app is up but no local key is stored', async () => {
+    const saveItems = vi.fn(async () => ({ sessionID: 'sess-1', connectorIds: ['c1'] }));
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      connectorWrites: { saveItems },
+      local: {
+        listItems: vi.fn(async () => ({
+          data: [{ key: 'DESKKEY1', data: { key: 'DESKKEY1', title: 'A Scholarly Work' } }],
+          totalResults: 1,
+          lastModifiedVersion: 1,
+        })),
+      },
+    });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(saveItems).toHaveBeenCalledTimes(1);
+    expect(ctx.web.writeItems).not.toHaveBeenCalled();
+    const sc = res.structuredContent as any;
+    expect(sc.target).toBe('desktop');
+    expect(sc.created).toEqual(['DESKKEY1']);
+  });
+
+  it('falls back to the cloud Web API for an explicit group library even when desktop writes exist', async () => {
+    const writeItems = vi.fn(async () => localWriteResult);
+    const ctx = makeCtx({
+      capabilities: { cloud: { userID: 42 }, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems },
+    });
+    const res = await importTool.handler(
+      {
+        action: 'by_identifier',
+        identifier: '10.1234/example',
+        save_to_library: true,
+        library_id: 12345,
+        library_type: 'group',
+      },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(writeItems).not.toHaveBeenCalled();
+    expect(ctx.web.writeItems).toHaveBeenCalledTimes(1);
+    expect((res.structuredContent as any).target).toBe('cloud');
+    expect((res.structuredContent as any).created).toEqual(['CLOUDKEY']);
+  });
+
+  it('falls back to the cloud Web API when the desktop app is not available', async () => {
+    const ctx = makeCtx({ capabilities: { cloud: { userID: 42 }, localApi: false } });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(ctx.web.writeItems).toHaveBeenCalledTimes(1);
+    expect((res.structuredContent as any).target).toBe('cloud');
+  });
+
+  it('errors with actionable guidance when neither desktop writes nor a cloud key exist', async () => {
+    const ctx = makeCtx({ capabilities: { cloud: null, localApi: false } });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    const text = (res.content ?? []).map((x: { text: string }) => x.text).join('\n');
+    expect(text).toMatch(/ZOTERO_API_KEY|desktop/i);
+  });
+
+  it('resolves without saving when save_to_library is omitted (no writes at all)', async () => {
+    const writeItems = vi.fn(async () => localWriteResult);
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems },
+    });
+    const res = await importTool.handler({ action: 'by_identifier', identifier: '10.1234/example' }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(writeItems).not.toHaveBeenCalled();
+    expect(ctx.web.writeItems).not.toHaveBeenCalled();
+    expect((res.structuredContent as any).saved).toBe(false);
+  });
+});

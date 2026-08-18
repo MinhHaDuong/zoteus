@@ -28,8 +28,18 @@ export async function probeCapabilities(
         })
     : Promise.resolve(null);
 
+  // The desktop app may be mid-startup when zoteus boots; a single instant ping can
+  // race it and wrongly disable every desktop write path for the process lifetime.
   const localPromise: Promise<boolean> =
-    config.local !== 'off' && deps.local ? deps.local.ping().catch(() => false) : Promise.resolve(false);
+    config.local !== 'off' && deps.local
+      ? (async () => {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            if (await deps.local!.ping().catch(() => false)) return true;
+            await new Promise((r) => setTimeout(r, 600));
+          }
+          return false;
+        })()
+      : Promise.resolve(false);
 
   const [cloud, localApi] = await Promise.all([cloudPromise, localPromise]);
   deps.logger.info(

@@ -16,6 +16,8 @@ import fulltext from './fulltext.js';
 import getFulltext from './get-fulltext.js';
 import sync from './sync.js';
 import attachment from './attachment.js';
+import annotate from './annotate.js';
+import attachFile from './attach-file.js';
 import importTool from './import.js';
 import styles from './styles.js';
 import formatBibliography from './format-bibliography.js';
@@ -49,6 +51,8 @@ export const tools: ToolDefinition[] = [
   getFulltext,
   sync,
   attachment,
+  annotate,
+  attachFile,
   // Citation pipeline (M5)
   importTool,
   styles,
