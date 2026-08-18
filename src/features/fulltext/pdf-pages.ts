@@ -26,7 +26,10 @@ export async function extractPdfPages(
     return null; // dependency not installed — degrade
   }
   try {
-    const loadingTask = pdfjs.getDocument({ data: bytes, useSystemFonts: true, isEvalSupported: false });
+    // pdfjs transfers (detaches) the buffer it is given; hand it a copy so the
+    // caller's bytes stay intact (matters when the same buffer is re-extracted).
+    const data = bytes.slice();
+    const loadingTask = pdfjs.getDocument({ data, useSystemFonts: true, isEvalSupported: false });
     const doc = await loadingTask.promise;
     const pages: string[] = [];
     for (let i = 1; i <= doc.numPages; i++) {
@@ -38,6 +41,11 @@ export async function extractPdfPages(
   } catch {
     return null; // corrupt PDF / parse failure — degrade
   }
+}
+
+/** Join extracted page texts into one document text (pages separated by a blank line). */
+export function pdfPagesToText(pages: string[]): string {
+  return pages.join('\n\n');
 }
 
 function normalize(s: string): string {

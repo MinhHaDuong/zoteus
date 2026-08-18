@@ -41,6 +41,17 @@ Install the optional dependency for exact pages:
 npm i pdfjs-dist
 ```
 
+### Unindexed PDFs: on-the-fly extraction fallback
+
+`zotero_get_fulltext` normally serves text from Zotero's full-text index. When an attachment has **not been indexed yet** (no stored full text), the tool falls back to downloading the PDF and extracting its text directly with the same `pdfjs-dist` parser:
+
+- The response is served exactly like indexed text — `query`, `page_range`, and document modes all work — with **exact** page locators (`pageSource: "exact"`) and `fulltextSource: "pdf"` so callers know the text was extracted on the fly.
+- The fallback is on by default; pass `fallback: false` to opt out (the tool then returns an actionable "not indexed" error).
+- Same OOM guard as `precise_pages`: attachments larger than 20 MB are not parsed; the error tells you to open the PDF once in Zotero to index it.
+- Scanned/image-only PDFs yield no text: the error explains that extraction found nothing.
+
+This covers libraries where many PDFs were never indexed — grounding works without waiting for Zotero to re-process the library.
+
 ### Read-only mode
 
 `zotero_get_fulltext` is annotated `readOnlyHint: true` and remains available under `ZOTEUS_READ_ONLY=true`.
