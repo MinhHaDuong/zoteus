@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-08-18
+
 ### Fixed
 - **Zotero 10 local-API writes.** Local-API write support shipped in Zotero 10 (Zotero 9
   and earlier expose a read-only, GET-only local API), and the shipped protocol differs
