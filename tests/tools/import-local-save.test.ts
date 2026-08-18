@@ -132,6 +132,80 @@ describe('zotero_import save target (DOI without translation-server)', () => {
     expect(text).toMatch(/ZOTERO_API_KEY|desktop/i);
   });
 
+  it('attaches attach_url as a stored file on the local-API save path', async () => {
+    const writeItems = vi.fn(async (items: any[]) =>
+      items[0]?.itemType === 'attachment'
+        ? { successful: [{ index: 0, key: 'ATTACHKEY', version: 8 }], unchanged: [], failed: [], newLibraryVersion: 8 }
+        : localWriteResult,
+    );
+    const uploadFile = vi.fn(async () => {});
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems, uploadFile },
+      fetcher: {
+        fetch: vi.fn(async () =>
+          new Response(new Uint8Array([1, 2, 3, 4]), { status: 200, headers: { 'content-type': 'application/pdf' } }),
+        ),
+      },
+    });
+    const res = await importTool.handler(
+      {
+        action: 'by_identifier',
+        identifier: '10.1234/example',
+        save_to_library: true,
+        attach_url: 'https://arxiv.org/pdf/2501.12345v1?download=1',
+        attach_title: 'Full Text PDF',
+      },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as any;
+    expect(sc.target).toBe('local');
+    expect(sc.warning).toBeUndefined();
+    expect(sc.attached).toMatchObject({ key: 'ATTACHKEY', bytes: 4, contentType: 'application/pdf' });
+    // The attachment item is a stored (imported_file) child of the item just saved.
+    expect(writeItems).toHaveBeenCalledTimes(2);
+    expect(writeItems.mock.calls[1][0][0]).toMatchObject({
+      itemType: 'attachment',
+      parentItem: 'LOCALKEY1',
+      linkMode: 'imported_file',
+      title: 'Full Text PDF',
+      contentType: 'application/pdf',
+    });
+    // ...and the bytes go up under a bare file name with a .pdf extension.
+    expect(uploadFile).toHaveBeenCalledTimes(1);
+    expect(uploadFile.mock.calls[0][0]).toBe('ATTACHKEY');
+    expect(uploadFile.mock.calls[0][1]).toMatchObject({ filename: '2501.12345v1.pdf', contentType: 'application/pdf' });
+    expect(uploadFile.mock.calls[0][1].bytes).toHaveLength(4);
+  });
+
+  it('keeps a local save successful when the attach_url download fails (warning only)', async () => {
+    const writeItems = vi.fn(async () => localWriteResult);
+    const uploadFile = vi.fn(async () => {});
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems, uploadFile },
+      fetcher: { fetch: vi.fn(async () => new Response('nope', { status: 404 })) },
+    });
+    const res = await importTool.handler(
+      {
+        action: 'by_identifier',
+        identifier: '10.1234/example',
+        save_to_library: true,
+        attach_url: 'https://example.org/missing.pdf',
+      },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as any;
+    expect(sc.created).toEqual(['LOCALKEY1']);
+    expect(sc.attached).toBeUndefined();
+    expect(sc.warning).toMatch(/404/);
+    expect(uploadFile).not.toHaveBeenCalled();
+    // The failed attachment must not push the import onto another save path.
+    expect(ctx.web.writeItems).not.toHaveBeenCalled();
+  });
+
   it('resolves without saving when save_to_library is omitted (no writes at all)', async () => {
     const writeItems = vi.fn(async () => localWriteResult);
     const ctx = makeCtx({

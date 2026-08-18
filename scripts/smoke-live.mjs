@@ -290,16 +290,19 @@ try {
   } else {
     const { pdf, kids } = await findPdfChild(itemKey);
     pdfKey = pdf?.key;
+    // Both desktop write paths must land the file: the connector protocol streams it
+    // into the save session, the local API stores it as a child right after the save.
     if (pdfKey) {
-      pass('zotero_import attaches attach_url as a stored PDF', `attachment=${pdfKey} linkMode=${pdf.linkMode}`);
-    } else if (imported.data.target === 'local') {
-      // The local-API save path ignores attach_url today (only the connector path streams it).
-      skip(
+      pass(
         'zotero_import attaches attach_url as a stored PDF',
-        `local-API save path does not stream attach_url; no PDF child of ${itemKey} (${kids.length} child item(s))`,
+        `target=${imported.data.target} attachment=${pdfKey} linkMode=${pdf.linkMode}`,
       );
     } else {
-      fail('zotero_import attaches attach_url as a stored PDF', `no PDF child of ${itemKey} (${kids.length} child item(s))`);
+      fail(
+        'zotero_import attaches attach_url as a stored PDF',
+        `target=${imported.data.target}: no PDF child of ${itemKey} (${kids.length} child item(s))`,
+      );
+      if (imported.data.warning) note(`server warning: ${imported.data.warning}`);
     }
   }
 

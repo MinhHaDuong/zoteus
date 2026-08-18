@@ -2,6 +2,14 @@ import { z } from 'zod';
 import type { ToolDefinition, ToolHandlerResult, ToolContext } from '../registry/registry.js';
 import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
 import { arxivItem, fromScholarWork, parseIdentifier, bareDoi, type ResolvedItem } from '../features/resolve/resolve.js';
+import {
+  AttachmentDownloadError,
+  bareFilename,
+  downloadAttachment,
+  resolveContentType,
+  storeLocalAttachment,
+  withExtensionFor,
+} from '../features/attachments/store.js';
 
 function err(text: string): ToolHandlerResult {
   return { content: [{ type: 'text', text }], isError: true };
@@ -123,9 +131,32 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
         for (const it of payload) it.collections = [...(it.collections ?? []), args.collection_key];
       }
       const result = await ctx.localWrites.writeItems(payload);
+      const created = result.successful.map((s) => s.key);
+      // The connector path streams attach_url into its save session; the local API has
+      // no such session, so the file is stored as a child attachment right after the
+      // save. As on the connector path, a failure here degrades to a warning — the
+      // items are already in the library and re-running would duplicate them.
+      let attached: { key: string; bytes: number; contentType: string; filename: string } | undefined;
+      let warning: string | undefined;
+      if (args.attach_url) {
+        if (!created[0]) {
+          warning = `No item key came back from the save, so ${args.attach_url} was not attached.`;
+        } else {
+          try {
+            attached = await attachUrlLocally(ctx, created[0], args.attach_url, args.attach_title);
+          } catch (e) {
+            const why = e instanceof Error ? e.message : String(e);
+            ctx.logger.warn(`Attaching ${args.attach_url} to ${created[0]} failed: ${why}`);
+            warning = `Item saved, but attaching ${args.attach_url} failed: ${why}`;
+          }
+        }
+      }
       return ok(
-        { created: result.successful.map((s) => s.key), failed: result.failed, resolved: payload.length, source, target: 'local' },
-        `Imported ${result.successful.length} of ${payload.length} resolved item(s) via ${source} into the library (Zotero desktop).`,
+        { created, failed: result.failed, resolved: payload.length, source, target: 'local', attached, warning },
+        `Imported ${result.successful.length} of ${payload.length} resolved item(s) via ${source} into the library (Zotero desktop)` +
+          (attached ? `, with ${attached.bytes}-byte ${attached.filename} attached` : '') +
+          '.' +
+          (warning ? ` ${warning}` : ''),
       );
     } catch (e) {
       if (!isLocalWritesUnavailable(e)) throw e;
@@ -156,15 +187,18 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
     }
     let attached: { bytes: number; contentType: string } | undefined;
     if (args.attach_url && connectorIds[0]) {
-      const res = await ctx.fetcher.fetch(args.attach_url, { method: 'GET' }, { maxRetries: 2, deadlineMs: 300_000 });
-      if (!res.ok) {
+      let file: { bytes: Uint8Array; contentType?: string };
+      try {
+        file = await downloadAttachment(ctx, args.attach_url);
+      } catch (e) {
+        if (!(e instanceof AttachmentDownloadError)) throw e;
         return ok(
-          { sessionID, resolved: stripped.length, source, target: 'desktop', warning: `File download failed (${res.status}) for ${args.attach_url}` },
-          `Saved ${stripped.length} item(s) via ${source}; attachment download failed (${res.status}).`,
+          { sessionID, resolved: stripped.length, source, target: 'desktop', warning: `File download failed (${e.status}) for ${args.attach_url}` },
+          `Saved ${stripped.length} item(s) via ${source}; attachment download failed (${e.status}).`,
         );
       }
-      const contentType = res.headers.get('content-type')?.split(';')[0] ?? 'application/pdf';
-      const bytes = new Uint8Array(await res.arrayBuffer());
+      const contentType = file.contentType ?? 'application/pdf';
+      const bytes = file.bytes;
       await ctx.connectorWrites.saveAttachment({
         sessionID,
         parentConnectorId: connectorIds[0],
@@ -224,6 +258,38 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
 }
 
 export default importTool;
+
+/**
+ * Local-API equivalent of the connector protocol's in-session saveAttachment: download
+ * `attach_url` and store it as an `imported_file` child of the item just saved.
+ *
+ * `attach_title` names the attachment (the connector path defaults to "Full Text PDF");
+ * the stored file name comes from the URL, since Zotero needs a bare name and titles may
+ * contain path separators. arXiv-style URLs carry no extension, so one is appended from
+ * the content type.
+ */
+async function attachUrlLocally(
+  ctx: ToolContext,
+  parent: string,
+  url: string,
+  title?: string,
+): Promise<{ key: string; bytes: number; contentType: string; filename: string }> {
+  const file = await downloadAttachment(ctx, url);
+  const name = file.filename === 'attachment' && title ? bareFilename(title) : file.filename;
+  // attach_url is documented as a full-text file (typically a PDF); fall back to that
+  // when neither the server nor the URL says what it is.
+  const contentType = resolveContentType(name, { served: file.contentType, fallback: 'application/pdf' });
+  const filename = withExtensionFor(name, contentType);
+  const key = await storeLocalAttachment(ctx, {
+    parent,
+    bytes: file.bytes,
+    filename,
+    contentType,
+    title: title ?? 'Full Text PDF',
+    url,
+  });
+  return { key, bytes: file.bytes.length, contentType, filename };
+}
 
 
 /**

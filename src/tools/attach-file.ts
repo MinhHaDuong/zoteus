@@ -2,6 +2,13 @@ import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok, ensureLocalApi } from '../registry/registry.js';
+import {
+  AttachmentDownloadError,
+  bareFilename,
+  downloadAttachment,
+  resolveContentType,
+  storeLocalAttachment,
+} from '../features/attachments/store.js';
 
 /**
  * Attach a file (local path or URL) to an item as a stored (imported_file)
@@ -35,45 +42,33 @@ const attachFile: ToolDefinition = {
 
     let bytes: Uint8Array;
     let inferredName: string;
+    let served: string | undefined;
     if (args.path) {
       bytes = new Uint8Array(await readFile(args.path));
-      inferredName = args.path.split(/[\\/]/).pop() ?? 'attachment';
+      inferredName = bareFilename(args.path);
     } else {
-      const res = await ctx.fetcher.fetch(args.url, { method: 'GET' }, { maxRetries: 2, deadlineMs: 300_000 });
-      if (!res.ok) {
-        return { content: [{ type: 'text', text: `Download failed (${res.status}) for ${args.url}` }], isError: true };
+      try {
+        const file = await downloadAttachment(ctx, args.url);
+        ({ bytes, contentType: served } = file);
+        inferredName = file.filename;
+      } catch (e) {
+        if (!(e instanceof AttachmentDownloadError)) throw e;
+        return { content: [{ type: 'text', text: e.message }], isError: true };
       }
-      bytes = new Uint8Array(await res.arrayBuffer());
-      const noQuery = args.url.split('?')[0] ?? args.url;
-      inferredName = decodeURIComponent(noQuery.split('/').pop() ?? 'attachment');
     }
-    // Zotero rejects anything that is not a bare file name, since it joins the value
-    // onto the storage directory path when the upload lands.
-    const filename = (args.filename ?? inferredName).split(/[\\/]/).pop() || inferredName;
-    const ext = filename.split('.').pop()?.toLowerCase() ?? '';
-    const contentType =
-      args.content_type ??
-      (ext === 'pdf' ? 'application/pdf' : ext === 'html' || ext === 'htm' ? 'text/html' : 'application/octet-stream');
+    const filename = bareFilename(args.filename ?? inferredName, inferredName);
+    const contentType = resolveContentType(filename, { explicit: args.content_type, served });
 
-    // 1) Create the attachment item, 2) upload + register the file bytes.
-    const result = await ctx.localWrites.writeItems([
-      {
-        itemType: 'attachment',
-        parentItem: args.parent,
-        linkMode: 'imported_file',
-        title: args.title ?? filename,
-        contentType,
-        tags: [],
-      },
-    ]);
-    if (result.failed.length || !result.successful.length) {
-      return { content: [{ type: 'text', text: `Could not create attachment item: ${JSON.stringify(result.failed)}` }], isError: true };
-    }
-    const attachmentKey = result.successful[0]?.key;
-    if (!attachmentKey) {
-      return { content: [{ type: 'text', text: 'Local write returned no attachment key.' }], isError: true };
-    }
-    await ctx.localWrites.uploadFile(attachmentKey, { bytes, filename, contentType });
+    // 1) Create the attachment item, 2) upload + register the file bytes. A refusal
+    //    from Zotero surfaces as a tool error through the registry's error mapping.
+    const attachmentKey = await storeLocalAttachment(ctx, {
+      parent: args.parent,
+      bytes,
+      filename,
+      contentType,
+      title: args.title,
+      url: args.url,
+    });
     return ok(
       { attachment: attachmentKey, parent: args.parent, filename, bytes: bytes.length, contentType, target: 'local' },
       `Attached ${filename} (${bytes.length} bytes) to item ${args.parent} as ${attachmentKey}.`,

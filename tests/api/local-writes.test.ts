@@ -239,6 +239,47 @@ describe('LocalWriteClient (Zotero 10+ desktop writes)', () => {
     expect(deletes[2]!.split(',')).toHaveLength(20);
   });
 
+  it('stores a file in three phases: authorize, POST the bytes, register the uploadKey', async () => {
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    const bytes = new Uint8Array([37, 80, 68, 70]); // "%PDF"
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method === 'GET') return probeResponse();
+      calls.push({ url, method, body: typeof init.body === 'string' ? init.body : '<bytes>' });
+      if (url.endsWith('/items/ATT1/file')) {
+        const form = new URLSearchParams(String(init.body));
+        return form.get('upload')
+          ? new Response(null, { status: 204 })
+          : okJson({ url: 'http://127.0.0.1:23119/storage/upload', uploadKey: 'up-1' });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const client = makeClient(fetchImpl, { key: 'k' });
+    await client.uploadFile('ATT1', { bytes, filename: 'paper.pdf', contentType: 'application/pdf', mtimeMs: 1700000000000 });
+    expect(calls).toHaveLength(3);
+    const authorize = new URLSearchParams(calls[0]!.body!);
+    expect(calls[0]!.url).toMatch(/\/users\/0\/items\/ATT1\/file$/);
+    expect(authorize.get('filename')).toBe('paper.pdf');
+    expect(authorize.get('filesize')).toBe('4');
+    expect(authorize.get('contentType')).toBe('application/pdf');
+    expect(authorize.get('md5')).toMatch(/^[0-9a-f]{32}$/);
+    expect(calls[1]!.url).toBe('http://127.0.0.1:23119/storage/upload');
+    expect(calls[1]!.body).toBe('<bytes>');
+    expect(new URLSearchParams(calls[2]!.body!).get('upload')).toBe('up-1');
+  });
+
+  it('skips the byte upload when Zotero already stores an identical file', async () => {
+    const posts: string[] = [];
+    const fetchImpl = vi.fn(async (url: string, init: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') return probeResponse();
+      posts.push(url);
+      return okJson({ exists: 1 });
+    });
+    const client = makeClient(fetchImpl, { key: 'k' });
+    await client.uploadFile('ATT1', { bytes: new Uint8Array([1]), filename: 'a.pdf', contentType: 'application/pdf' });
+    expect(posts).toEqual([expect.stringMatching(/\/items\/ATT1\/file$/)]);
+  });
+
   it('reports a read-only local API (Zotero 9 and earlier) as "not supported"', async () => {
     // 9.x answers reads fine but never sends Zotero-Server-ID, since writes do not exist.
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
