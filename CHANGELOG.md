@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-08-18
+
 ### Fixed
 - **Semantic-search indexing no longer requires a cloud key while Zotero runs** (#5).
   The index build fetched items through the cloud Web API unconditionally; it now pages
