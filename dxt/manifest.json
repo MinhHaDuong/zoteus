@@ -25,7 +25,8 @@
       "args": ["${__dirname}/dist/index.js"],
       "env": {
         "ZOTERO_API_KEY": "${user_config.api_key}",
-        "ZOTEUS_LOCAL": "${user_config.local}"
+        "ZOTEUS_LOCAL": "${user_config.local}",
+        "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}"
       }
     }
   },
@@ -33,15 +34,22 @@
     "api_key": {
       "type": "string",
       "title": "Zotero API Key",
-      "description": "Create one at https://www.zotero.org/settings/keys. Optional if you only read your local Zotero 7+ library, but required for writes, sync, and group libraries.",
+      "description": "Create one at https://www.zotero.org/settings/keys. Optional when the Zotero desktop app is running (key-free reads and personal-library writes); needed for sync, group libraries, and writes when the app is closed.",
       "sensitive": true,
       "required": false
     },
     "local": {
       "type": "string",
       "title": "Zotero local API",
-      "description": "Use the Zotero 7+ desktop local API for fast, key-free reads: auto | on | off.",
+      "description": "Talk to the running Zotero desktop app (key-free reads, and writes where supported): auto | on | off.",
       "default": "auto",
+      "required": false
+    },
+    "embeddings": {
+      "type": "string",
+      "title": "Semantic-search embeddings",
+      "description": "Embedding provider for semantic search: local (default, on-device model) | openai | gemini | off (keyword-only index — fastest to build, useful on slow machines).",
+      "default": "local",
       "required": false
     }
   },
