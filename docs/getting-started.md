@@ -82,7 +82,7 @@ If you use the **Zotero 7 (or newer) desktop app**, Zoteus can work with your li
 2. Enable **"Allow other applications on this computer to communicate with Zotero"**.
 3. Keep Zotero running while you chat with Claude.
 
-This key-free mode covers searching, reading, bibliographies, and PDF text from your own library — and adding items, filing attachments, highlighting PDFs, and trashing items, which go straight into the running app. (The first such change may pop up a one-time Zotero dialog asking whether to allow Zoteus to make changes; choose **Always Allow**.) You'd add an API key only to **sync, work with group libraries, or make changes while Zotero is closed**.
+This key-free mode covers searching (keyword *and* semantic, including the one-time index build), reading, bibliographies, and PDF text from your own library — and adding items, filing attachments, highlighting PDFs, and trashing items, which go straight into the running app. (The first such change may pop up a one-time Zotero dialog asking whether to allow Zoteus to make changes; choose **Always Allow**.) You'd add an API key only to **sync, work with group libraries, or make changes while Zotero is closed**.
 
 ## Restart Claude Desktop and verify
 

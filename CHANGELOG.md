@@ -6,6 +6,24 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **Semantic-search indexing no longer requires a cloud key while Zotero runs** (#5).
+  The index build fetched items through the cloud Web API unconditionally; it now pages
+  through the same local-first router as every other read, so a running desktop app
+  serves the build key-free (group libraries and app-closed builds still use the cloud).
+  Also fixes a local-API pagination bug where a missing `Total-Results` header was read
+  as `0`, silently truncating a local build after the first page. README and docs now
+  state the actual key rule.
+- **`zotero_import` attaches `attach_url` on both desktop write paths.** The connector
+  protocol (Zotero 9 and earlier) streamed the file into its save session, but the
+  Zotero 10 local-API save path ignored `attach_url` entirely and left the imported item
+  with no attachment. That path now downloads the file and stores it as an
+  `imported_file` child of the saved item through the local API's 3-phase upload — the
+  same flow `zotero_attach_file` uses — honouring `attach_title` and deriving a bare
+  file name (with the extension the content type implies) from the URL. A failed
+  download or upload degrades to a `warning` on an otherwise-successful import instead
+  of failing the save, since the items are already in the library.
+
 ## [1.3.0] — 2026-08-18
 
 ### Fixed

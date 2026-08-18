@@ -50,12 +50,13 @@ export class LocalApiClient {
   }
 
   private toListResult<T>(json: T[], headers: Headers): ListResult<T> {
-    const tr = Number(headers.get('total-results'));
-    const v = Number(headers.get('last-modified-version'));
+    // Mirror the Web API client: a MISSING header must fall back, not parse as 0
+    // (`Number(null)` is 0, which is finite). A bogus totalResults of 0 would stop a
+    // paging caller — e.g. the search-index build — after its very first page.
     return {
       data: json,
-      totalResults: Number.isFinite(tr) ? tr : json.length,
-      lastModifiedVersion: Number.isFinite(v) ? v : 0,
+      totalResults: numOrUndef(headers.get('total-results')) ?? json.length,
+      lastModifiedVersion: numOrUndef(headers.get('last-modified-version')) ?? 0,
     };
   }
 
@@ -103,4 +104,10 @@ export class LocalApiClient {
     const { json, headers } = await this.getJson(`/users/0${segment}`, this.buildQuery(rest as any));
     return this.toListResult(json, headers);
   }
+}
+
+function numOrUndef(v: string | null): number | undefined {
+  if (v === null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }

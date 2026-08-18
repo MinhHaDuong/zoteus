@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import indexTool from '../../src/tools/index-tool.js';
+import { LibraryRouter } from '../../src/router/library-router.js';
+import { loadConfig } from '../../src/config.js';
 import { SearchIndex } from '../../src/features/search/index-manager.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import type { EmbeddingProvider } from '../../src/features/search/embeddings.js';
@@ -30,11 +32,20 @@ function makeWeb(library: any[]) {
   };
 }
 
+/**
+ * Context around a real LibraryRouter with no desktop app in reach, so the build pages
+ * the cloud Web API. Local-first routing has its own coverage in
+ * tests/features/search-build-routing.test.ts.
+ */
 function makeCtx(search: SearchIndex, library: any[]): any {
+  const web = makeWeb(library);
+  const config = loadConfig({ ZOTEUS_LOCAL: 'off' } as any);
+  const capabilities = { cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any, localApi: false };
   return {
-    config: { dataDir: join(tmpdir(), `zoteus-index-tool-${process.pid}`) },
-    router: { defaultLibrary: () => ({ type: 'user', id: 19552201 }) },
-    web: makeWeb(library),
+    config: { ...config, dataDir: join(tmpdir(), `zoteus-index-tool-${process.pid}`) },
+    capabilities,
+    router: new LibraryRouter({ config, capabilities, web: web as any }),
+    web,
     search,
     searchIndexPath: join(tmpdir(), `zoteus-index-tool-${process.pid}-${Math.random().toString(36).slice(2)}.json`),
     logger: silentLogger,

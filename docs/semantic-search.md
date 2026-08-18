@@ -24,6 +24,14 @@ can never time out the MCP client, even on very large libraries.
   pages/batches and the partial index is kept and stays searchable.
 - `limit` — optional max number of items to index (default and hard cap: 5000).
 
+**Local-first, key-free.** The build pages items through the library router, exactly like
+every other read: a running Zotero desktop app serves them from its **local API** (no
+cloud API key required), and the cloud **Web API** takes over when the app is closed — and
+always for group libraries, which the desktop app does not serve. Item keys are identical
+on both backends, so an index built against the desktop app stays valid when a later
+lookup goes to the cloud, and the index file is keyed by the Zoteus data dir (plus the
+authenticated user in multi-tenant mode), never by the library id the read happened to use.
+
 **Incremental, crash-safe persistence.** Partial progress is persisted atomically as the
 build runs (roughly every 200 items or 10s — write-temp-then-rename), so a timeout,
 crash, or `stop` can never corrupt `search-index.json`; the last complete snapshot is
@@ -67,8 +75,10 @@ A few things to know when indexing a big Zotero library:
   keyword search, set `ZOTEUS_EMBEDDINGS=off` for a quick keyword-only (BM25) index.
 - **First local run downloads the model** (~25 MB) before embedding begins — expect a
   one-time delay (and a slower first build) while it fetches and caches.
-- **Builds are capped at 5000 items** (the Web API is paged 100-at-a-time). Pass a
+- **Builds are capped at 5000 items** (both Zotero APIs page 100-at-a-time). Pass a
   smaller `limit` to index a subset faster.
+- **Indexing a big library is fastest against the desktop app** — it is served from disk
+  over loopback, with no cloud rate limits to back off from.
 - **Don't block on the build call.** `build` returns immediately; poll
   `action: "status"` (every few seconds) until `state` is `done`. A partially built
   index is usable for keyword search the whole time, and progress survives crashes.

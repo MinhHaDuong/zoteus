@@ -36,6 +36,29 @@ describe('LocalApiClient', () => {
     expect(r.totalResults).toBe(1);
   });
 
+  it('requests top-level items from /items/top for index builds', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/users/0/items/top');
+      expect(url).toContain('limit=100');
+      expect(url).toContain('start=100');
+      return new Response(JSON.stringify([{ key: 'A' }]), {
+        status: 200,
+        headers: { 'Total-Results': '250', 'Last-Modified-Version': '13' },
+      });
+    });
+    const r = await makeLocal(fetchImpl).listItems({ top: true, limit: 100, start: 100 });
+    expect(r.totalResults).toBe(250); // pagers need the library-wide total, not the page size
+  });
+
+  it('falls back to the page length when Total-Results is missing (never 0)', async () => {
+    // Number(null) is 0 and finite — a naive parse would report totalResults: 0 and stop
+    // a paging caller (the search-index build) dead after its first page.
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ key: 'A' }, { key: 'B' }]), { status: 200 }));
+    const r = await makeLocal(fetchImpl).listItems({ limit: 2 });
+    expect(r.totalResults).toBe(2);
+    expect(r.lastModifiedVersion).toBe(0);
+  });
+
   it('scopes listItems by collection via the path segment, not a query param', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       expect(url).toContain('/api/users/0/collections/ABC/items');

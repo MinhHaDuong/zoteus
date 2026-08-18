@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import indexTool from '../../src/tools/index-tool.js';
 import semanticSearch from '../../src/tools/semantic-search.js';
+import { LibraryRouter } from '../../src/router/library-router.js';
+import { loadConfig } from '../../src/config.js';
 import { SearchIndex } from '../../src/features/search/index-manager.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 
@@ -12,12 +14,17 @@ const sampleItems = [
 ];
 
 function makeCtx(search: SearchIndex): any {
+  const web = {
+    listItems: vi.fn(async () => ({ data: sampleItems, totalResults: 2, lastModifiedVersion: 1 })),
+  };
+  // No desktop app in reach here, so the router pages the cloud Web API.
+  const config = loadConfig({ ZOTEUS_LOCAL: 'off' } as any);
+  const capabilities = { cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any, localApi: false };
   return {
-    config: { dataDir: join(tmpdir(), `zoteus-idx-${process.pid}`) },
-    router: { defaultLibrary: () => ({ type: 'user', id: 19552201 }) },
-    web: {
-      listItems: vi.fn(async () => ({ data: sampleItems, totalResults: 2, lastModifiedVersion: 1 })),
-    },
+    config: { ...config, dataDir: join(tmpdir(), `zoteus-idx-${process.pid}`) },
+    capabilities,
+    router: new LibraryRouter({ config, capabilities, web: web as any }),
+    web,
     search,
     searchIndexPath: join(tmpdir(), `zoteus-idx-${process.pid}-${Math.random().toString(36).slice(2)}.json`),
     logger: { debug() {}, info() {}, warn() {}, error() {} },

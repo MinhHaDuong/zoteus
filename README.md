@@ -77,9 +77,9 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 2. **Connect** — just run the desktop app for key-free local access, or paste your Zotero API key.
 3. **Ask** — your AI can now search, cite, add, and organize your library.
 
-Zoteus auto-detects your running Zotero desktop app and talks to it directly: its fast, key-free **local API** for reads (full PDFs, real saved-search results), and the desktop app itself for personal-library writes (imports, annotations, attachments, trash). The cloud **Web API v3** is the fallback — and stays required for sync, group libraries, and writes when the app isn't running. Details: [`docs/writing.md`](./docs/writing.md).
+Zoteus auto-detects your running Zotero desktop app and talks to it directly: its fast, key-free **local API** for reads (full PDFs, real saved-search results, the semantic-search index build), and the desktop app itself for personal-library writes (imports, annotations, attachments, trash). The cloud **Web API v3** is the fallback — and stays required for sync, group libraries, and writes when the app isn't running. Details: [`docs/writing.md`](./docs/writing.md).
 
-> **Semantic search — one-time setup.** The first `zotero_semantic_search` builds the library index automatically in the background (auto-build). On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until done.
+> **Semantic search — one-time setup.** The first `zotero_semantic_search` builds the library index automatically in the background (auto-build). On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until done. The build pages your library through the same local-first path as every other read, so **it needs no cloud API key while the desktop app is running** — a key is only needed when the app is closed, and always for group libraries.
 
 ## Configuration
 
