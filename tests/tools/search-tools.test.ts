@@ -50,10 +50,36 @@ describe('zotero_index', () => {
 });
 
 describe('zotero_semantic_search', () => {
-  it('errors when the index is empty', async () => {
-    const res = await semanticSearch.handler({ q: 'anything' }, makeCtx(new SearchIndex({ embedder: null })));
+  it('auto-builds on first use: empty index starts a background build and says so', async () => {
+    const ctx = makeCtx(new SearchIndex({ embedder: null }));
+    const res = await semanticSearch.handler({ q: 'anything' }, ctx);
+    expect(res.isError).toBe(true); // not a search result — actionable first-use guidance
+    expect(res.structuredContent?.autoBuild).toBe(true);
+    expect(res.content[0].text).toMatch(/build was started automatically|background build/i);
+    expect(ctx.web.listItems).toHaveBeenCalled();
+    // once the kicked-off background build settles, the same query returns real hits
+    await pollUntilSettled(ctx);
+    const retry = await semanticSearch.handler({ q: 'anything' }, ctx);
+    expect(retry.isError).toBeUndefined();
+    expect(Array.isArray(retry.structuredContent?.hits)).toBe(true);
+  });
+
+  it('reports progress instead of double-building when a build is already running', async () => {
+    const ctx = makeCtx(new SearchIndex({ embedder: null }));
+    await indexTool.handler({ action: 'build' }, ctx); // start one first
+    const res = await semanticSearch.handler({ q: 'anything' }, ctx);
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toMatch(/build/i);
+    expect(res.content[0].text).toMatch(/being built right now|status/i);
+    await pollUntilSettled(ctx);
+  });
+
+  it('returns a plain actionable error (and no build) with auto_build:false', async () => {
+    const ctx = makeCtx(new SearchIndex({ embedder: null }));
+    const res = await semanticSearch.handler({ q: 'anything', auto_build: false }, ctx);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/zotero_index/);
+    expect(res.content[0].text).toMatch(/build/);
+    expect(ctx.web.listItems).not.toHaveBeenCalled();
   });
 
   it('returns ranked hits once built', async () => {

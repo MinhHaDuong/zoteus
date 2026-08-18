@@ -1,31 +1,8 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
-import { saveIndex } from '../features/search/persistence.js';
-import type { IndexBuildStatus } from '../features/search/index-manager.js';
+import { MAX_ITEMS, progressLine, startIndexBuild, statusSummary } from '../features/search/build.js';
 import type { LibraryRef } from '../api/web-client.js';
-
-/** Hard cap on items per build — keeps very large libraries bounded. */
-export const MAX_ITEMS = 5000;
-const PAGE_SIZE = 100;
-
-function progressLine(s: IndexBuildStatus): string {
-  const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
-  return `${s.itemsFetched}/${total} items, ${s.passages} passages, ${s.vectors} vectors (embedder=${s.embedder})`;
-}
-
-function statusSummary(s: IndexBuildStatus): string {
-  switch (s.state) {
-    case 'building':
-      return `Index build in progress — ${progressLine(s)}. Poll action:"status" again shortly.`;
-    case 'error':
-      return `Index build failed: ${s.lastError ?? 'unknown error'}. Partial data kept — ${progressLine(s)}.`;
-    case 'done':
-      return `Index ready — ${s.documents} passages over ${s.items} items (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.`;
-    default:
-      return `Index: ${s.documents} passages over ${s.items} items; embedder=${s.embedder}.`;
-  }
-}
 
 const indexTool: ToolDefinition = {
   name: 'zotero_index',
@@ -69,24 +46,11 @@ const indexTool: ToolDefinition = {
         `A build is already in progress — ${progressLine(s)}. Poll action:"status" instead of starting another build.`,
       );
     }
-    const lib: LibraryRef = args.library_id
+    const lib: LibraryRef | undefined = args.library_id
       ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : ctx.router.defaultLibrary();
-    const maxItems = Math.min(args.limit ?? MAX_ITEMS, MAX_ITEMS);
-    const fetchPage = async (start: number) => {
-      const page = await ctx.web.listItems(lib, { limit: PAGE_SIZE, start, top: true });
-      return { items: page.data, totalResults: page.totalResults };
-    };
-    const persist = ctx.searchIndexPath
-      ? () =>
-          saveIndex(ctx.search, ctx.searchIndexPath).catch((e) =>
-            ctx.logger.warn(`Could not persist index: ${e instanceof Error ? e.message : String(e)}`),
-          )
       : undefined;
-    // Fire and forget: the build runs on the server event loop after we return.
-    const job = ctx.search.buildIncremental(fetchPage, { maxItems, persist });
-    job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
-    const s = ctx.search.buildStatus();
+    const maxItems = Math.min(args.limit ?? MAX_ITEMS, MAX_ITEMS);
+    const s = startIndexBuild(ctx, lib, maxItems);
     return ok(
       { ...s },
       `Index build started in the background (up to ${maxItems} items). ` +
