@@ -60,7 +60,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
 
   const capabilities = await probeCapabilities(config, { web, local, logger });
   const router = new LibraryRouter({ config, capabilities, web, local });
-  // Zotero 9+ accepts local-API writes behind a user-granted key. Only the operator
+  // Zotero 10+ accepts local-API writes behind a user-granted key. Only the operator
   // context (never per-user tenants) talks to the desktop app. The client is created
   // eagerly but authorizes lazily, on first write.
   const localWrites =
@@ -74,7 +74,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
         })
       : undefined;
   // The connector protocol works on all recent Zotero versions while the app runs,
-  // including ones whose local API is still read-only (no grant dialog involved).
+  // including Zotero 9 and earlier, whose local API is read-only (no grant dialog).
   const connectorWrites =
     !perUser && capabilities.localApi
       ? new ConnectorWriteClient({ port: config.localPort, fetcher, logger })

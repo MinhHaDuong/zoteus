@@ -65,7 +65,7 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 - **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
 - **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
 - **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
-- **Write straight to the desktop app.** Personal-library writes go to your running Zotero — **no cloud API key needed**. On Zotero 9+ that's the local API behind a key you grant once ("Always Allow"); on older builds it's the same connector protocol the browser extensions use. The cloud Web API is the fallback for group libraries and for when the app isn't running.
+- **Write straight to the desktop app.** Personal-library writes go to your running Zotero — **no cloud API key needed**. On Zotero 10+ that's the local API behind a key you grant once ("Always Allow"); on Zotero 9 and earlier, whose local API is read-only, it's the same connector protocol the browser extensions use. The cloud Web API is the fallback for group libraries and for when the app isn't running.
 - **Annotate PDFs and attach files.** `zotero_annotate` adds real highlights, underlines, and notes — the same objects the Zotero PDF reader creates, positioned on the page — and `zotero_attach_file` stores a local file or a URL as an attachment under any item.
 - **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, nearest heading, and a page locator — extracting the text on the fly when Zotero hasn't indexed the PDF.
 - **Follow the scholarship.** A scholarly-context graph over OpenAlex / Crossref / Semantic Scholar.
@@ -87,7 +87,7 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 |---|---|---|
 | `ZOTERO_API_KEY` | — | Cloud auth (sync, groups, writes without the desktop app; optional otherwise) |
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads + personal-library writes) |
-| `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 9+ desktop write key (else granted once, in-app) |
+| `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
 

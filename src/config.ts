@@ -3,7 +3,7 @@ import { defaultDataDir } from './lib/paths.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
-  /** Pre-provisioned Zotero 9+ desktop local-API key (skips the grant dialog). */
+  /** Pre-provisioned Zotero 10+ desktop local-API key (skips the grant dialog). */
   localApiKey?: string;
   libraryId?: number;
   libraryType: 'user' | 'group';

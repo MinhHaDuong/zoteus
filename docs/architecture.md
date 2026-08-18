@@ -18,9 +18,9 @@ LibraryRouter      startup capability probe → per-operation routing
       │                       (group libraries and unsupported ops always cloud)
       │
 Clients            reads   WebApiClient · LocalApiClient
-      │              writes WebApiClient (v3) · LocalWriteClient (Zotero 9+ local API,
+      │              writes WebApiClient (v3) · LocalWriteClient (Zotero 10+ local API,
       │                     user-granted key) · ConnectorWriteClient (saveItems/
-      │                     saveAttachment, Zotero ≤ 9.0 — create-only)
+      │                     saveAttachment, Zotero 9 and earlier — create-only)
       │              RateLimitedFetcher: concurrency cap + Backoff/Retry-After
       │
 Feature modules    SchemaService · citation (translation-server, CSL, citeproc)
@@ -34,7 +34,7 @@ Feature modules    SchemaService · citation (translation-server, CSL, citeproc)
 | `src/index.ts` | CLI entry: parse flags/env, build server, pick transport |
 | `src/server.ts` | `buildServer()` — wires clients, router, features, registers everything |
 | `src/config.ts` | env → typed, zod-validated `ZoteusConfig` |
-| `src/api/` | `http.ts` (rate-limited fetch), `web-client.ts` (cloud v3), `local-client.ts` (desktop reads), `local-writes.ts` (Zotero 9+ desktop writes + key grant), `connector-writes.ts` (connector-protocol fallback), `attachments.ts`, `bbt-client.ts`, `errors.ts` |
+| `src/api/` | `http.ts` (rate-limited fetch), `web-client.ts` (cloud v3), `local-client.ts` (desktop reads), `local-writes.ts` (Zotero 10+ desktop writes + key grant), `connector-writes.ts` (connector-protocol fallback), `attachments.ts`, `bbt-client.ts`, `errors.ts` |
 | `src/router/` | `capabilities.ts` (probe), `library-router.ts` (local-vs-cloud reads) |
 | `src/schema/` | `schema-service.ts` (cache), `validate.ts` (pre-write validation), `item-payload.ts` (repairs degraded client payloads) |
 | `src/registry/` | `ToolDefinition`/`ToolContext` + `registerAllTools` adapter |

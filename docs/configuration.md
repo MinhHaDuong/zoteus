@@ -5,7 +5,7 @@ Zoteus is configured via environment variables (see [`.env.example`](../.env.exa
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZOTERO_API_KEY` | — | Cloud auth (sync, group libraries, and writes when the desktop app is unavailable; optional otherwise). Create one at https://www.zotero.org/settings/keys |
-| `ZOTEUS_LOCAL_API_KEY` | — | Optional pre-provisioned Zotero 9+ desktop local-API key for writes against the running app. When unset, Zoteus requests one via Zotero’s grant dialog on the first write (choose “Always Allow”). |
+| `ZOTEUS_LOCAL_API_KEY` | — | Optional pre-provisioned Zotero 10+ desktop local-API key for writes against the running app. When unset, Zoteus requests one via Zotero’s grant dialog on the first write (choose “Always Allow”). |
 | `ZOTERO_LIBRARY_ID` / `ZOTERO_LIBRARY_TYPE` | auto | Pin a library; otherwise resolved automatically from the key. |
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads, and personal-library writes). `off` forces everything through the cloud. |
 | `ZOTERO_LOCAL_PORT` | `23119` | Desktop local server port. |
@@ -74,7 +74,7 @@ npm i pdfjs-dist
 
 Zoteus uses both Zotero backends and chooses per request:
 
-- **Desktop app** (`http://127.0.0.1:23119`, library `users/0`) — fast, key-free reads with full local PDFs and real saved-search execution. It also takes **writes** for your personal library: local-API writes on Zotero 9+ (behind a key granted once in-app, or `ZOTEUS_LOCAL_API_KEY`), else the connector protocol. Preferred whenever the app is running. See [`writing.md`](./writing.md).
+- **Desktop app** (`http://127.0.0.1:23119`, library `users/0`) — fast, key-free reads with full local PDFs and real saved-search execution. It also takes **writes** for your personal library: local-API writes on Zotero 10+ (behind a key granted once in-app, or `ZOTEUS_LOCAL_API_KEY`), else the connector protocol. Preferred whenever the app is running. See [`writing.md`](./writing.md).
 - **Cloud Web API v3** (`https://api.zotero.org`) — universal, and the fallback for writes; still required for sync, group libraries, and personal-library writes with no desktop app.
 
 At startup Zoteus probes both and logs the result, e.g.
