@@ -8,10 +8,12 @@ function makeRouter(opts: { local: 'auto' | 'on' | 'off'; localApi: boolean }) {
   const web = {
     listItems: vi.fn(async () => ({ data: [{ key: 'CLOUD' }], totalResults: 1, lastModifiedVersion: 1 })),
     getItem: vi.fn(async () => ({ key: 'CLOUD' })),
+    getItemChildren: vi.fn(async () => ({ data: [{ key: 'CLOUDCHILD' }], totalResults: 1, lastModifiedVersion: 1 })),
   };
   const local = {
     listItems: vi.fn(async () => ({ data: [{ key: 'LOCAL' }], totalResults: 1, lastModifiedVersion: 1 })),
     getItem: vi.fn(async () => ({ key: 'LOCAL' })),
+    getItemChildren: vi.fn(async () => ({ data: [{ key: 'LOCALCHILD' }], totalResults: 1, lastModifiedVersion: 1 })),
   };
   const cfg = loadConfig({ ZOTEUS_LOCAL: opts.local } as any);
   const router = new LibraryRouter({
@@ -44,6 +46,24 @@ describe('LibraryRouter', () => {
     await router.searchItems({ q: 'x', library: { type: 'group', id: 999 } });
     expect(web.listItems).toHaveBeenCalled();
     expect(local.listItems).not.toHaveBeenCalled();
+  });
+
+  it('gets children from the local /children endpoint, not a parentItem-filtered list', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true });
+    const r = await router.getItemChildren('ABCD1234', { limit: 25 });
+    expect(r.data[0].key).toBe('LOCALCHILD');
+    expect(local.getItemChildren).toHaveBeenCalledWith('ABCD1234', { limit: 25 });
+    // The desktop local API ignores ?parentItem= and would return the whole library.
+    expect(local.listItems).not.toHaveBeenCalled();
+    expect(web.getItemChildren).not.toHaveBeenCalled();
+  });
+
+  it('gets children from the cloud children endpoint for a group library', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true });
+    const r = await router.getItemChildren('ABCD1234', { library: { type: 'group', id: 999 } });
+    expect(r.data[0].key).toBe('CLOUDCHILD');
+    expect(web.getItemChildren).toHaveBeenCalledWith({ type: 'group', id: 999 }, 'ABCD1234', {});
+    expect(local.getItemChildren).not.toHaveBeenCalled();
   });
 
   it('defaultLibrary uses the resolved cloud userID', () => {

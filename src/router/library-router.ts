@@ -70,7 +70,9 @@ export class LibraryRouter {
   async getItemChildren(key: string, opts: ReadOpts & ItemQuery = {}): Promise<ListResult> {
     const { library, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    // Children are always available via the cloud; local may not implement /children uniformly.
+    // Prefer the desktop app for the personal library (local-only mode has no cloud
+    // fallback — hitting api.zotero.org with user id 0 yields "Invalid user ID").
+    if (this.useLocal(lib)) return this.local!.getItemChildren(key, rest);
     return this.web.getItemChildren(lib, key, rest);
   }
 

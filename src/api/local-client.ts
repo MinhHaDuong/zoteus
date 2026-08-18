@@ -80,6 +80,20 @@ export class LocalApiClient {
     return json;
   }
 
+  /**
+   * Children (attachments, notes, annotations) of an item. The desktop local API
+   * silently ignores a `parentItem` query param on /items and answers with the whole
+   * library, so the dedicated /children endpoint is the only correct way to ask.
+   */
+  async getItemChildren(key: string, query: ItemQuery = {}): Promise<ListResult> {
+    const { top: _t, collectionKey: _c, ...rest } = query;
+    const { json, headers } = await this.getJson(
+      `/users/0/items/${key}/children`,
+      this.buildQuery(rest as any),
+    );
+    return this.toListResult(json, headers);
+  }
+
   async listCollections(
     query: { top?: boolean; limit?: number; start?: number } = {},
   ): Promise<ListResult> {

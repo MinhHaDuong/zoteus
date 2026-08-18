@@ -48,4 +48,31 @@ describe('LocalApiClient', () => {
     const r = await makeLocal(fetchImpl).listItems({ collectionKey: 'ABC' });
     expect(r.data).toHaveLength(1);
   });
+
+  it('fetches children via /items/<key>/children, never a parentItem filter', async () => {
+    // The desktop local API ignores ?parentItem= and answers with the whole library.
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/users/0/items/ABCD1234/children');
+      expect(url).not.toContain('parentItem');
+      return new Response(JSON.stringify([{ key: 'CHILD' }]), {
+        status: 200,
+        headers: { 'Total-Results': '1', 'Last-Modified-Version': '7' },
+      });
+    });
+    const r = await makeLocal(fetchImpl).getItemChildren('ABCD1234');
+    expect(r.data).toEqual([{ key: 'CHILD' }]);
+    expect(r.totalResults).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes item filters through to the children endpoint', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/users/0/items/ABCD1234/children');
+      expect(url).toContain('itemType=annotation');
+      expect(url).toContain('limit=100');
+      return new Response(JSON.stringify([]), { status: 200, headers: { 'Total-Results': '0' } });
+    });
+    await makeLocal(fetchImpl).getItemChildren('ABCD1234', { itemType: 'annotation', limit: 100 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
 });
