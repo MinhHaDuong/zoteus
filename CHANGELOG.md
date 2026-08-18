@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-08-18
+
 ### Added
 - **PDF annotation tools.** New `zotero_annotate` adds and deletes Zotero PDF
   annotations — highlights, underlines, and notes — the same objects the PDF reader
