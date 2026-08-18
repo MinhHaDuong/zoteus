@@ -1,18 +1,34 @@
 # Writing to Zotero (safe by design)
 
-Zoteus writes go through the cloud Web API v3 (the desktop local API is read-only), and require a `ZOTERO_API_KEY` with write access. The hard parts — optimistic concurrency, idempotency, batching, and partial-failure handling — are done for you inside the client.
+Writes to your **personal** library go straight to the running Zotero desktop app when it is available — either through the app's local-API writes (Zotero 9+, behind a key you grant once) or, on builds whose local API is still read-only, through the desktop connector protocol. No cloud key is needed for those paths. The cloud **Web API v3** is the fallback and is still required for **group libraries**, when the desktop app is not running, and for the tools that have no desktop path (they need a `ZOTERO_API_KEY` with write access). The hard parts — optimistic concurrency, idempotency, batching, and partial-failure handling — are done for you inside the clients.
 
 ## Tools
 
-| Tool | What it does | Safety |
-|---|---|---|
-| `zotero_create_items` | Create/update up to many items in one batch (auto-chunked to 50). Validates every item against the schema first — if any is invalid, **nothing** is written. | non-destructive |
-| `zotero_update_item` | Partial **PATCH** of one item (omitted fields are preserved). Fetches the version if you don't supply it; auto re-fetches and retries once on a 412 conflict. | non-destructive |
-| `zotero_trash_items` | Move items to the trash (`deleted:1`) or restore them (`deleted:0`). **Reversible** — the default for "remove". | reversible |
-| `zotero_delete_items` | **Permanent** purge. Disabled unless `ZOTEUS_ALLOW_DELETE=true`, and requires `confirm:true` on every call. | ⚠️ irreversible |
-| `zotero_manage_collections` | `list` / `create` / `rename` / `reparent` / `delete`, plus `add_items` / `remove_items` (membership lives on the item). | mixed |
-| `zotero_manage_tags` | `list`, or `add` / `remove` tags on items (edits each item's tag array). | non-destructive |
-| `zotero_saved_searches` | `list` / `create` / `delete` saved-search definitions. The cloud API does not *execute* them. | mixed |
+"Route" is the order Zoteus tries: `desktop` means the running Zotero app for the personal library, `cloud` the Web API v3. Passing `library_id` (a group library) always routes to the cloud.
+
+| Tool | What it does | Route | Safety |
+|---|---|---|---|
+| `zotero_create_items` | Create/update up to many items in one batch (auto-chunked to 50). Validates every item against the schema first — if any is invalid, **nothing** is written. | cloud | non-destructive |
+| `zotero_update_item` | Partial **PATCH** of one item (omitted fields are preserved). Fetches the version if you don't supply it; auto re-fetches and retries once on a 412 conflict. | cloud | non-destructive |
+| `zotero_trash_items` | Move items to the trash (`deleted:1`) or restore them (`deleted:0`). **Reversible** — the default for "remove". | desktop (local-API writes) → cloud | reversible |
+| `zotero_delete_items` | **Permanent** purge. Disabled unless `ZOTEUS_ALLOW_DELETE=true`, and requires `confirm:true` on every call. | cloud | ⚠️ irreversible |
+| `zotero_manage_collections` | `list` / `create` / `rename` / `reparent` / `delete`, plus `add_items` / `remove_items` (membership lives on the item). | cloud | mixed |
+| `zotero_manage_tags` | `list`, or `add` / `remove` tags on items (edits each item's tag array). | cloud | non-destructive |
+| `zotero_saved_searches` | `list` / `create` / `delete` saved-search definitions. The cloud API does not *execute* them. | cloud | mixed |
+| `zotero_annotate` | Add or delete PDF annotations — highlights, underlines, notes — the same objects the Zotero PDF reader creates. Resolves the PDF attachment from any parent item, or takes an attachment key directly. `delete` needs local-API writes or a cloud key (the connector protocol cannot delete). | desktop → cloud | non-destructive; `delete` **trashes** (reversible) |
+| `zotero_attach_file` | Store a local file or a downloaded URL as an `imported_file` attachment under an existing item. Returns the new attachment key. | desktop (local-API writes) only | non-destructive |
+
+`zotero_import` with `save_to_library:true` also saves through the desktop app (both desktop paths), including `attach_url` to stream a PDF into the same save session and `collection_key` targeting — see [`citations.md`](./citations.md).
+
+## Desktop write paths
+
+Zoteus picks one of two desktop paths automatically, both against the running app on `127.0.0.1:23119` (the same local API used for key-free reads — see [`configuration.md`](./configuration.md)).
+
+**1. Local-API writes (Zotero 9+).** `POST`/`PATCH`/`DELETE` on `…/api/users/0/…`, gated by a **local** API key that Zotero grants through an in-app dialog. Zoteus asks for it lazily, on the first desktop write (`POST /api/local/authorize`) — pick **Always Allow** so you are never prompted again. The grant is cached as `local-api-key.json` under the Zoteus data dir; set `ZOTEUS_LOCAL_API_KEY` to pre-provision one (headless/CI, or to skip the dialog entirely). Every write echoes the running instance's `Zotero-Server-ID` header; a consumed key (401) or a restarted Zotero (412/428) is re-authorized / re-probed transparently. This path covers creates, patches, trash/restore, and file uploads.
+
+**2. Connector protocol (Zotero ≤ 9.0, local API still read-only).** The protocol the browser connectors use — `saveItems` / `saveAttachment` / `updateSession`. No key, no grant dialog. Limits: it can only **create** (no updates, no deletes), saves land in the personal library only, and the response carries no item keys — Zoteus recovers them by polling the local API afterwards, so a result may list fewer keys than items even when everything saved.
+
+Local API keys have nothing to do with zotero.org keys: they never leave your machine and only authorize the running app. `ZOTEUS_LOCAL=off` disables both desktop paths and forces every write to the cloud.
 
 ## How safety is enforced
 
@@ -53,3 +69,35 @@ Trash (reversible) vs permanent delete:
 // zotero_delete_items — only with ZOTEUS_ALLOW_DELETE=true
 { "item_keys": ["KEY1"], "confirm": true }
 ```
+
+Highlight a passage in an item's PDF:
+
+```jsonc
+// zotero_annotate
+{ "action": "add", "parent": "ABCD1234", "annotations": [{
+  "type": "highlight",
+  "text": "Attention mechanisms have become an integral part of sequence models",
+  "comment": "core claim",
+  "color": "#ffd400",
+  "position": { "pageIndex": 0, "rects": [[71.9, 520.4, 523.2, 534.8]] }
+}] }
+```
+
+`parent` is a regular item key (the PDF child is resolved for you) or an attachment key directly. `position` is Zotero's stored form: `pageIndex` is 0-based, and `rects` are `[x1, y1, x2, y2]` in **native PDF points with a bottom-left origin** — the coordinates a PDF text-extraction pass gives you. Without a `position`, a highlight/underline is rejected (it could not render in place); `annotationSortIndex` is computed from the position so the sidebar order matches the reader (pass `char_offset` and `page_height` to refine it, or `sort_index` to set it outright). `action:"delete"` trashes annotations by key:
+
+```jsonc
+// zotero_annotate
+{ "action": "delete", "annotation_keys": ["ANNO1234"] }
+```
+
+Store a PDF under an existing item:
+
+```jsonc
+// zotero_attach_file
+{ "parent": "ABCD1234", "url": "https://arxiv.org/pdf/1706.03762", "title": "Full Text PDF" }
+
+// …or from disk; filename/content_type are inferred when omitted
+{ "parent": "ABCD1234", "path": "/home/me/papers/attention.pdf" }
+```
+
+This needs Zotero 9+ local-API writes. On older builds, attach the file **during import** instead — `zotero_import` takes `attach_url` and streams it into the same connector save session.

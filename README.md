@@ -34,13 +34,13 @@ For normal use there is **nothing to download or unzip from GitHub** — your AI
 | **Cursor / VS Code / Claude Desktop / Codex / Zed…** | `npx add-mcp @oscardvs/zoteus` |
 | **claude.ai (web)** | Add custom connector → your hosted URL (OAuth) |
 
-Add your cloud key for writes/sync/groups (optional — reads work key-free against the desktop app):
+Add your cloud key for sync, group libraries, and writes without the desktop app (optional — reads *and* personal-library writes work key-free against a running Zotero):
 
 ```bash
 claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscardvs/zoteus
 ```
 
-> Get a key at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). For key-free local reads, enable **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** in the desktop app.
+> Get a key at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). For key-free local reads and writes, enable **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"** in the desktop app.
 
 ---
 
@@ -65,17 +65,19 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 - **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
 - **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
 - **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
-- **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, nearest heading, and a page locator.
+- **Write straight to the desktop app.** Personal-library writes go to your running Zotero — **no cloud API key needed**. On Zotero 9+ that's the local API behind a key you grant once ("Always Allow"); on older builds it's the same connector protocol the browser extensions use. The cloud Web API is the fallback for group libraries and for when the app isn't running.
+- **Annotate PDFs and attach files.** `zotero_annotate` adds real highlights, underlines, and notes — the same objects the Zotero PDF reader creates, positioned on the page — and `zotero_attach_file` stores a local file or a URL as an attachment under any item.
+- **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, nearest heading, and a page locator — extracting the text on the fly when Zotero hasn't indexed the PDF.
 - **Follow the scholarship.** A scholarly-context graph over OpenAlex / Crossref / Semantic Scholar.
-- **Built for agents.** ~28 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, structured outputs, and a generated tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
+- **Built for agents.** 30 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, structured outputs, and a generated tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
 
 ## How it works
 
 1. **Install** — one `npx` command (or the one-click `.mcpb`).
-2. **Connect** — paste your Zotero API key (or just run the desktop app for key-free local reads).
+2. **Connect** — just run the desktop app for key-free local access, or paste your Zotero API key.
 3. **Ask** — your AI can now search, cite, add, and organize your library.
 
-Zoteus auto-detects your running Zotero desktop app and uses its fast, key-free **local API** for reads (full PDFs, real saved-search results), falling back to the cloud **Web API v3** for writes, sync, and group libraries.
+Zoteus auto-detects your running Zotero desktop app and talks to it directly: its fast, key-free **local API** for reads (full PDFs, real saved-search results), and the desktop app itself for personal-library writes (imports, annotations, attachments, trash). The cloud **Web API v3** is the fallback — and stays required for sync, group libraries, and writes when the app isn't running. Details: [`docs/writing.md`](./docs/writing.md).
 
 > **Semantic search — one-time setup.** The first `zotero_semantic_search` builds the library index automatically in the background (auto-build). On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until done.
 
@@ -83,8 +85,9 @@ Zoteus auto-detects your running Zotero desktop app and uses its fast, key-free 
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ZOTERO_API_KEY` | — | Cloud auth (writes/sync/groups; optional for local-only reads) |
-| `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop local API |
+| `ZOTERO_API_KEY` | — | Cloud auth (sync, groups, writes without the desktop app; optional otherwise) |
+| `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads + personal-library writes) |
+| `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 9+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
 

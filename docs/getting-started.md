@@ -9,7 +9,7 @@
 3. Claude Desktop opens and shows you what Zoteus can do. Click **Add** to accept.
 4. Restart Claude Desktop if it asks. That's it — skip to [Restart Claude Desktop and verify](#restart-claude-desktop-and-verify).
 
-> Want to add/edit items, sync, or use group libraries? Add a [Zotero API key](#what-is-the-zotero-api-key) in the extension's settings afterwards. Reading your local library works without one.
+> Want to sync, use group libraries, or work while Zotero is closed? Add a [Zotero API key](#what-is-the-zotero-api-key) in the extension's settings afterwards. Reading *and* changing your own library works without one while the desktop app is running.
 
 ## Option B — Manual setup (any MCP client, e.g. Claude Desktop)
 
@@ -59,13 +59,13 @@ Replace `PASTE_YOUR_KEY_HERE` with your [Zotero API key](#what-is-the-zotero-api
 }
 ```
 
-**Just want to read your local Zotero library?** The key is optional — you can drop the whole `"env"` line and keep the rest as-is. See [below](#what-is-the-zotero-api-key) for when a key is and isn't needed.
+**Just want to work with your local Zotero library?** The key is optional — you can drop the whole `"env"` line and keep the rest as-is. See [below](#what-is-the-zotero-api-key) for when a key is and isn't needed.
 
 Save the file, then [restart Claude Desktop](#restart-claude-desktop-and-verify).
 
 ## What is the Zotero API key?
 
-A Zotero API key is a password-like string that lets Zoteus talk to your Zotero account on the web. **It is optional for everyday reading** — you only need it for writes, sync, and group libraries.
+A Zotero API key is a password-like string that lets Zoteus talk to your Zotero account on the web. **It is optional whenever the Zotero desktop app is running** — Zoteus then reads *and* writes your own library through the app. You need a key for sync, group libraries, and changes made while the app is closed.
 
 ### Creating a key (if you want one)
 
@@ -76,13 +76,13 @@ A Zotero API key is a password-like string that lets Zoteus talk to your Zotero 
 
 ### No key needed: the Zotero desktop app
 
-If you use the **Zotero 7 desktop app**, Zoteus can read your library straight from the app on your machine — no key, no account lookup:
+If you use the **Zotero 7 (or newer) desktop app**, Zoteus can work with your library straight from the app on your machine — no key, no account lookup:
 
 1. Open Zotero → **Settings → Advanced**.
 2. Enable **"Allow other applications on this computer to communicate with Zotero"**.
 3. Keep Zotero running while you chat with Claude.
 
-This key-free mode covers searching, reading, bibliographies, and PDF text from your own library. You'd add an API key only to **write changes back, sync, or work with group libraries**.
+This key-free mode covers searching, reading, bibliographies, and PDF text from your own library — and adding items, filing attachments, highlighting PDFs, and trashing items, which go straight into the running app. (The first such change may pop up a one-time Zotero dialog asking whether to allow Zoteus to make changes; choose **Always Allow**.) You'd add an API key only to **sync, work with group libraries, or make changes while Zotero is closed**.
 
 ## Restart Claude Desktop and verify
 

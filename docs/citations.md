@@ -6,9 +6,10 @@ M5 adds an (account-free where possible) import-and-cite pipeline: four tools.
 Resolves bibliographic metadata and optionally saves it to your library.
 - `by_identifier` — a **DOI, ISBN, PMID, arXiv id, or ADS bibcode**.
 - `by_url` — scrape a web page (may return multiple choices to pick from).
-- `save_to_library: true` (optional `collection_key`) persists the resolved items (needs a cloud key); otherwise the metadata is returned without saving.
+- `save_to_library: true` (optional `collection_key`) persists the resolved items; otherwise the metadata is returned without saving. Saves go to the running Zotero desktop app when it is available — no cloud key needed — and to the cloud Web API otherwise (see [`writing.md`](./writing.md)). `collection_key` accepts an 8-char collection key or a Zotero `treeViewID` like `"C20"`.
+- `attach_url` (with optional `attach_title`) downloads a file — e.g. the arXiv PDF — and stores it on the imported item in the same desktop save session. Desktop saves only; a cloud save reports that the file was not attached.
 
-Requires a reachable **Zotero translation-server**. If none is running, the tool returns setup instructions instead of failing:
+A reachable **Zotero translation-server** is the primary resolution path. Without one, DOIs and arXiv ids still resolve through built-in fallbacks (OpenAlex/Crossref and the arXiv API — the result carries a `source` field; see [`resolver.md`](./resolver.md)); ISBN/PMID/bibcode and URL scraping need the server, and the tool returns setup instructions instead of failing:
 
 ```bash
 docker run -d -p 1969:1969 zotero/translation-server
