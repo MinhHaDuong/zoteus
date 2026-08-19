@@ -26,7 +26,8 @@
       "env": {
         "ZOTERO_API_KEY": "${user_config.api_key}",
         "ZOTEUS_LOCAL": "${user_config.local}",
-        "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}"
+        "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}",
+        "ZOTEUS_DIST": "dxt"
       }
     }
   },

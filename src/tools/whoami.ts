@@ -11,6 +11,7 @@ const whoami: ToolDefinition = {
   handler: async (_args, ctx) => {
     const cloud = ctx.router.whoami();
     const lib = ctx.router.defaultLibrary();
+    const update = ctx.updates?.available ?? null;
     const structured = {
       cloud: Boolean(cloud),
       userID: cloud?.userID,
@@ -19,10 +20,18 @@ const whoami: ToolDefinition = {
       access: cloud?.access ?? null,
       localApi: ctx.capabilities.localApi,
       defaultLibrary: lib,
+      update,
     };
-    const summary = cloud
+    let summary = cloud
       ? `Signed in as ${cloud.username} (userID ${cloud.userID}). Local API: ${ctx.capabilities.localApi ? 'available' : 'unavailable'}.`
       : `No cloud API key configured — running in local-only read mode (local API ${ctx.capabilities.localApi ? 'available' : 'unavailable'}).`;
+    if (update) {
+      const dxtHint =
+        ctx.config?.dist === 'dxt'
+          ? ' Desktop-extension (.dxt) installs do not auto-update: tell the user to download the new zoteus.dxt from that page and reinstall it in Claude to upgrade.'
+          : '';
+      summary += ` Zoteus ${update.latest} is available (installed: ${update.current}): ${update.url}.${dxtHint}`;
+    }
     return ok(structured, summary);
   },
 };

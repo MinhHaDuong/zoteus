@@ -21,6 +21,7 @@ import { registerAllTools, type ToolContext, type ToolDefinition } from './regis
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 import { tools } from './tools/index.js';
+import { UpdateChecker } from './lib/update-check.js';
 import { createRequire } from 'node:module';
 
 // Read from package.json so release bumps can't leave a stale hardcoded string
@@ -108,6 +109,18 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     logger,
     searchIndexPath,
   };
+  // Manual installs (notably the .dxt) have no auto-update channel; check GitHub
+  // releases once a day and let zotero_whoami surface a newer version. Operator
+  // context only: per-user (hosted) tenants share the operator's install.
+  if (!perUser) {
+    ctx.updates = new UpdateChecker({
+      currentVersion: VERSION,
+      dataDir: config.dataDir,
+      logger,
+      enabled: config.updateCheck,
+    });
+    void ctx.updates.start();
+  }
   ctx.toolCatalog = selectActiveTools(config).map((t) => ({
     name: t.name,
     title: t.title,

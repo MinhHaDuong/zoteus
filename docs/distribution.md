@@ -119,6 +119,14 @@ GitHub Release for the tag (the `release` job in `deploy.yml` does this automati
 > (which emits `.mcpb`). Claude Desktop still consumes `.dxt`, so we keep `@anthropic-ai/dxt`
 > for now; revisit if/when Desktop requires `.mcpb`.
 
+> **Updates (#6):** Claude only auto-updates extensions installed from the official
+> directory; a manually installed `.dxt` stays on its version forever. Zoteus therefore
+> ships an in-server update check (`ZOTEUS_UPDATE_CHECK`, on by default): a daily cached
+> GET of the latest GitHub release, surfaced through `zotero_whoami` with a
+> download-and-reinstall hint when the manifest marks the install as `ZOTEUS_DIST=dxt`.
+> True auto-update would require acceptance into the official extension directory, which
+> is a separate Anthropic review/submission process.
+
 ---
 
 ## 6. Git tag (triggers the release pipeline)

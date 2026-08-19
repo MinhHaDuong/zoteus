@@ -14,6 +14,7 @@ import type { TranslationServerClient } from '../features/citation/translation-s
 import type { SearchIndex } from '../features/search/index-manager.js';
 import type { ScholarGraph } from '../features/scholar/graph.js';
 import type { RateLimitedFetcher } from '../api/http.js';
+import type { UpdateChecker } from '../lib/update-check.js';
 import { ZoteroApiError } from '../api/errors.js';
 
 export interface ToolContext {
@@ -36,6 +37,8 @@ export interface ToolContext {
   logger: Logger;
   /** Absolute path to this context's semantic-search index file (per-user in multi-tenant mode). */
   searchIndexPath: string;
+  /** Release update check (operator context only); zotero_whoami surfaces its result. */
+  updates?: UpdateChecker;
   /** Lightweight catalog of all registered tools (for search_tools discovery). */
   toolCatalog?: Array<{ name: string; title: string; description: string; deferLoading?: boolean }>;
 }

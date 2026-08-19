@@ -139,6 +139,8 @@ describe('multi-tenant: two Zotero users resolve to different libraries', () => 
       ZOTERO_OAUTH_CLIENT_KEY: 'ck',
       ZOTERO_OAUTH_CLIENT_SECRET: 'cs',
       ZOTEUS_READ_ONLY: 'true',
+      // Keep the test hermetic: no release lookup, no cache write outside the sandbox.
+      ZOTEUS_UPDATE_CHECK: 'false',
     } as unknown as NodeJS.ProcessEnv);
 
     const oauth = await buildOAuth(config);
