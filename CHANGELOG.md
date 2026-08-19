@@ -6,6 +6,36 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-08-19
+
+### Fixed
+- **Semantic search no longer fails silently when the embedder cannot run** (#7). With
+  `ZOTEUS_EMBEDDINGS=local` and `@huggingface/transformers` absent, Zoteus fell back to
+  keyword-only search but kept reporting `embedder: "local"`, and `mode:"semantic"`
+  returned `{"hits": []}`, indistinguishable from a library with no matches. The only
+  signal was one stderr line, which desktop clients discard. Now:
+  - `zotero_index action:"status"` reports the **effective** embedder plus
+    `embedderConfigured`, `embedderActive` and an actionable `embedderReason`, so
+    `embedder` reads `none (local requested; @huggingface/transformers is not installed)`.
+  - `zotero_semantic_search mode:"semantic"` returns an explicit error naming the cause
+    when the index holds 0 vectors; `auto` still answers from BM25 and says vector
+    ranking is off.
+  - `zotero_whoami` reports embedding health alongside identity.
+  - The provider is preflighted at startup (resolve-only, nothing executed), so the
+    degradation is known before a build silently produces an empty vector set, and a
+    failure recorded mid-build survives into every later status call instead of living
+    in one build's local scope.
+
+### Added
+- **`ZOTEUS_TRANSFORMERS_PATH`**: resolve `@huggingface/transformers` from outside the
+  install. Desktop-extension bundles resolve modules only from inside themselves and
+  cannot ship the package (`onnxruntime-node` is statically imported and its prebuilt
+  native binaries total ~384 MB across platforms), which left `.mcpb` users with no
+  route to on-device vectors at all. Install it anywhere (`npm i -g
+  @huggingface/transformers`) and point this at the directory `npm root -g` prints; it
+  accepts that path, the package directory, or an npm prefix, and it survives extension
+  updates. Exposed in the bundle as the **"Local embeddings path"** setting.
+
 ## [1.4.1] - 2026-08-19
 
 ### Changed
