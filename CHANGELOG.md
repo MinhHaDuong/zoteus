@@ -6,6 +6,21 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-19
+
+### Added
+- **Update notices for manually installed builds** (#6). Claude only auto-updates
+  desktop extensions installed from the official directory, so a hand-installed
+  `zoteus.dxt` never learns about new versions. Zoteus now checks the latest GitHub
+  release once a day (cached on disk, a single unauthenticated GET, no user data sent)
+  and surfaces a notice through `zotero_whoami` and the stderr log. On `.dxt` installs
+  (the manifest now sets `ZOTEUS_DIST=dxt`) the notice includes download-and-reinstall
+  instructions. Opt out with `ZOTEUS_UPDATE_CHECK=false`.
+
+### Fixed
+- The README install table pointed at a `zoteus.mcpb` release asset that releases do
+  not ship; the actual asset is `zoteus.dxt`.
+
 ## [1.3.1] — 2026-08-18
 
 ### Fixed
