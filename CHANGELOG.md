@@ -6,6 +6,20 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-19
+
+### Changed
+- **Desktop extension migrated from `.dxt` to MCP Bundles (`.mcpb`)** for official
+  directory submission (#6). The manifest is now `manifest_version` 0.3, packed with
+  `@anthropic-ai/mcpb` (validated in CI before packing), and declares the new
+  `PRIVACY.md` via `privacy_policies`. Releases now attach `zoteus.mcpb` instead of
+  `zoteus.dxt`; the update notice names the new bundle.
+
+### Added
+- `PRIVACY.md` privacy policy and a README privacy section: Zoteus collects nothing,
+  has no telemetry, and only contacts the services you configure, directly from your
+  machine.
+
 ## [1.4.0] - 2026-08-19
 
 ### Added
