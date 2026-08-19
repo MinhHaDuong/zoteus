@@ -1,5 +1,5 @@
 {
-  "dxt_version": "0.1",
+  "manifest_version": "0.3",
   "name": "zoteus",
   "display_name": "Zoteus — Zotero MCP",
   "version": "1.4.0",
@@ -17,6 +17,7 @@
   },
   "keywords": ["zotero", "mcp", "citations", "bibliography", "research", "reference-manager"],
   "icon": "icon.png",
+  "privacy_policies": ["https://github.com/oscardvs/zoteus/blob/main/PRIVACY.md"],
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -27,7 +28,7 @@
         "ZOTERO_API_KEY": "${user_config.api_key}",
         "ZOTEUS_LOCAL": "${user_config.local}",
         "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}",
-        "ZOTEUS_DIST": "dxt"
+        "ZOTEUS_DIST": "mcpb"
       }
     }
   },
@@ -53,6 +54,10 @@
       "default": "local",
       "required": false
     }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": { "node": ">=20.19.0" }
   },
   "tools_generated": true
 }

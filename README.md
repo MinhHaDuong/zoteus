@@ -29,12 +29,12 @@ For normal use there is **nothing to download or unzip from GitHub** — your AI
 
 | Client | Command |
 |---|---|
-| **Claude Desktop (one-click)** | download `zoteus.dxt` from the [latest release](https://github.com/oscardvs/zoteus/releases/latest) → double-click |
+| **Claude Desktop (one-click)** | download `zoteus.mcpb` from the [latest release](https://github.com/oscardvs/zoteus/releases/latest) → double-click |
 | **Claude Code** | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` |
 | **Cursor / VS Code / Claude Desktop / Codex / Zed…** | `npx add-mcp @oscardvs/zoteus` |
 | **claude.ai (web)** | Add custom connector → your hosted URL (OAuth) |
 
-> **Updating a `.dxt` install:** manually installed desktop extensions do not auto-update. Zoteus checks GitHub releases once a day and tells you in-chat (via `zotero_whoami`) when a newer version exists; download the new `zoteus.dxt` and reinstall it to upgrade. `npx` installs always run the latest published version.
+> **Updating a desktop-extension install:** manually installed extensions (`.mcpb`, or the older `.dxt`) do not auto-update. Zoteus checks GitHub releases once a day and tells you in-chat (via `zotero_whoami`) when a newer version exists; download the new `zoteus.mcpb` and reinstall it to upgrade. `npx` installs always run the latest published version.
 
 Add your cloud key for sync, group libraries, and writes without the desktop app (optional — reads *and* personal-library writes work key-free against a running Zotero):
 
@@ -98,6 +98,10 @@ Full table in [`docs/configuration.md`](./docs/configuration.md). Running a shar
 ## Documentation
 
 📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Getting started](./docs/getting-started.md) · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md)
+
+## Privacy Policy
+
+Zoteus runs locally, collects nothing, and has no telemetry. Your library data flows only between your machine and the services you configure (Zotero, and optionally scholarly-graph or embedding providers), directly and under your own keys. Full policy: [`PRIVACY.md`](./PRIVACY.md).
 
 ## Contributing
 

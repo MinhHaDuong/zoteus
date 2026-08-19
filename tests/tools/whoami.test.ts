@@ -28,9 +28,9 @@ describe('zotero_whoami', () => {
     expect(res.content[0].text).toMatch(/local/i);
   });
 
-  it('surfaces an available update, with the reinstall hint on dxt installs', async () => {
+  it('surfaces an available update, with the reinstall hint on desktop-extension installs', async () => {
     const ctx = ctxWith(null);
-    ctx.config = { dist: 'dxt' };
+    ctx.config = { dist: 'mcpb' };
     ctx.updates = {
       available: { current: '1.3.1', latest: '1.4.0', url: 'https://github.com/oscardvs/zoteus/releases/tag/v1.4.0' },
     };

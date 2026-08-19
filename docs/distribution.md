@@ -24,7 +24,7 @@ mismatched release):
 node -e "console.log('pkg ', require('./package.json').version)"
 grep -n "const VERSION" src/server.ts src/index.ts      # MCP serverInfo + /healthz version
 node -e "const s=require('./server.json'); console.log('server.json', s.version, s.packages[0].version)"
-node -e "console.log('dxt ', require('./dxt/manifest.json').version)"
+node -e "console.log('mcpb', require('./mcpb/manifest.json').version)"
 node -e "console.log('lock', require('./package-lock.json').version)"
 ```
 
@@ -36,12 +36,12 @@ Every line must print the same `X.Y.Z`. (`src/server.ts` feeds the MCP `serverIn
 ## 2. npm publish (`@oscardvs/zoteus`, scoped public)
 
 **Inspect the tarball first** — the `files` allowlist must ship only `dist/`, `README.md`,
-`LICENSE`, `package.json` (no `.env`, `src/`, `tests/`, `docs/`, `dxt/`):
+`LICENSE`, `package.json` (no `.env`, `src/`, `tests/`, `docs/`, `mcpb/`):
 
 ```bash
 npm run build
 npm pack --dry-run 2>&1 | tee /tmp/zoteus-pack.txt
-grep -E '(^|/)(\.env|src/|tests/|docs/|dxt/|\.git)' /tmp/zoteus-pack.txt && echo "LEAK" || echo "clean"
+grep -E '(^|/)(\.env|src/|tests/|docs/|mcpb/|\.git)' /tmp/zoteus-pack.txt && echo "LEAK" || echo "clean"
 ```
 
 **Manual publish** (`publishConfig.access=public` means no `--access` flag needed):
@@ -57,7 +57,7 @@ npmjs.com with publish rights on `@oscardvs/zoteus`. Never commit the token.
 
 > Prefer **one** path per release — CI **or** manual, not both. The CI `npm-publish` step is
 > idempotent (it checks `npm view` and skips if the version already exists), so a prior manual
-> publish or a re-pushed tag won't fail the pipeline or block the `.dxt` release asset.
+> publish or a re-pushed tag won't fail the pipeline or block the `.mcpb` release asset.
 
 ---
 
@@ -92,38 +92,42 @@ Verify the listing resolves under `io.github.oscardvs/zoteus`.
 
 ---
 
-## 5. Claude Desktop DXT (self-contained `.dxt`)
+## 5. Claude Desktop extension (self-contained `.mcpb`)
 
-> **Important:** the manifest lives in `dxt/` but the runtime entry is `dist/index.js` with
-> bare imports (tsc output, not bundled). Packing `dxt/` **alone produces a broken extension**
+> **Important:** the manifest lives in `mcpb/` but the runtime entry is `dist/index.js` with
+> bare imports (tsc output, not bundled). Packing `mcpb/` **alone produces a broken bundle**
 > (no `dist/`, no `node_modules`). You must stage a complete tree first.
 
 ```bash
 npm run build
-rm -rf /tmp/dxt-build && mkdir -p /tmp/dxt-build
-cp dxt/manifest.json dxt/icon.png /tmp/dxt-build/
-cp -r dist /tmp/dxt-build/dist
-cp package.json package-lock.json /tmp/dxt-build/
-( cd /tmp/dxt-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund )  # bundles prod deps incl. optional pdfjs-dist
-npx --yes @anthropic-ai/dxt pack /tmp/dxt-build zoteus.dxt
+rm -rf /tmp/mcpb-build && mkdir -p /tmp/mcpb-build
+cp mcpb/manifest.json mcpb/icon.png /tmp/mcpb-build/
+cp -r dist /tmp/mcpb-build/dist
+cp package.json package-lock.json /tmp/mcpb-build/
+( cd /tmp/mcpb-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund )  # bundles prod deps incl. optional pdfjs-dist
+npx --yes @anthropic-ai/mcpb validate /tmp/mcpb-build/manifest.json
+npx --yes @anthropic-ai/mcpb pack /tmp/mcpb-build zoteus.mcpb
 # verify it carries the entry point + bundled deps:
-unzip -l zoteus.dxt | grep -E ' dist/index.js$| icon.png$| manifest.json$'
-unzip -l zoteus.dxt | grep -q 'node_modules/@modelcontextprotocol/sdk/' && echo "deps bundled"
+unzip -l zoteus.mcpb | grep -E ' dist/index.js$| icon.png$| manifest.json$'
+unzip -l zoteus.mcpb | grep -q 'node_modules/@modelcontextprotocol/sdk/' && echo "deps bundled"
 ```
 
-The result is a ~35 MB self-contained `.dxt` (full feature parity, incl. PDF passage
+The result is a ~35 MB self-contained `.mcpb` (full feature parity, incl. PDF passage
 extraction). Install it in Claude Desktop, confirm the tools load, and attach it to the
 GitHub Release for the tag (the `release` job in `deploy.yml` does this automatically).
 
-> **Toolchain note:** `@anthropic-ai/dxt` is deprecated and renamed `@anthropic-ai/mcpb`
-> (which emits `.mcpb`). Claude Desktop still consumes `.dxt`, so we keep `@anthropic-ai/dxt`
-> for now; revisit if/when Desktop requires `.mcpb`.
+> **Toolchain note:** we migrated from the deprecated `@anthropic-ai/dxt` (`.dxt`,
+> `dxt_version` 0.1 manifests) to `@anthropic-ai/mcpb` (`.mcpb`, `manifest_version` 0.3)
+> in 1.4.1. MCPB is required for official directory submission, and its 0.2+ manifest
+> carries the mandatory `privacy_policies` field (see `PRIVACY.md`). Releases up to
+> v1.4.0 attach `zoteus.dxt`; later releases attach `zoteus.mcpb`.
 
 > **Updates (#6):** Claude only auto-updates extensions installed from the official
-> directory; a manually installed `.dxt` stays on its version forever. Zoteus therefore
+> directory; a manually installed bundle stays on its version forever. Zoteus therefore
 > ships an in-server update check (`ZOTEUS_UPDATE_CHECK`, on by default): a daily cached
 > GET of the latest GitHub release, surfaced through `zotero_whoami` with a
-> download-and-reinstall hint when the manifest marks the install as `ZOTEUS_DIST=dxt`.
+> download-and-reinstall hint when the manifest marks the install as `ZOTEUS_DIST=mcpb`
+> (or the legacy `dxt`).
 > True auto-update would require acceptance into the official extension directory, which
 > is a separate Anthropic review/submission process.
 
@@ -137,7 +141,7 @@ git push origin v1.0.0
 ```
 
 `deploy.yml` (on `v*`) runs: `test` → `image` (multi-arch GHCR push) + `npm-publish`
-(provenance) + `release` (self-contained `.dxt` attached, auto release notes).
+(provenance) + `release` (self-contained `.mcpb` attached, auto release notes).
 
 ---
 

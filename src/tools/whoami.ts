@@ -26,11 +26,12 @@ const whoami: ToolDefinition = {
       ? `Signed in as ${cloud.username} (userID ${cloud.userID}). Local API: ${ctx.capabilities.localApi ? 'available' : 'unavailable'}.`
       : `No cloud API key configured — running in local-only read mode (local API ${ctx.capabilities.localApi ? 'available' : 'unavailable'}).`;
     if (update) {
-      const dxtHint =
-        ctx.config?.dist === 'dxt'
-          ? ' Desktop-extension (.dxt) installs do not auto-update: tell the user to download the new zoteus.dxt from that page and reinstall it in Claude to upgrade.'
+      const dist = ctx.config?.dist;
+      const bundleHint =
+        dist === 'dxt' || dist === 'mcpb'
+          ? ' Manually installed desktop extensions do not auto-update: tell the user to download the new bundle (zoteus.mcpb) from that page and reinstall it in Claude to upgrade.'
           : '';
-      summary += ` Zoteus ${update.latest} is available (installed: ${update.current}): ${update.url}.${dxtHint}`;
+      summary += ` Zoteus ${update.latest} is available (installed: ${update.current}): ${update.url}.${bundleHint}`;
     }
     return ok(structured, summary);
   },

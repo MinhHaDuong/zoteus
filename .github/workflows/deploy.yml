@@ -87,20 +87,22 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run build
-      # Assemble a SELF-CONTAINED .dxt: manifest + icon + built dist + bundled production deps
-      # (incl. optional pdfjs-dist for feature parity). Packing dxt/ alone would omit dist/ and
-      # node_modules, yielding a broken extension — so stage a complete tree, then pack + verify.
-      - name: Build self-contained .dxt
+      # Assemble a SELF-CONTAINED .mcpb (MCP Bundle): manifest + icon + built dist + bundled
+      # production deps (incl. optional pdfjs-dist for feature parity). Packing mcpb/ alone
+      # would omit dist/ and node_modules, yielding a broken bundle — so stage a complete
+      # tree, then validate + pack + verify.
+      - name: Build self-contained .mcpb
         run: |
-          rm -rf dxt-build && mkdir -p dxt-build
-          cp dxt/manifest.json dxt/icon.png dxt-build/
-          cp -r dist dxt-build/dist
-          cp package.json package-lock.json dxt-build/
-          (cd dxt-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
-          npx --yes @anthropic-ai/dxt pack dxt-build zoteus.dxt
-          unzip -l zoteus.dxt | grep -q ' dist/index.js$' || { echo "::error::.dxt missing dist/index.js"; exit 1; }
-          unzip -l zoteus.dxt | grep -q 'node_modules/@modelcontextprotocol/sdk/' || { echo "::error::.dxt missing bundled deps"; exit 1; }
+          rm -rf mcpb-build && mkdir -p mcpb-build
+          cp mcpb/manifest.json mcpb/icon.png mcpb-build/
+          cp -r dist mcpb-build/dist
+          cp package.json package-lock.json mcpb-build/
+          (cd mcpb-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
+          npx --yes @anthropic-ai/mcpb validate mcpb-build/manifest.json
+          npx --yes @anthropic-ai/mcpb pack mcpb-build zoteus.mcpb
+          unzip -l zoteus.mcpb | grep -q ' dist/index.js$' || { echo "::error::.mcpb missing dist/index.js"; exit 1; }
+          unzip -l zoteus.mcpb | grep -q 'node_modules/@modelcontextprotocol/sdk/' || { echo "::error::.mcpb missing bundled deps"; exit 1; }
       - uses: softprops/action-gh-release@v2
         with:
-          files: zoteus.dxt
+          files: zoteus.mcpb
           generate_release_notes: true
