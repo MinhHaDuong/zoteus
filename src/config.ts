@@ -11,6 +11,8 @@ export interface ZoteusConfig {
   localPort: number;
   translationServerUrl: string;
   embeddings: 'local' | 'openai' | 'gemini' | 'off';
+  /** Where to resolve @huggingface/transformers from when the install cannot see it itself. */
+  transformersPath?: string;
   scholarProviders: string[];
   dataDir: string;
   contactEmail?: string;
@@ -77,6 +79,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTERO_LOCAL_PORT: z.coerce.number().int().positive().default(23119),
     ZOTEUS_TRANSLATION_SERVER_URL: z.string().url().default('http://127.0.0.1:1969'),
     ZOTEUS_EMBEDDINGS: z.enum(['local', 'openai', 'gemini', 'off']).default('local'),
+    ZOTEUS_TRANSFORMERS_PATH: z.string().optional(),
     ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
     ZOTEUS_DATA_DIR: z.string().optional(),
     ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
@@ -154,6 +157,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     localPort: parsed.ZOTERO_LOCAL_PORT,
     translationServerUrl: parsed.ZOTEUS_TRANSLATION_SERVER_URL,
     embeddings: parsed.ZOTEUS_EMBEDDINGS,
+    transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,
     scholarProviders: parsed.ZOTEUS_SCHOLAR_PROVIDERS.split(',')
       .map((s) => s.trim())
       .filter(Boolean),

@@ -83,6 +83,8 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 
 > **Semantic search — one-time setup.** The first `zotero_semantic_search` builds the library index automatically in the background (auto-build). On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until done. The build pages your library through the same local-first path as every other read, so **it needs no cloud API key while the desktop app is running** — a key is only needed when the app is closed, and always for group libraries.
 
+> **Vector ranking is opt-in.** Keyword (BM25) search works out of the box everywhere. On-device vectors need `@huggingface/transformers`, which the desktop-extension bundle cannot ship (onnxruntime's native binaries run to ~380 MB across platforms): install it with `npm i -g @huggingface/transformers` and set `ZOTEUS_TRANSFORMERS_PATH` to the directory `npm root -g` prints. When vectors are unavailable Zoteus says so in `zotero_index` status, `zotero_whoami`, and `zotero_semantic_search` rather than quietly returning nothing. See [`docs/semantic-search.md`](./docs/semantic-search.md).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -91,6 +93,7 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads + personal-library writes) |
 | `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
+| `ZOTEUS_TRANSFORMERS_PATH` | — | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
 
 Full table in [`docs/configuration.md`](./docs/configuration.md). Running a shared/remote instance? See [`docs/remote-oauth.md`](./docs/remote-oauth.md) (self-host the OAuth remote on loopback or behind your own proxy).

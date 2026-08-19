@@ -83,7 +83,16 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   const schema = new SchemaService({ web });
   const styles = new StyleResolver();
   const translation = new TranslationServerClient(config.translationServerUrl, fetcher);
-  const search = new SearchIndex({ embedder: createEmbeddingProvider(config, logger), logger });
+  // Preflighted at startup so a configured-but-unrunnable embedder (the classic case: a
+  // desktop bundle that cannot carry @huggingface/transformers) is reported as inactive
+  // from the first status call, rather than discovered as a silently empty vector set.
+  const embedding = createEmbeddingProvider(config, logger);
+  const search = new SearchIndex({
+    embedder: embedding.provider,
+    configured: embedding.configured,
+    unavailable: embedding.unavailable,
+    logger,
+  });
 
   const searchIndexPath = join(
     config.dataDir,

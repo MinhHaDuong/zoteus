@@ -1,13 +1,25 @@
 import { describe, it, expect } from 'vitest';
 import whoami from '../../src/tools/whoami.js';
 
-function ctxWith(cloud: any) {
+/** Minimal SearchIndex stand-in: healthy local embedder unless overridden. */
+function searchStub(over: Partial<Record<string, unknown>> = {}) {
+  return {
+    embedderConfigured: 'local',
+    embedderActive: true,
+    embedderName: 'local',
+    embedderReason: undefined,
+    ...over,
+  };
+}
+
+function ctxWith(cloud: any, search: any = searchStub()) {
   return {
     router: {
       whoami: () => cloud,
       defaultLibrary: () => ({ type: 'user', id: cloud?.userID ?? 0 }),
     },
     capabilities: { cloud, localApi: true },
+    search,
   } as any;
 }
 
@@ -38,6 +50,28 @@ describe('zotero_whoami', () => {
     expect(res.structuredContent?.update).toEqual(ctx.updates.available);
     expect(res.content[0].text).toMatch(/1\.4\.0 is available/);
     expect(res.content[0].text).toMatch(/reinstall/i);
+  });
+
+  it('reports a degraded embedder so a keyword-only fallback is visible on the first call', async () => {
+    const res = await whoami.handler(
+      {},
+      ctxWith(null, {
+        embedderConfigured: 'local',
+        embedderActive: false,
+        embedderName: 'none (local requested; @huggingface/transformers is not installed)',
+        embedderReason: '@huggingface/transformers is not installed, so semantic ranking is off',
+      }),
+    );
+    expect((res.structuredContent?.embeddings as any).active).toBe(false);
+    expect((res.structuredContent?.embeddings as any).configured).toBe('local');
+    expect(res.content[0].text).toMatch(/degraded to keyword-only/i);
+    expect(res.content[0].text).toMatch(/@huggingface\/transformers/);
+  });
+
+  it('stays quiet about embeddings when the configured provider is running', async () => {
+    const res = await whoami.handler({}, ctxWith(null));
+    expect((res.structuredContent?.embeddings as any).active).toBe(true);
+    expect(res.content[0].text).not.toMatch(/degraded/i);
   });
 
   it('omits the update notice when no newer release is known', async () => {

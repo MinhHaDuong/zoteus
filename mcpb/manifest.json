@@ -28,6 +28,7 @@
         "ZOTERO_API_KEY": "${user_config.api_key}",
         "ZOTEUS_LOCAL": "${user_config.local}",
         "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}",
+        "ZOTEUS_TRANSFORMERS_PATH": "${user_config.transformers_path}",
         "ZOTEUS_DIST": "mcpb"
       }
     }
@@ -52,6 +53,12 @@
       "title": "Semantic-search embeddings",
       "description": "Embedding provider for semantic search: local (default, on-device model) | openai | gemini | off (keyword-only index — fastest to build, useful on slow machines).",
       "default": "local",
+      "required": false
+    },
+    "transformers_path": {
+      "type": "directory",
+      "title": "Local embeddings path",
+      "description": "Where to find @huggingface/transformers for on-device (local) embeddings. This bundle cannot ship it: onnxruntime's native binaries run to ~380 MB across platforms. Run `npm i -g @huggingface/transformers`, then set this to the directory `npm root -g` prints. Leave empty to run keyword-only (BM25) search, or pick openai/gemini above.",
       "required": false
     }
   },

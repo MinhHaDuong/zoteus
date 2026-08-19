@@ -14,17 +14,28 @@ export function progressLine(s: IndexBuildStatus): string {
   return `${s.itemsFetched}/${total} items, ${s.passages} passages, ${s.vectors} vectors (embedder=${s.embedder})`;
 }
 
+/**
+ * Sentence appended whenever the configured embedder is not the effective one. Without it
+ * a keyword-only index is indistinguishable from a healthy one, which is exactly how a
+ * missing optional dependency stayed invisible through two clean builds (#7).
+ */
+export function embedderNotice(s: IndexBuildStatus): string {
+  if (s.embedderActive || s.embedderConfigured === 'off') return '';
+  return ` Semantic ranking is OFF (embeddings=${s.embedderConfigured} requested but not active): ${s.embedderReason ?? 'unavailable'}`;
+}
+
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
+  const notice = embedderNotice(s);
   switch (s.state) {
     case 'building':
-      return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.`;
+      return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
     case 'error':
-      return `Index build failed: ${s.lastError ?? 'unknown error'}. Partial data kept — ${progressLine(s)}.`;
+      return `Index build failed: ${s.lastError ?? 'unknown error'}. Partial data kept — ${progressLine(s)}.${notice}`;
     case 'done':
-      return `Index ready — ${s.documents} passages over ${s.items} items (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.`;
+      return `Index ready — ${s.documents} passages over ${s.items} items (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.${notice}`;
     default:
-      return `Index: ${s.documents} passages over ${s.items} items; embedder=${s.embedder}.`;
+      return `Index: ${s.documents} passages over ${s.items} items; embedder=${s.embedder}.${notice}`;
   }
 }
 

@@ -16,7 +16,18 @@ export interface SearchIndexStatus {
   documents: number;
   vectors: number;
   items: number;
+  /**
+   * The embedder that is actually producing vectors, NOT merely the one that was asked
+   * for. Reads "none (local requested; ...)" when the configured provider cannot run, so
+   * a 0-vector index explains itself instead of looking like an empty library (#7).
+   */
   embedder: string;
+  /** The requested ZOTEUS_EMBEDDINGS value, whether or not it works. */
+  embedderConfigured: string;
+  /** True only while the configured provider is genuinely producing vectors. */
+  embedderActive: boolean;
+  /** Why `embedderConfigured` is not active, and what to do about it. */
+  embedderReason?: string;
   builtFromVersion: number;
 }
 
@@ -82,6 +93,10 @@ export interface BuildOptions {
 export interface SearchIndexOptions {
   embedder: EmbeddingProvider | null;
   logger?: Logger;
+  /** What ZOTEUS_EMBEDDINGS asked for (defaults to the provider's own name, or 'off'). */
+  configured?: string;
+  /** Why the request produced no provider at all, known at construction time. */
+  unavailable?: string;
 }
 
 function itemText(d: any): string {
@@ -90,6 +105,17 @@ function itemText(d: any): string {
   return [d.title, d.abstractNote, creators, tags, d.date, d.publicationTitle, d.bookTitle, d.note]
     .filter(Boolean)
     .join('. ');
+}
+
+/**
+ * First sentence of a reason, for the one-line embedder label. Reasons are written to be
+ * actionable, which makes them paragraph-length; the label needs the cause only, and the
+ * full text still travels in `embedderReason`.
+ */
+function shortCause(reason: string): string {
+  const first = reason.split(/(?<=\.)\s/)[0] ?? reason;
+  const trimmed = first.replace(/\.$/, '').trim();
+  return trimmed.length > 90 ? `${trimmed.slice(0, 89).trimEnd()}...` : trimmed;
 }
 
 /** Reciprocal Rank Fusion of multiple ranked lists. */
@@ -141,15 +167,58 @@ export class SearchIndex {
   private itemsTotal = 0;
   private lastBuildError: string | undefined = undefined;
   private cancelToken: { cancelled: boolean } | null = null;
+  /**
+   * Set the first time the provider throws. Kept on the instance (rather than in a build's
+   * local scope) precisely so status can report it: a failure that only ever reached a
+   * stderr log line is invisible to a desktop-extension user, whose client discards it.
+   */
+  private embedderError: string | undefined = undefined;
 
   constructor(private readonly opts: SearchIndexOptions) {}
 
+  /** What ZOTEUS_EMBEDDINGS asked for. */
+  get embedderConfigured(): string {
+    return this.opts.configured ?? this.opts.embedder?.name ?? 'off';
+  }
+
+  /** True only while vectors are genuinely being produced. */
+  get embedderActive(): boolean {
+    return Boolean(this.opts.embedder) && !this.embedderError;
+  }
+
+  /** Why the configured embedder is not active (undefined when nothing is wrong). */
+  get embedderReason(): string | undefined {
+    if (this.embedderActive) return undefined;
+    return this.embedderError ?? this.opts.unavailable;
+  }
+
+  /**
+   * The *effective* embedder, for humans. Reporting the configured value here regardless
+   * of whether it worked is what made a missing optional dependency look like an empty
+   * library, so a degraded provider names itself and its reason instead.
+   */
   get embedderName(): string {
-    return this.opts.embedder?.name ?? 'none (keyword-only)';
+    if (this.embedderActive) return this.opts.embedder!.name;
+    const configured = this.embedderConfigured;
+    if (configured === 'off') return 'none (keyword-only)';
+    const reason = this.embedderReason;
+    return `none (${configured} requested; ${reason ? shortCause(reason) : 'unavailable'})`;
   }
 
   get hasEmbedder(): boolean {
-    return Boolean(this.opts.embedder);
+    return this.embedderActive;
+  }
+
+  /** True when the index actually holds vectors, i.e. semantic-only ranking can work. */
+  get hasVectors(): boolean {
+    return this.vectors.size > 0;
+  }
+
+  /** Record the first provider failure so status, not just the log, can report it. */
+  private noteEmbedFailure(e: unknown): void {
+    if (this.embedderError) return;
+    this.embedderError = e instanceof Error ? e.message : String(e);
+    this.opts.logger?.warn(`Embedding failed; falling back to keyword-only. ${this.embedderError}`);
   }
 
   /** True while a background build is running. */
@@ -188,13 +257,18 @@ export class SearchIndex {
   }
 
   status(): SearchIndexStatus {
-    return {
+    const s: SearchIndexStatus = {
       documents: this.bm25.size,
       vectors: this.vectors.size,
       items: this.items.size,
       embedder: this.embedderName,
+      embedderConfigured: this.embedderConfigured,
+      embedderActive: this.embedderActive,
       builtFromVersion: this.builtFromVersion,
     };
+    const reason = this.embedderReason;
+    if (reason) s.embedderReason = reason;
+    return s;
   }
 
   get isEmpty(): boolean {
@@ -210,6 +284,9 @@ export class SearchIndex {
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
     this.reset();
+    // A rebuild is the retry: clear a previous runtime failure so a provider that has since
+    // been fixed (model downloaded, package installed) reports healthy again.
+    this.embedderError = undefined;
     const records: ChunkRecord[] = [];
     for (const item of libraryItems) {
       const d = item.data ?? item;
@@ -233,7 +310,7 @@ export class SearchIndex {
           if (vecs[i]) this.vectors.add(r.id, vecs[i]!);
         });
       } catch (e) {
-        this.opts.logger?.warn(`Embedding failed; falling back to keyword-only. ${e instanceof Error ? e.message : String(e)}`);
+        this.noteEmbedFailure(e);
       }
     }
     this.builtFromVersion = opts.version ?? 0;
@@ -253,6 +330,7 @@ export class SearchIndex {
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
     this.buildState = 'building';
     this.lastBuildError = undefined;
+    this.embedderError = undefined;
     this.itemsFetched = 0;
     this.itemsTotal = 0;
     const token = { cancelled: false };
@@ -272,8 +350,6 @@ export class SearchIndex {
     let lastPersistAt = Date.now();
     let itemsSinceLog = 0;
     let lastLogAt = Date.now();
-    let embeddingDisabled = false;
-    let warnedEmbed = false;
 
     const persistNow = async (): Promise<void> => {
       itemsSincePersist = 0;
@@ -300,7 +376,7 @@ export class SearchIndex {
       opts.onProgress?.(s);
     };
     const embedPending = async (force: boolean): Promise<void> => {
-      if (!this.hasEmbedder || embeddingDisabled) {
+      if (!this.hasEmbedder) {
         pending.length = 0;
         return;
       }
@@ -313,14 +389,10 @@ export class SearchIndex {
             if (vecs[i]) this.vectors.add(r.id, vecs[i]!);
           });
         } catch (e) {
-          embeddingDisabled = true;
+          // hasEmbedder goes false from here, which both stops this loop and makes every
+          // later status report say why the index has no vectors.
+          this.noteEmbedFailure(e);
           pending.length = 0;
-          if (!warnedEmbed) {
-            warnedEmbed = true;
-            this.opts.logger?.warn(
-              `Embedding failed; falling back to keyword-only. ${e instanceof Error ? e.message : String(e)}`,
-            );
-          }
         }
         // Yield so long embedding runs stay interruptible and the event loop breathes.
         await new Promise((resolve) => setImmediate(resolve));
@@ -402,7 +474,7 @@ export class SearchIndex {
         const [qv] = await this.opts.embedder.embed([q]);
         if (qv) vector = this.vectors.search(qv, pool);
       } catch (e) {
-        this.opts.logger?.warn(`Query embedding failed; keyword-only. ${e instanceof Error ? e.message : String(e)}`);
+        this.noteEmbedFailure(e);
       }
     }
 

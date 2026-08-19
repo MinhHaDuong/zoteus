@@ -20,11 +20,22 @@ const whoami: ToolDefinition = {
       access: cloud?.access ?? null,
       localApi: ctx.capabilities.localApi,
       defaultLibrary: lib,
+      // Search health belongs in the "call this first" tool: a semantic embedder that was
+      // configured but never ran is invisible everywhere else a user would think to look.
+      embeddings: {
+        configured: ctx.search.embedderConfigured,
+        active: ctx.search.embedderActive,
+        effective: ctx.search.embedderName,
+        ...(ctx.search.embedderReason ? { reason: ctx.search.embedderReason } : {}),
+      },
       update,
     };
     let summary = cloud
       ? `Signed in as ${cloud.username} (userID ${cloud.userID}). Local API: ${ctx.capabilities.localApi ? 'available' : 'unavailable'}.`
       : `No cloud API key configured — running in local-only read mode (local API ${ctx.capabilities.localApi ? 'available' : 'unavailable'}).`;
+    if (!ctx.search.embedderActive && ctx.search.embedderConfigured !== 'off') {
+      summary += ` Semantic search is degraded to keyword-only (embeddings=${ctx.search.embedderConfigured} requested but not active): ${ctx.search.embedderReason}`;
+    }
     if (update) {
       const dist = ctx.config?.dist;
       const bundleHint =

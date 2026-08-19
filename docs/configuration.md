@@ -11,6 +11,7 @@ Zoteus is configured via environment variables (see [`.env.example`](../.env.exa
 | `ZOTERO_LOCAL_PORT` | `23119` | Desktop local server port. |
 | `ZOTEUS_TRANSLATION_SERVER_URL` | `http://127.0.0.1:1969` | Optional Zotero translation-server for `zotero_import`. Without it, DOI and arXiv ids still resolve via built-in fallbacks; ISBN/PMID/bibcode and URLs need the server. See [`resolver.md`](./resolver.md). |
 | `ZOTEUS_EMBEDDINGS` | `local` | Semantic-search embeddings provider (`local` model, `openai`, `gemini`, or `off`). |
+| `ZOTEUS_TRANSFORMERS_PATH` | — | Where to resolve `@huggingface/transformers` from when the install cannot see it itself (notably a `.mcpb` bundle). Point it at the directory `npm root -g` prints. See [`semantic-search.md`](./semantic-search.md). |
 | `ZOTEUS_SCHOLAR_PROVIDERS` | `openalex` | Comma list of scholarly-graph providers (`openalex`, `crossref`, `semanticscholar`). |
 | `ZOTEUS_DATA_DIR` | OS data dir | Index + caches location. |
 | `ZOTEUS_CONTACT_EMAIL` | — | Polite-pool contact for external scholarly APIs. |
