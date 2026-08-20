@@ -1,6 +1,6 @@
 # Files, full-text, sync, groups & export
 
-M4 rounds out library coverage with five tools; `zotero_attach_file` and `zotero_annotate` were added later and write through the Zotero desktop app.
+M4 rounds out library coverage with five tools; `zotero_attach_file` and `zotero_annotate` were added later and write through the Zotero desktop app when one is reachable, falling back to the cloud Web API when it is not.
 
 ## `zotero_groups`
 Lists the group libraries your key can access (id, name, type, item count, edit permissions). Pass a returned id as `library_id` (with `library_type:"group"`) to other tools to operate on a group library.
@@ -20,14 +20,25 @@ The version-based delta the Zotero sync algorithm uses. Given `since` (a library
 
 ## `zotero_attachment`
 Upload, download, or inspect attachment files. File bytes go to/from **disk**, never through the conversation.
-- `upload` — store a local file via the full 5-step Zotero File Storage protocol (compute md5/mtime → request authorization → upload bytes → register). Optional `parent_item`, `title`, `content_type`. Returns the new attachment key (and whether the file already existed in storage).
+- `upload` — store a file via the full 5-step Zotero File Storage protocol (compute md5/mtime → request authorization → upload bytes → register). Give `url` to have Zoteus fetch the file itself, or `file_path` for a file on the machine running Zoteus. Optional `parent_item`, `title`, `content_type`. Returns the new attachment key (and whether the file already existed in storage).
 - `download` — fetch an attachment's file to `save_path` (default under the Zoteus data dir); returns the path and byte count.
 - `info` — return an attachment item's metadata.
 
 > Uploads/downloads use the cloud Web API and count against your Zotero file-storage quota. For a **key-free** store into the running desktop app, use `zotero_attach_file` instead.
+>
+> `file_path` is a path on the machine running **Zoteus**, not the machine you are chatting from. On a remote or hosted server those are different machines, so use `url` there.
 
 ## `zotero_attach_file`
-Store a file as an `imported_file` attachment under an existing item, through the Zotero desktop app's local-API writes (Zotero 10+) — no cloud key, and the bytes never go through the Web API. Give `parent` (the item key) and either `path` (a local file the Zoteus process can read) or `url` (downloaded first); `filename` and `content_type` are inferred when omitted, `title` defaults to the filename. Returns the new attachment key. On Zotero builds without local-API writes the tool says so and points you at `zotero_import`'s `attach_url`, which streams a file into the same connector save session. See [`writing.md`](./writing.md) for the two desktop write paths and the one-time key grant.
+Store a file as a stored attachment under an existing item. Give `parent` (the item key) and either `url` (Zoteus downloads it, then stores it) or `path` (a file on the machine running Zoteus); `filename` and `content_type` are inferred when omitted, `title` defaults to the filename. arXiv-style URLs carry no extension, so one is appended from the served content type. Returns the new attachment key.
+
+Two backends, picked per call:
+
+- **Desktop** (Zotero 10+ local-API writes) whenever the app is reachable: no cloud key, no storage quota, and the bytes never go through the Web API. Stored as `imported_file`.
+- **Cloud** (the Web API's File Storage protocol) otherwise, or for a group library via `library_id`. Needs `ZOTERO_API_KEY` with file access and counts against your Zotero storage quota. A downloaded file is stored as `imported_url` keeping its source URL, which is what Zotero itself records for a PDF pulled off the web.
+
+On Zotero 9 and earlier (a read-only local API) the desktop attempt fails before anything is created, so the call retries on the cloud when a key is configured. A failure *after* the attachment item exists is reported instead of retried, since a second attempt would leave the empty first one behind.
+
+> **Remote and hosted servers.** The desktop local API listens on `127.0.0.1:23119` on **your** machine, so a Zoteus running anywhere else has no route to it and no amount of granting write access in Zotero will change that. There, the cloud path is the only one, and `url` is the way in: the server fetches the bytes itself rather than needing a file on its own disk. See [`writing.md`](./writing.md) for the desktop write paths and the one-time key grant.
 
 ## `zotero_annotate`
 Add or delete Zotero PDF annotations — highlights, underlines, notes — the same objects the PDF reader creates, so they appear in Zotero's reader sidebar and export with the item. `parent` may be a regular item key (the PDF child is resolved for you) or an attachment key. Highlights need `text` plus a `position` (`{"pageIndex":N,"rects":[[x1,y1,x2,y2],…]}` in native PDF points, bottom-left origin); `annotationSortIndex` is derived from it. `action:"delete"` trashes annotations by key. Routes to the desktop app for the personal library, else the cloud Web API — details and examples in [`writing.md`](./writing.md).

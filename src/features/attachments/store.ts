@@ -1,15 +1,24 @@
+import { readFile } from 'node:fs/promises';
 import type { ToolContext } from '../../registry/registry.js';
-import { guessContentType } from '../../api/attachments.js';
+import type { LibraryRef } from '../../api/web-client.js';
+import { guessContentType, uploadAttachmentBytes } from '../../api/attachments.js';
 
 /**
- * Shared plumbing for storing a file as an `imported_file` attachment through the
- * Zotero 10+ desktop local API: download the bytes, create the attachment item under
- * a parent, then push the bytes with the local API's 3-phase upload.
+ * Shared plumbing for storing a file as a child attachment: resolve the bytes (from a
+ * local path or a URL), create the attachment item under a parent, then push the bytes
+ * with the 3-phase upload both Zotero backends implement.
  *
- * Used by `zotero_attach_file` and by `zotero_import`'s local-API save path
- * (`attach_url`), which would otherwise duplicate the same dance. The connector
- * protocol has its own equivalent (a single saveAttachment call inside the save
- * session), so only the local-API side lives here.
+ * Two destinations live here, and callers pick one per request:
+ *   - `storeLocalAttachment` writes through the Zotero 10+ desktop local API. Preferred
+ *     when the app is reachable: no cloud key, no storage quota, bytes stay on the box.
+ *   - `storeCloudAttachment` writes through the Web API's File Storage protocol. The
+ *     only option when Zoteus runs somewhere the user's desktop is not, which is every
+ *     hosted/remote deployment.
+ *
+ * Used by `zotero_attach_file`, `zotero_attachment`, and `zotero_import`'s `attach_url`,
+ * which would otherwise each duplicate the same dance. The connector protocol has its
+ * own equivalent (a single saveAttachment call inside the save session), so it is the
+ * one path that does not route through here.
  */
 
 const GENERIC_TYPE = 'application/octet-stream';
@@ -94,6 +103,66 @@ export async function downloadAttachment(
 }
 
 /**
+ * Resolve everything a store needs from either a local path or a URL: the bytes, a bare
+ * file name Zotero will accept, and a settled MIME type. Shared so `path` and `url`
+ * behave identically whichever backend the attachment ends up on.
+ *
+ * `titleHint` names the file when the URL yields nothing usable (a trailing-slash URL),
+ * and the extension implied by the content type is appended when the name carries none,
+ * since arXiv-style PDF URLs do not carry one.
+ */
+export async function readAttachmentSource(
+  ctx: Pick<ToolContext, 'fetcher'>,
+  src: {
+    path?: string;
+    url?: string;
+    filename?: string;
+    contentType?: string;
+    titleHint?: string;
+    fallbackType?: string;
+  },
+): Promise<{ bytes: Uint8Array; filename: string; contentType: string }> {
+  let bytes: Uint8Array;
+  let inferredName: string;
+  let served: string | undefined;
+  if (src.path) {
+    bytes = new Uint8Array(await readFile(src.path));
+    inferredName = bareFilename(src.path);
+  } else if (src.url) {
+    const file = await downloadAttachment(ctx, src.url);
+    ({ bytes, contentType: served } = file);
+    inferredName = file.filename === 'attachment' && src.titleHint ? bareFilename(src.titleHint) : file.filename;
+  } else {
+    throw new Error('Provide `path` or `url`.');
+  }
+  const name = bareFilename(src.filename ?? inferredName, inferredName);
+  const contentType = resolveContentType(name, {
+    explicit: src.contentType,
+    served,
+    fallback: src.fallbackType,
+  });
+  return { bytes, filename: withExtensionFor(name, contentType), contentType };
+}
+
+/**
+ * The attachment item was created but its bytes never landed. Kept distinct from a
+ * failure before creation, so callers know that retrying elsewhere would leave an empty
+ * attachment behind rather than being a clean second attempt.
+ */
+export class AttachmentUploadError extends Error {
+  constructor(
+    readonly attachmentKey: string,
+    readonly reason: unknown,
+  ) {
+    super(
+      `Attachment ${attachmentKey} was created, but storing its bytes failed: ` +
+        (reason instanceof Error ? reason.message : String(reason)),
+    );
+    this.name = 'AttachmentUploadError';
+  }
+}
+
+/**
  * Create an `imported_file` attachment under `parent` and store the bytes on it
  * (authorize -> POST bytes -> register). Returns the new attachment key; throws with a
  * human-readable reason when Zotero refuses the item or the upload.
@@ -119,10 +188,39 @@ export async function storeLocalAttachment(
   }
   const attachmentKey = result.successful[0]?.key;
   if (!attachmentKey) throw new Error('Local write returned no attachment key.');
-  await ctx.localWrites.uploadFile(attachmentKey, {
+  try {
+    await ctx.localWrites.uploadFile(attachmentKey, {
+      bytes: file.bytes,
+      filename: file.filename,
+      contentType: file.contentType,
+    });
+  } catch (e) {
+    throw new AttachmentUploadError(attachmentKey, e);
+  }
+  return attachmentKey;
+}
+
+/**
+ * Cloud sibling of `storeLocalAttachment`: create the attachment under `parent` and push
+ * the bytes through the Web API's File Storage protocol. Needs an API key with file
+ * access and consumes the account's storage quota, but requires nothing running on the
+ * user's machine, so it is what remote deployments and group libraries use.
+ *
+ * Returns the new key plus whether Zotero already had those exact bytes in storage, in
+ * which case the upload short-circuits and only the item is new.
+ */
+export async function storeCloudAttachment(
+  ctx: Pick<ToolContext, 'web'>,
+  lib: LibraryRef,
+  file: { parent?: string; bytes: Uint8Array; filename: string; contentType: string; title?: string; url?: string },
+): Promise<{ key: string; exists: boolean }> {
+  const result = await uploadAttachmentBytes(ctx.web, lib, {
     bytes: file.bytes,
     filename: file.filename,
     contentType: file.contentType,
+    parentItem: file.parent,
+    title: file.title ?? file.filename,
+    url: file.url,
   });
-  return attachmentKey;
+  return { key: result.key, exists: result.exists };
 }

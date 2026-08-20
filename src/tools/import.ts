@@ -4,12 +4,12 @@ import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } fro
 import { arxivItem, fromScholarWork, parseIdentifier, bareDoi, type ResolvedItem } from '../features/resolve/resolve.js';
 import {
   AttachmentDownloadError,
-  bareFilename,
   downloadAttachment,
-  resolveContentType,
+  readAttachmentSource,
+  storeCloudAttachment,
   storeLocalAttachment,
-  withExtensionFor,
 } from '../features/attachments/store.js';
+import type { LibraryRef } from '../api/web-client.js';
 
 function err(text: string): ToolHandlerResult {
   return { content: [{ type: 'text', text }], isError: true };
@@ -62,7 +62,7 @@ const importTool: ToolDefinition = {
     url: z.string().optional().describe('Web page URL to scrape (needs a translation-server).'),
     save_to_library: z.boolean().optional().describe('Persist the resolved items — into the running Zotero desktop app when available, otherwise the cloud Web API (needs a cloud key).'),
     collection_key: z.string().optional().describe('Collection to add saved items to: an 8-char collection key or a Zotero treeViewID like "C20".'),
-    attach_url: z.string().url().optional().describe('File URL (e.g. an arXiv PDF) to download and attach as a stored attachment to the (single) imported item when saving to the desktop app.'),
+    attach_url: z.string().url().optional().describe('File URL (e.g. an arXiv PDF) to download and attach as a stored attachment to the (single) imported item. Works on every save path: the desktop app when one is reachable, otherwise the cloud Web API.'),
     attach_title: z.string().optional().describe('Title for the attached file, e.g. "Full Text PDF".'),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
@@ -244,29 +244,58 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
     };
   }
   const result = await ctx.web.writeItems(lib, payload);
+  const created = result.successful.map((s) => s.key);
+  // The cloud has its own file-storage upload, so attach_url is not desktop-only: the
+  // bytes are fetched here and pushed to Zotero storage. As on the desktop paths, a
+  // failure degrades to a warning, since the items are already saved and re-running
+  // would duplicate them.
+  let attached: { key: string; bytes: number; contentType: string; filename: string; alreadyInStorage: boolean } | undefined;
+  let warning: string | undefined;
+  if (args.attach_url) {
+    if (!created[0]) {
+      warning = `No item key came back from the save, so ${args.attach_url} was not attached.`;
+    } else {
+      try {
+        attached = await attachUrlToCloud(ctx, lib, created[0], args.attach_url, args.attach_title);
+      } catch (e) {
+        const why = e instanceof Error ? e.message : String(e);
+        ctx.logger.warn(`Attaching ${args.attach_url} to ${created[0]} failed: ${why}`);
+        warning = `Item saved, but attaching ${args.attach_url} failed: ${why}`;
+      }
+    }
+  }
   return ok(
     {
-      created: result.successful.map((s) => s.key),
+      created,
       failed: result.failed,
       resolved: payload.length,
       source,
       target: 'cloud',
-      warning: args.attach_url ? 'attach_url is only supported for desktop-app saves; the file was not attached.' : undefined,
+      attached,
+      warning,
     },
-    `Imported ${result.successful.length} of ${payload.length} resolved item(s) via ${source} into the library.`,
+    `Imported ${result.successful.length} of ${payload.length} resolved item(s) via ${source} into the library` +
+      (attached ? `, with ${attached.bytes}-byte ${attached.filename} attached` : '') +
+      '.' +
+      (warning ? ` ${warning}` : ''),
   );
 }
 
 export default importTool;
 
 /**
+ * Fetch `attach_url` the way both non-connector save paths need it. attach_url is
+ * documented as a full-text file (typically a PDF), so that is the content type assumed
+ * when neither the server nor the URL says what it is, and `attach_title` names the file
+ * when the URL yields nothing usable.
+ */
+function fetchAttachUrl(ctx: ToolContext, url: string, title?: string) {
+  return readAttachmentSource(ctx, { url, titleHint: title, fallbackType: 'application/pdf' });
+}
+
+/**
  * Local-API equivalent of the connector protocol's in-session saveAttachment: download
  * `attach_url` and store it as an `imported_file` child of the item just saved.
- *
- * `attach_title` names the attachment (the connector path defaults to "Full Text PDF");
- * the stored file name comes from the URL, since Zotero needs a bare name and titles may
- * contain path separators. arXiv-style URLs carry no extension, so one is appended from
- * the content type.
  */
 async function attachUrlLocally(
   ctx: ToolContext,
@@ -274,21 +303,40 @@ async function attachUrlLocally(
   url: string,
   title?: string,
 ): Promise<{ key: string; bytes: number; contentType: string; filename: string }> {
-  const file = await downloadAttachment(ctx, url);
-  const name = file.filename === 'attachment' && title ? bareFilename(title) : file.filename;
-  // attach_url is documented as a full-text file (typically a PDF); fall back to that
-  // when neither the server nor the URL says what it is.
-  const contentType = resolveContentType(name, { served: file.contentType, fallback: 'application/pdf' });
-  const filename = withExtensionFor(name, contentType);
+  const { bytes, filename, contentType } = await fetchAttachUrl(ctx, url, title);
   const key = await storeLocalAttachment(ctx, {
     parent,
-    bytes: file.bytes,
+    bytes,
     filename,
     contentType,
     title: title ?? 'Full Text PDF',
     url,
   });
-  return { key, bytes: file.bytes.length, contentType, filename };
+  return { key, bytes: bytes.length, contentType, filename };
+}
+
+/**
+ * Cloud equivalent of the same step, for saves that did not go through the desktop app:
+ * push the downloaded bytes into Zotero file storage under the item just created. This
+ * is the only attach path a remote/hosted Zoteus has, since it cannot reach the desktop.
+ */
+async function attachUrlToCloud(
+  ctx: ToolContext,
+  lib: LibraryRef,
+  parent: string,
+  url: string,
+  title?: string,
+): Promise<{ key: string; bytes: number; contentType: string; filename: string; alreadyInStorage: boolean }> {
+  const { bytes, filename, contentType } = await fetchAttachUrl(ctx, url, title);
+  const stored = await storeCloudAttachment(ctx, lib, {
+    parent,
+    bytes,
+    filename,
+    contentType,
+    title: title ?? 'Full Text PDF',
+    url,
+  });
+  return { key: stored.key, bytes: bytes.length, contentType, filename, alreadyInStorage: stored.exists };
 }
 
 

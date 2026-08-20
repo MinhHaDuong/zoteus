@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { uploadFile, downloadFile, guessContentType } from '../../src/api/attachments.js';
+import { uploadAttachmentBytes, uploadFile, downloadFile, guessContentType } from '../../src/api/attachments.js';
 
 const lib = { type: 'user', id: 19552201 } as const;
 
@@ -50,6 +50,38 @@ describe('attachments', () => {
     expect(web.uploadBytes).not.toHaveBeenCalled();
     expect(web.registerUpload).not.toHaveBeenCalled();
     await rm(fp);
+  });
+
+  it('uploads in-memory bytes without touching the filesystem', async () => {
+    const web = fakeWeb();
+    const r = await uploadAttachmentBytes(web, lib, {
+      bytes: new Uint8Array([1, 2, 3, 4]),
+      filename: 'paper.pdf',
+      parentItem: 'ITEM1',
+      contentType: 'application/pdf',
+    });
+    expect(r).toMatchObject({ key: 'ATT1', exists: false, filename: 'paper.pdf' });
+    expect(web.writeItems.mock.calls[0][1][0]).toMatchObject({
+      itemType: 'attachment',
+      parentItem: 'ITEM1',
+      linkMode: 'imported_file',
+      filename: 'paper.pdf',
+    });
+    expect(web.requestUpload.mock.calls[0][2]).toMatchObject({ filesize: 4 });
+  });
+
+  it('records a downloaded file as an imported_url that keeps its source', async () => {
+    const web = fakeWeb();
+    await uploadAttachmentBytes(web, lib, {
+      bytes: new Uint8Array([9]),
+      filename: 'paper.pdf',
+      contentType: 'application/pdf',
+      url: 'https://arxiv.org/pdf/2501.12345v1',
+    });
+    expect(web.writeItems.mock.calls[0][1][0]).toMatchObject({
+      linkMode: 'imported_url',
+      url: 'https://arxiv.org/pdf/2501.12345v1',
+    });
   });
 
   it('downloads bytes to a path', async () => {

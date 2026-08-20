@@ -40,34 +40,55 @@ export interface UploadOptions {
   linkMode?: string;
 }
 
+export interface UploadBytesOptions {
+  bytes: Uint8Array;
+  /** Bare file name to store under; Zotero joins it onto the storage directory. */
+  filename: string;
+  parentItem?: string;
+  title?: string;
+  contentType?: string;
+  linkMode?: string;
+  /** Where the bytes came from. Kept on the attachment, and implies `imported_url`. */
+  url?: string;
+  /** Modification time in ms since the epoch; defaults to now for in-memory bytes. */
+  mtime?: number;
+}
+
 export interface UploadResult {
   key: string;
   exists: boolean;
   filename: string;
 }
 
-/** Run the full 5-step Zotero File Storage upload for a local file. */
-export async function uploadFile(
+/**
+ * Run the full 5-step Zotero File Storage upload for bytes already in memory.
+ *
+ * This is the only file-write path that works without the Zotero desktop app, so it is
+ * what a remote/hosted Zoteus uses: the desktop local API listens on the *user's*
+ * loopback interface, which a server elsewhere has no route to.
+ */
+export async function uploadAttachmentBytes(
   web: WebApiClient,
   lib: LibraryRef,
-  opts: UploadOptions,
+  opts: UploadBytesOptions,
 ): Promise<UploadResult> {
-  const bytes = new Uint8Array(await readFile(opts.filePath));
-  const st = await stat(opts.filePath);
-  const filename = basename(opts.filePath);
+  const { bytes, filename } = opts;
   const md5 = createHash('md5').update(bytes).digest('hex');
-  const mtime = Math.floor(st.mtimeMs);
+  const mtime = opts.mtime ?? Date.now();
   const contentType = opts.contentType ?? guessContentType(filename);
 
-  // Step 1: create the attachment item.
+  // Step 1: create the attachment item. A file fetched from the web is an
+  // `imported_url` (what Zotero itself records for a downloaded PDF), which keeps the
+  // source URL on the attachment; bytes read off disk stay `imported_file`.
   const itemObj: Record<string, unknown> = {
     itemType: 'attachment',
-    linkMode: opts.linkMode ?? 'imported_file',
+    linkMode: opts.linkMode ?? (opts.url ? 'imported_url' : 'imported_file'),
     title: opts.title ?? filename,
     filename,
     contentType,
   };
   if (opts.parentItem) itemObj.parentItem = opts.parentItem;
+  if (opts.url) itemObj.url = opts.url;
   const created = await web.writeItems(lib, [itemObj]);
   if (!created.successful.length) {
     throw new Error(`Failed to create attachment item: ${JSON.stringify(created.failed)}`);
@@ -88,6 +109,25 @@ export async function uploadFile(
   // Step 5: register the completed upload.
   await web.registerUpload(lib, key, auth.uploadKey);
   return { key, exists: false, filename };
+}
+
+/** Run the full 5-step Zotero File Storage upload for a local file. */
+export async function uploadFile(
+  web: WebApiClient,
+  lib: LibraryRef,
+  opts: UploadOptions,
+): Promise<UploadResult> {
+  const bytes = new Uint8Array(await readFile(opts.filePath));
+  const st = await stat(opts.filePath);
+  return uploadAttachmentBytes(web, lib, {
+    bytes,
+    filename: basename(opts.filePath),
+    mtime: Math.floor(st.mtimeMs),
+    parentItem: opts.parentItem,
+    title: opts.title,
+    contentType: opts.contentType,
+    linkMode: opts.linkMode,
+  });
 }
 
 export async function downloadFile(

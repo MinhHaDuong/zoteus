@@ -16,9 +16,9 @@ Writes to your **personal** library go straight to the running Zotero desktop ap
 | `zotero_manage_tags` | `list`, or `add` / `remove` tags on items (edits each item's tag array). | cloud | non-destructive |
 | `zotero_saved_searches` | `list` / `create` / `delete` saved-search definitions. The cloud API does not *execute* them. | cloud | mixed |
 | `zotero_annotate` | Add or delete PDF annotations — highlights, underlines, notes — the same objects the Zotero PDF reader creates. Resolves the PDF attachment from any parent item, or takes an attachment key directly. `delete` needs local-API writes or a cloud key (the connector protocol cannot delete). | desktop → cloud | non-destructive; `delete` **trashes** (reversible) |
-| `zotero_attach_file` | Store a local file or a downloaded URL as an `imported_file` attachment under an existing item. Returns the new attachment key. | desktop (local-API writes) only | non-destructive |
+| `zotero_attach_file` | Store a file (`url`, or `path` on the Zoteus machine) as a stored attachment under an existing item. Returns the new attachment key. | desktop → cloud | non-destructive |
 
-`zotero_import` with `save_to_library:true` also saves through the desktop app (both desktop paths), including `attach_url` to stream a PDF into the same save session and `collection_key` targeting — see [`citations.md`](./citations.md).
+`zotero_import` with `save_to_library:true` also saves through the desktop app (both desktop paths), including `attach_url` to stream a PDF into the same save session and `collection_key` targeting — see [`citations.md`](./citations.md). Without a reachable desktop it saves through the cloud, and `attach_url` goes up through Zotero file storage there.
 
 ## Desktop write paths
 
@@ -100,4 +100,4 @@ Store a PDF under an existing item:
 { "parent": "ABCD1234", "path": "/home/me/papers/attention.pdf" }
 ```
 
-This needs Zotero 10+ local-API writes. On Zotero 9 and earlier, attach the file **during import** instead — `zotero_import` takes `attach_url` and streams it into the same connector save session.
+The desktop app handles this when it is reachable (Zotero 10+ local-API writes). Otherwise the file goes up through the cloud Web API's File Storage protocol, which needs `ZOTERO_API_KEY` with file access and uses your storage quota. That cloud path is the only one a remote or hosted Zoteus has: the desktop local API is bound to your own loopback address, out of reach from another machine. `url` works on every setup, since the server downloads the bytes itself; `path` only makes sense when the file is on the machine running Zoteus.

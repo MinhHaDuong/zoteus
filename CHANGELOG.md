@@ -6,6 +6,34 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **File attachments now work without the Zotero desktop app.** Every write path that
+  stores a file was gated on desktop access, so on a remote or hosted Zoteus (a claude.ai
+  custom connector, or any server not on the user's machine) attaching a PDF was
+  impossible: `zotero_attach_file` refused with "storing files needs Zotero desktop write
+  access", and `zotero_import` saved the metadata but reported `attach_url is only
+  supported for desktop-app saves; the file was not attached`. Both suggested granting
+  Zotero write access, which cannot help: the desktop local API listens on the *user's*
+  `127.0.0.1:23119`, and a server elsewhere has no route to it. The cloud Web API does
+  support file uploads, and Zoteus already implemented that protocol for
+  `zotero_attachment action:"upload"`, but only from a file on the server's own disk.
+  Now the bytes can come from a URL and the upload runs from memory:
+  - `zotero_attach_file` uses the desktop app when it is reachable and the cloud Web
+    API's File Storage protocol when it is not, so `url` works on every deployment. It
+    also takes `library_type`/`library_id` for attaching in a group library.
+  - `zotero_import`'s `attach_url` is no longer desktop-only; on a cloud save it uploads
+    the file into Zotero storage. As on the desktop paths, a failure degrades to a
+    `warning` rather than failing an import that already saved.
+  - `zotero_attachment action:"upload"` accepts `url` alongside `file_path`, which on a
+    remote server refers to a disk the caller cannot write to.
+  - A file fetched from the web is stored as `imported_url` keeping its source URL (what
+    Zotero itself records for a downloaded PDF), and an extension is appended from the
+    served content type, since arXiv-style PDF URLs carry none.
+  - On Zotero 9 and earlier (read-only local API) the desktop attempt fails before
+    anything is created, so the call now retries on the cloud instead of dead-ending. A
+    failure *after* the attachment item exists is reported rather than retried, so a
+    partial write cannot silently produce a duplicate.
+
 ## [1.4.2] - 2026-08-19
 
 ### Fixed

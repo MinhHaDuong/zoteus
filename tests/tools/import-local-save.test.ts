@@ -219,3 +219,94 @@ describe('zotero_import save target (DOI without translation-server)', () => {
     expect((res.structuredContent as any).saved).toBe(false);
   });
 });
+
+/**
+ * The cloud save path is what a remote/hosted Zoteus always takes: the desktop local API
+ * listens on the user's own loopback address, so no desktop write path exists there and
+ * attach_url has to go through Zotero file storage.
+ */
+describe('zotero_import attach_url on the cloud save path', () => {
+  const cloudCtx = (over: any = {}) =>
+    makeCtx({
+      capabilities: { cloud: { userID: 19552201, username: 'oscardvs', access: {} }, localApi: false },
+      web: {
+        writeItems: vi.fn(async (_lib: any, items: any[]) =>
+          items[0]?.itemType === 'attachment'
+            ? { successful: [{ index: 0, key: 'CLOUDATT', version: 2 }], unchanged: [], failed: [], newLibraryVersion: 2 }
+            : { successful: [{ index: 0, key: 'CLOUDKEY', version: 1 }], unchanged: [], failed: [], newLibraryVersion: 1 },
+        ),
+        requestUpload: vi.fn(async () => ({
+          url: 'https://s3.example/upload',
+          contentType: 'multipart/form-data',
+          prefix: 'PRE',
+          suffix: 'SUF',
+          uploadKey: 'UP1',
+        })),
+        uploadBytes: vi.fn(async () => undefined),
+        registerUpload: vi.fn(async () => undefined),
+      },
+      fetcher: {
+        fetch: vi.fn(
+          async () =>
+            new Response(new Uint8Array([1, 2, 3, 4]), { status: 200, headers: { 'content-type': 'application/pdf' } }),
+        ),
+      },
+      ...over,
+    });
+
+  it('uploads the file into Zotero storage instead of warning that it cannot', async () => {
+    const ctx = cloudCtx();
+    const res = await importTool.handler(
+      {
+        action: 'by_identifier',
+        identifier: '10.1234/example',
+        save_to_library: true,
+        attach_url: 'https://arxiv.org/pdf/2501.12345v1',
+        attach_title: 'Full Text PDF',
+      },
+      ctx,
+    );
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as any;
+    expect(sc.target).toBe('cloud');
+    expect(sc.created).toEqual(['CLOUDKEY']);
+    expect(sc.warning).toBeUndefined();
+    expect(sc.attached).toMatchObject({
+      key: 'CLOUDATT',
+      bytes: 4,
+      contentType: 'application/pdf',
+      filename: '2501.12345v1.pdf',
+      alreadyInStorage: false,
+    });
+    expect(ctx.web.writeItems.mock.calls[1][1][0]).toMatchObject({
+      itemType: 'attachment',
+      parentItem: 'CLOUDKEY',
+      linkMode: 'imported_url',
+      title: 'Full Text PDF',
+      contentType: 'application/pdf',
+    });
+    expect(ctx.web.uploadBytes).toHaveBeenCalledTimes(1);
+    expect(ctx.web.registerUpload).toHaveBeenCalledWith({ type: 'user', id: 19552201 }, 'CLOUDATT', 'UP1');
+  });
+
+  it('keeps the import successful when the attachment fails (warning only, no duplicate save)', async () => {
+    const ctx = cloudCtx({ fetcher: { fetch: vi.fn(async () => new Response('nope', { status: 404 })) } });
+    const res = await importTool.handler(
+      {
+        action: 'by_identifier',
+        identifier: '10.1234/example',
+        save_to_library: true,
+        attach_url: 'https://example.org/missing.pdf',
+      },
+      ctx,
+    );
+
+    expect(res.isError).toBeFalsy();
+    const sc = res.structuredContent as any;
+    expect(sc.created).toEqual(['CLOUDKEY']);
+    expect(sc.attached).toBeUndefined();
+    expect(sc.warning).toMatch(/404/);
+    expect(ctx.web.writeItems).toHaveBeenCalledTimes(1);
+  });
+});
