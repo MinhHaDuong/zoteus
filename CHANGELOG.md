@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-20
+
 ### Added
 - **Semantic search can now cover the full text of your PDFs, not just metadata and
   abstracts** (#8). The index has always been built from title, abstract, creators and
