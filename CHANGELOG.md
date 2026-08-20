@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-20
+
 ### Fixed
 - **File attachments now work without the Zotero desktop app.** Every write path that
   stores a file was gated on desktop access, so on a remote or hosted Zoteus (a claude.ai
