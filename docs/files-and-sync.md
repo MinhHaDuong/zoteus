@@ -15,6 +15,8 @@ Read or write attachment full text (only attachment items have it):
 - `set` — store extracted text (`content` + char/page counts).
 - `since` — map of attachment keys whose full text changed after a library version (for incremental indexing).
 
+> `get` and `since` are **routed** like every other read: Zotero 7+ serves the same `/fulltext` endpoints from the desktop app, so they need no cloud key when it is running. Group libraries, and everything when the app is closed, go to the cloud Web API. `set` is a write and always goes to the cloud.
+
 ## `zotero_sync`
 The version-based delta the Zotero sync algorithm uses. Given `since` (a library version, 0 = everything), returns per-type maps of changed keys (items/collections/searches/tags) plus the deletion log. Fetch only the changed keys afterward — don't re-pull the whole library.
 

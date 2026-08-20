@@ -55,7 +55,7 @@ const getFulltext: ToolDefinition = {
   name: 'zotero_get_fulltext',
   title: 'Get attachment full text / passages (read-only)',
   description:
-    "Retrieve an item's PDF text for grounding. Pass a parent `item_key` (its best PDF attachment is resolved automatically) or an attachment key. With `query`, returns the top relevant passages with locators (char offsets, nearest section, and a page); with `page_range` (e.g. \"3-7\"), returns that span; with neither, returns a truncated head. Text comes from Zotero's full-text index when available; when the attachment is NOT indexed yet, the PDF itself is downloaded and parsed on the fly (`fallback`, on by default — set `fallback:false` to disable), so unindexed PDFs still return text (marked fulltextSource:\"pdf\"). Page numbers are exact in that case, and otherwise an estimate (pageApprox) unless `precise_pages:true`, which re-extracts the PDF for exact pages when possible (otherwise it degrades to approximate with a notice). Read-only; cloud full text. Use this to cite a claim with a page after finding an item via zotero_search_items / zotero_semantic_search.",
+    "Retrieve an item's PDF text for grounding. Pass a parent `item_key` (its best PDF attachment is resolved automatically) or an attachment key. With `query`, returns the top relevant passages with locators (char offsets, nearest section, and a page); with `page_range` (e.g. \"3-7\"), returns that span; with neither, returns a truncated head. Text comes from Zotero's full-text index when available; when the attachment is NOT indexed yet, the PDF itself is downloaded and parsed on the fly (`fallback`, on by default — set `fallback:false` to disable), so unindexed PDFs still return text (marked fulltextSource:\"pdf\"). Page numbers are exact in that case, and otherwise an estimate (pageApprox) unless `precise_pages:true`, which re-extracts the PDF for exact pages when possible (otherwise it degrades to approximate with a notice). Read-only; the indexed text is served by the running Zotero desktop app when there is one, otherwise by the cloud Web API. Use this to cite a claim with a page after finding an item via zotero_search_items / zotero_semantic_search.",
   inputSchema: {
     item_key: z.string().describe('Parent item key or attachment key.'),
     query: z.string().optional().describe('Return top passages relevant to this query.'),
@@ -91,7 +91,9 @@ const getFulltext: ToolDefinition = {
     if ('error' in resolved) return err(resolved.error);
 
     const maxMb = Math.round(DEFAULT_PRECISE_MAX_BYTES / (1024 * 1024));
-    const ft = await ctx.web.getFullText(lib, resolved.attachmentKey);
+    // Routed, not cloud-only: Zotero 7+ serves /fulltext locally, so a running desktop app
+    // answers this without a cloud key (and for items that never synced).
+    const ft = await ctx.router.getFullText(resolved.attachmentKey, { library });
     const indexed = Boolean(ft && typeof ft.content === 'string' && ft.content.length);
 
     // Where the text comes from: Zotero's index when available, otherwise (fallback,

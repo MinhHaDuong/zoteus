@@ -30,6 +30,11 @@ can never time out the MCP client, even on very large libraries.
 - `action: "stop"` — cooperatively cancel a running build. The build halts between
   pages/batches and the partial index is kept and stays searchable.
 - `limit` — optional max number of items to index (default and hard cap: 5000).
+- `fulltext` — also index the body text of each item's attachments (see
+  [Full-text indexing](#full-text-indexing-opt-in) below). Defaults to
+  `ZOTEUS_INDEX_FULLTEXT` (off).
+- `fulltext_max_chars` — cap on indexed full-text characters per item; `0` means no cap.
+  Defaults to `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` (40000).
 
 **Local-first, key-free.** The build pages items through the library router, exactly like
 every other read: a running Zotero desktop app serves them from its **local API** (no
@@ -55,8 +60,70 @@ whatever was indexed).
   library has nothing on this". `auto` and `keyword` keep working on BM25; `auto` appends a
   one-line notice when vector ranking is off.
 - Snippets are query-centred and trimmed to word boundaries: the excerpt is positioned around the first query token hit rather than always taken from the document head, so the relevant phrase appears in the snippet even when it occurs deep in the abstract.
+- A hit whose snippet came from a PDF body rather than the item's metadata is marked
+  `source: "fulltext"`, so the caller knows the passage is quotable and can fetch it with
+  a page locator via `zotero_get_fulltext`.
 
 For exact field/tag/itemType filtering, use `zotero_search_items`. Use semantic search for conceptual "papers about X" queries.
+
+## Full-text indexing (opt-in)
+
+By default the index covers item **metadata**: title, abstract, creators, tags, date,
+publication. That finds papers, but it cannot find a claim that only ever appears on page
+9 of a PDF. Turning full text on adds each item's attachment body as extra passages:
+
+```jsonc
+// per build
+{ "tool": "zotero_index", "action": "build", "fulltext": true }
+```
+
+```bash
+# or as the default for every build
+ZOTEUS_INDEX_FULLTEXT=true
+```
+
+**What it indexes.** The text Zotero itself extracted when the PDF was first opened, read
+from the `/fulltext` endpoints. Attachments Zotero has never extracted are skipped; open
+them once in Zotero and rebuild. Unlike `zotero_get_fulltext`, the build does **not** fall
+back to downloading and parsing PDFs itself: that would mean fetching and decoding the
+whole library.
+
+**Local-first, key-free.** Zotero 7+ serves `/fulltext` from the desktop app, so full-text
+indexing works with no cloud API key, exactly like the metadata build. Group libraries (and
+everything else when the app is closed) go to the cloud Web API.
+
+**Passages are attributed to the parent item.** A body-text hit is reported as the item
+that owns the attachment, with the item's title, and de-duplicated against its metadata
+passages, so one paper never floods the result list.
+
+**How it is resolved.** Two library-wide reads, not per-item probing: one
+`/fulltext?since=0` call names every attachment that *has* extracted text, and paging
+`itemType=attachment` maps each one to its parent. Only that intersection is fetched, so
+the number of full-text requests equals the number of attachments that actually have text.
+
+**Cost.** This is the expensive option, which is why it is off by default. Measured on a
+212-item library with 151 extracted PDFs:
+
+| | passages | index file | build (keyword-only, desktop app) |
+|---|---:|---:|---:|
+| metadata only | 687 | 0.4 MB | 0.2 s |
+| `fulltext: true` | 6246 | 7.9 MB | 4.0 s |
+
+Roughly **9× the passages**. Every one of them is also a vector to compute and store, so
+with `ZOTEUS_EMBEDDINGS=local` (CPU-bound) the embedding stage grows by the same factor and
+dominates the build. Ways to bound it:
+
+- `fulltext_max_chars` / `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` — characters indexed per item
+  (default 40000, about 13 pages of dense text; `0` disables the cap). Passages per item
+  land near `max_chars / 1200`.
+- `limit` — index fewer items.
+- Body passages are chunked at 1200 characters (against 512 for metadata), which keeps the
+  vector count down and gives each passage enough context to embed usefully.
+
+Progress and outcome are reported by `zotero_index action:"status"`: `fulltextItems`,
+`fulltextPassages`, and `fulltextEnabled`. If full text was requested but produced nothing
+(no extracted attachments, or the endpoints were unreachable) the build still completes as
+a metadata index and `fulltextReason` says why, rather than looking complete.
 
 ## Embedding backends (privacy-first)
 
@@ -136,3 +203,6 @@ A few things to know when indexing a big Zotero library:
   index is usable for keyword search the whole time, and progress survives crashes.
 - **Embeddings are batched** (32 passages per pipeline call) to keep local builds
   efficient and interruptible.
+- **Full text multiplies all of the above** by roughly the passage ratio above. On a large
+  library, start with a `limit` or a smaller `fulltext_max_chars` before indexing
+  everything.

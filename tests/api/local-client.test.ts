@@ -98,4 +98,33 @@ describe('LocalApiClient', () => {
     await makeLocal(fetchImpl).getItemChildren('ABCD1234', { itemType: 'annotation', limit: 100 });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+
+  it('reads an attachment full text from the local /fulltext endpoint', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toBe('http://127.0.0.1:23119/api/users/0/items/ATT01/fulltext');
+      return new Response(JSON.stringify({ content: 'body text', indexedPages: 7, totalPages: 7 }), { status: 200 });
+    });
+    const ft = await makeLocal(fetchImpl).getFullText('ATT01');
+    expect(ft.content).toBe('body text');
+    expect(ft.totalPages).toBe(7);
+  });
+
+  it('returns null (not an error) for an attachment the app has no text for', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Not found', { status: 404 }));
+    expect(await makeLocal(fetchImpl).getFullText('ATT01')).toBeNull();
+  });
+
+  it('still throws when the local API is unreachable, so a build reports it', async () => {
+    const fetchImpl = vi.fn(async () => new Response('nope', { status: 500 }));
+    await expect(makeLocal(fetchImpl).getFullText('ATT01')).rejects.toThrow(/500/);
+  });
+
+  it('lists full-text changes since a version', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/users/0/fulltext');
+      expect(url).toContain('since=0');
+      return new Response(JSON.stringify({ ATT01: 676, ATT02: 705 }), { status: 200 });
+    });
+    expect(await makeLocal(fetchImpl).fullTextSince(0)).toEqual({ ATT01: 676, ATT02: 705 });
+  });
 });

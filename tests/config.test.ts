@@ -10,6 +10,9 @@ describe('loadConfig', () => {
     expect(cfg.localPort).toBe(23119);
     expect(cfg.translationServerUrl).toBe('http://127.0.0.1:1969');
     expect(cfg.embeddings).toBe('local');
+    // Full-text indexing is opt-in: it multiplies build time and index size.
+    expect(cfg.indexFulltext).toBe(false);
+    expect(cfg.indexFulltextMaxChars).toBe(40000);
     expect(cfg.allowDelete).toBe(false);
     expect(cfg.readOnly).toBe(false);
     expect(cfg.scholarProviders).toEqual(['openalex']);
@@ -25,6 +28,8 @@ describe('loadConfig', () => {
       ZOTERO_LOCAL_PORT: '24000',
       ZOTEUS_ALLOW_DELETE: 'true',
       ZOTEUS_SCHOLAR_PROVIDERS: 'openalex,crossref',
+      ZOTEUS_INDEX_FULLTEXT: 'true',
+      ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '0',
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.apiKey).toBe('abc');
     expect(cfg.libraryId).toBe(19552201);
@@ -33,6 +38,8 @@ describe('loadConfig', () => {
     expect(cfg.localPort).toBe(24000);
     expect(cfg.allowDelete).toBe(true);
     expect(cfg.scholarProviders).toEqual(['openalex', 'crossref']);
+    expect(cfg.indexFulltext).toBe(true);
+    expect(cfg.indexFulltextMaxChars).toBe(0); // 0 = no per-item cap
   });
 
   it('throws on an invalid enum value', () => {

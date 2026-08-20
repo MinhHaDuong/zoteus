@@ -76,6 +76,27 @@ export class LibraryRouter {
     return this.web.getItemChildren(lib, key, rest);
   }
 
+  /**
+   * Indexed full text for an attachment (null when there is none).
+   *
+   * Routed like every other read, so a running desktop app answers key-free: Zotero 7+
+   * serves the same `/fulltext` endpoints locally as the cloud does. Before this was
+   * routed, full-text reads went to api.zotero.org unconditionally and failed outright in
+   * local-only mode (no key, and the personal library addressed as users/0).
+   */
+  async getFullText(key: string, opts: ReadOpts = {}): Promise<any | null> {
+    const lib = opts.library ?? this.defaultLibrary();
+    if (this.useLocal(lib)) return this.local!.getFullText(key);
+    return this.web.getFullText(lib, key);
+  }
+
+  /** Attachment keys whose full text changed after `version`, mapped to that version. */
+  async fullTextSince(version: number, opts: ReadOpts = {}): Promise<Record<string, number>> {
+    const lib = opts.library ?? this.defaultLibrary();
+    if (this.useLocal(lib)) return this.local!.fullTextSince(version);
+    return this.web.fullTextSince(lib, version);
+  }
+
   async listCollections(
     opts: ReadOpts & { top?: boolean; limit?: number; start?: number } = {},
   ): Promise<ListResult> {

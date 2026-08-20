@@ -12,6 +12,8 @@ Zoteus is configured via environment variables (see [`.env.example`](../.env.exa
 | `ZOTEUS_TRANSLATION_SERVER_URL` | `http://127.0.0.1:1969` | Optional Zotero translation-server for `zotero_import`. Without it, DOI and arXiv ids still resolve via built-in fallbacks; ISBN/PMID/bibcode and URLs need the server. See [`resolver.md`](./resolver.md). |
 | `ZOTEUS_EMBEDDINGS` | `local` | Semantic-search embeddings provider (`local` model, `openai`, `gemini`, or `off`). |
 | `ZOTEUS_TRANSFORMERS_PATH` | — | Where to resolve `@huggingface/transformers` from when the install cannot see it itself (notably a `.mcpb` bundle). Point it at the directory `npm root -g` prints. See [`semantic-search.md`](./semantic-search.md). |
+| `ZOTEUS_INDEX_FULLTEXT` | `false` | Also index the body text of item attachments (what Zotero extracted from each PDF), so semantic search matches claims inside a paper and not only its title and abstract. Opt-in because it is expensive: roughly 9× the passages, index size, and embedding time. Can be set per build with `zotero_index fulltext:true`. See [`semantic-search.md`](./semantic-search.md#full-text-indexing-opt-in). |
+| `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` | `40000` | Cap on indexed full-text characters per item (~13 pages of dense text); `0` means no cap. The main dial for the cost above. |
 | `ZOTEUS_SCHOLAR_PROVIDERS` | `openalex` | Comma list of scholarly-graph providers (`openalex`, `crossref`, `semanticscholar`). |
 | `ZOTEUS_DATA_DIR` | OS data dir | Index + caches location. |
 | `ZOTEUS_CONTACT_EMAIL` | — | Polite-pool contact for external scholarly APIs. |

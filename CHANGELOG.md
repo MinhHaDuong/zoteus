@@ -6,6 +6,42 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Semantic search can now cover the full text of your PDFs, not just metadata and
+  abstracts** (#8). The index has always been built from title, abstract, creators and
+  tags, so a claim that appears only on page 9 of a paper was unfindable by meaning. Full
+  text is now an opt-in extra pass over the same build:
+  - `zotero_index action:"build" fulltext:true` (or `ZOTEUS_INDEX_FULLTEXT=true` as the
+    default for every build) indexes the body text Zotero extracted from each item's
+    attachments as additional passages. `fulltext_max_chars` /
+    `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` caps how much of each item is indexed (default
+    40000 characters, about 13 pages; `0` = no cap).
+  - Body passages carry their **parent item's** key and title, so a hit lands on the paper
+    rather than the attachment, and one paper cannot flood the results. Hits whose snippet
+    came from a PDF body are marked `source: "fulltext"` so the passage can be quoted and
+    located with `zotero_get_fulltext`.
+  - **Key-free, local-first.** Zotero 7+ serves the `/fulltext` endpoints from the desktop
+    app, so this works with no cloud API key, like every other read. Group libraries (and
+    everything when the app is closed) go to the cloud Web API.
+  - The resolution costs two library-wide reads instead of per-item probing: one
+    `/fulltext?since=0` call names the attachments that have extracted text, and paging
+    `itemType=attachment` maps them to their parents. Only that intersection is fetched.
+  - Off by default because it is genuinely expensive: measured on a 212-item library with
+    151 extracted PDFs, roughly 9x the passages (687 -> 6246) and 20x the index file
+    (0.4 MB -> 7.9 MB), with the embedding stage growing by the same factor.
+  - `zotero_index action:"status"` reports `fulltextEnabled`, `fulltextItems` and
+    `fulltextPassages`; when full text was requested but produced nothing (no extracted
+    attachments, unreachable endpoints) the build still completes as a metadata index and
+    `fulltextReason` says why, rather than looking complete.
+
+### Fixed
+- **Full-text reads no longer require a cloud API key.** `zotero_get_fulltext` and
+  `zotero_fulltext` (`get`/`since`) went to `api.zotero.org` unconditionally, so in
+  local-only mode (no key, personal library addressed as `users/0`) they failed outright
+  even though the running desktop app serves the very same endpoints. Both now route like
+  every other read: desktop app first, cloud when it is closed or the library is a group.
+  `zotero_fulltext action:"set"` is a write and stays on the cloud Web API.
+
 ## [1.5.0] - 2026-08-20
 
 ### Fixed

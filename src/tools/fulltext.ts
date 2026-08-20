@@ -10,7 +10,7 @@ const fulltext: ToolDefinition = {
   name: 'zotero_fulltext',
   title: 'Attachment full-text',
   description:
-    "Not a search — to find which items contain a term, use `zotero_search_items` with qmode=everything. This reads, sets, or tracks one attachment's already-extracted full text by key. `action`: \"get\" returns the indexed text content plus indexing stats for an attachment item (only attachment items have full text; returns found:false if none); \"set\" stores extracted text for an attachment (provide `content` and the indexing counts); \"since\" returns the map of attachment keys whose full text changed after a given library `version` (useful for incremental indexing). Only attachment items support full text. \"set\" writes via the cloud Web API.",
+    "Not a search — to find which items contain a term, use `zotero_search_items` with qmode=everything. This reads, sets, or tracks one attachment's already-extracted full text by key. `action`: \"get\" returns the indexed text content plus indexing stats for an attachment item (only attachment items have full text; returns found:false if none); \"set\" stores extracted text for an attachment (provide `content` and the indexing counts); \"since\" returns the map of attachment keys whose full text changed after a given library `version` (useful for incremental indexing). Only attachment items support full text. \"get\" and \"since\" read through the running Zotero desktop app when there is one (no cloud key needed), otherwise the cloud Web API; \"set\" always writes via the cloud Web API.",
   inputSchema: {
     action: z.enum(['get', 'set', 'since']),
     item_key: z.string().optional().describe('Attachment item key (get/set).'),
@@ -31,14 +31,14 @@ const fulltext: ToolDefinition = {
 
     if (args.action === 'get') {
       if (!args.item_key) return err('`item_key` is required for get.');
-      const ft = await ctx.web.getFullText(readLib, args.item_key);
+      const ft = await ctx.router.getFullText(args.item_key, { library: readLib });
       if (!ft) return ok({ found: false, item_key: args.item_key }, `No extracted full text for ${args.item_key}.`);
       const length = typeof ft.content === 'string' ? ft.content.length : 0;
       return ok({ found: true, ...ft }, `Full text for ${args.item_key}: ${length} characters.`);
     }
 
     if (args.action === 'since') {
-      const map = await ctx.web.fullTextSince(readLib, args.since ?? 0);
+      const map = await ctx.router.fullTextSince(args.since ?? 0, { library: readLib });
       return ok({ changed: map, count: Object.keys(map).length }, `${Object.keys(map).length} attachment(s) with full-text changes since v${args.since ?? 0}.`);
     }
 

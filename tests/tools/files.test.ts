@@ -5,7 +5,7 @@ import fulltext from '../../src/tools/fulltext.js';
 import sync from '../../src/tools/sync.js';
 
 function makeCtx(overrides: any = {}): any {
-  return {
+  const ctx: any = {
     config: { dataDir: '/tmp/zoteus' },
     capabilities: { cloud: { userID: 19552201 }, localApi: false },
     router: {
@@ -23,6 +23,14 @@ function makeCtx(overrides: any = {}): any {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     ...overrides,
   };
+  // Full-text reads are routed now (desktop app first, cloud otherwise). With no local API
+  // in these doubles, that is the cloud path; resolve `web` at call time because tests
+  // replace individual methods after construction.
+  ctx.router.getFullText ??= (key: string, opts: any = {}) =>
+    ctx.web.getFullText(opts.library ?? ctx.router.defaultLibrary(), key);
+  ctx.router.fullTextSince ??= (version: number, opts: any = {}) =>
+    ctx.web.fullTextSince(opts.library ?? ctx.router.defaultLibrary(), version);
+  return ctx;
 }
 
 describe('zotero_groups', () => {

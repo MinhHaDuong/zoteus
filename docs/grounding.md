@@ -52,6 +52,12 @@ npm i pdfjs-dist
 
 This covers libraries where many PDFs were never indexed — grounding works without waiting for Zotero to re-process the library.
 
+### Where the indexed text comes from
+
+Zotero's stored full text is read through the library router, not the cloud alone: a running desktop app (Zotero 7+) serves the `/fulltext` endpoints itself, so grounding works with **no cloud API key**, and for items that never synced. Group libraries, and everything when the app is closed, go to the cloud Web API. The PDF-download fallback above is cloud-only.
+
+The same text feeds the opt-in full-text pass of the semantic index, so a passage found by `zotero_semantic_search` (marked `source: "fulltext"`) can be re-fetched here with a page locator. See [`semantic-search.md`](./semantic-search.md#full-text-indexing-opt-in).
+
 ### Read-only mode
 
 `zotero_get_fulltext` is annotated `readOnlyHint: true` and remains available under `ZOTEUS_READ_ONLY=true`.

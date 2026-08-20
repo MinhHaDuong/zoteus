@@ -3,13 +3,24 @@ import { VectorStore, type VectorHit } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { tokenize } from './tokenize.js';
 import type { EmbeddingProvider } from './embeddings.js';
+import { Semaphore } from '../../lib/semaphore.js';
 import type { Logger } from '../../lib/logger.js';
+
+/**
+ * Passage size for attachment full text. Deliberately larger than the metadata chunk
+ * (512): a body of prose needs more surrounding context per passage to embed usefully,
+ * and at 512 a single paper would explode into hundreds of vectors.
+ */
+export const FULLTEXT_CHUNK_SIZE = 1200;
+export const FULLTEXT_CHUNK_OVERLAP = 150;
 
 export interface SearchHit {
   itemKey: string;
   title: string;
   snippet: string;
   score: number;
+  /** Present when the snippet came from an attachment's body text, not its metadata. */
+  source?: 'fulltext';
 }
 
 export interface SearchIndexStatus {
@@ -28,6 +39,14 @@ export interface SearchIndexStatus {
   embedderActive: boolean;
   /** Why `embedderConfigured` is not active, and what to do about it. */
   embedderReason?: string;
+  /** True when this build was asked to index attachment full text (opt-in). */
+  fulltextEnabled: boolean;
+  /** Items whose attachment full text is in the index. */
+  fulltextItems: number;
+  /** Passages that came from attachment full text (a subset of `documents`). */
+  fulltextPassages: number;
+  /** Why full text is not being indexed although it was requested. */
+  fulltextReason?: string;
   builtFromVersion: number;
 }
 
@@ -76,6 +95,14 @@ export interface IncrementalBuildOptions {
   persist?: () => Promise<void>;
   /** Optional progress hook (e.g. MCP notifications) fired alongside the logger. */
   onProgress?: (status: IndexBuildStatus) => void;
+  /**
+   * Optional supplier of an item's attachment full text. When present, that text is
+   * chunked into extra passages beside the metadata ones, so a search can match the body
+   * of a paper and not only its title and abstract. Opt-in: see ZOTEUS_INDEX_FULLTEXT.
+   */
+  fulltextFor?: (itemKey: string, item: any) => Promise<string | undefined>;
+  /** Concurrent full-text fetches while indexing one page of items (default 4). */
+  fulltextConcurrency?: number;
 }
 
 interface ChunkRecord {
@@ -83,6 +110,8 @@ interface ChunkRecord {
   itemKey: string;
   title: string;
   text: string;
+  /** Absent for metadata passages, which keeps already-persisted index files loadable. */
+  source?: 'fulltext';
 }
 
 export interface BuildOptions {
@@ -159,6 +188,12 @@ export class SearchIndex {
   private vectors = new VectorStore();
   private chunks = new Map<string, ChunkRecord>();
   private items = new Set<string>();
+  /** Items with at least one full-text passage, and how many such passages exist. */
+  private fulltextItems = new Set<string>();
+  private fulltextPassages = 0;
+  /** Whether the running/last build was asked for full text, and why it may not deliver. */
+  private fulltextEnabled = false;
+  private fulltextUnavailable: string | undefined = undefined;
   private builtFromVersion = 0;
 
   // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
@@ -214,6 +249,15 @@ export class SearchIndex {
     return this.vectors.size > 0;
   }
 
+  /**
+   * Explain why an opt-in full-text build is not producing passages (nothing extracted in
+   * Zotero yet, unreachable full-text endpoints). Mirrors the embedder's reporting: a
+   * metadata-only index that was ASKED for full text must say so, not look complete.
+   */
+  noteFulltextUnavailable(reason: string): void {
+    this.fulltextUnavailable = reason;
+  }
+
   /** Record the first provider failure so status, not just the log, can report it. */
   private noteEmbedFailure(e: unknown): void {
     if (this.embedderError) return;
@@ -264,10 +308,14 @@ export class SearchIndex {
       embedder: this.embedderName,
       embedderConfigured: this.embedderConfigured,
       embedderActive: this.embedderActive,
+      fulltextEnabled: this.fulltextEnabled,
+      fulltextItems: this.fulltextItems.size,
+      fulltextPassages: this.fulltextPassages,
       builtFromVersion: this.builtFromVersion,
     };
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
+    if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
     return s;
   }
 
@@ -280,6 +328,8 @@ export class SearchIndex {
     this.vectors = new VectorStore();
     this.chunks = new Map();
     this.items = new Set();
+    this.fulltextItems = new Set();
+    this.fulltextPassages = 0;
   }
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
@@ -287,6 +337,10 @@ export class SearchIndex {
     // A rebuild is the retry: clear a previous runtime failure so a provider that has since
     // been fixed (model downloaded, package installed) reports healthy again.
     this.embedderError = undefined;
+    // This path indexes metadata (plus any caller-supplied extraText), never attachment
+    // full text, so it must not inherit a previous incremental build's verdict.
+    this.fulltextEnabled = false;
+    this.fulltextUnavailable = undefined;
     const records: ChunkRecord[] = [];
     for (const item of libraryItems) {
       const d = item.data ?? item;
@@ -331,6 +385,10 @@ export class SearchIndex {
     this.buildState = 'building';
     this.lastBuildError = undefined;
     this.embedderError = undefined;
+    // A rebuild is the retry for full text too: clear the previous run's verdict so a
+    // library that has since been extracted in Zotero stops reporting the old reason.
+    this.fulltextEnabled = Boolean(opts.fulltextFor);
+    this.fulltextUnavailable = undefined;
     this.itemsFetched = 0;
     this.itemsTotal = 0;
     const token = { cancelled: false };
@@ -343,6 +401,7 @@ export class SearchIndex {
     const progressEveryItems = opts.progressEveryItems ?? 500;
     const progressEveryMs = opts.progressEveryMs ?? 10_000;
     const maxItems = opts.maxItems;
+    const fulltextLimit = new Semaphore(Math.max(1, opts.fulltextConcurrency ?? 4));
 
     const pending: ChunkRecord[] = []; // passages awaiting embedding
     let start = 0;
@@ -409,10 +468,35 @@ export class SearchIndex {
         if (!this.itemsTotal && page.totalResults) {
           this.itemsTotal = maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
         }
-        for (const item of pageItems) {
+        // Only the items that still fit under the cap are worth fetching full text for.
+        const room = maxItems === undefined ? pageItems.length : Math.max(0, maxItems - this.itemsFetched);
+        const batch = pageItems.slice(0, room);
+        // Full text is fetched a page at a time, several attachments in flight, so the
+        // per-item round trip does not serialize the whole build behind the network.
+        const texts =
+          opts.fulltextFor && !token.cancelled
+            ? await Promise.all(
+                batch.map((item) =>
+                  fulltextLimit.run(async () => {
+                    if (token.cancelled) return undefined;
+                    const d = item.data ?? item;
+                    const key = item.key ?? d.key;
+                    if (!key) return undefined;
+                    try {
+                      return await opts.fulltextFor!(key, item);
+                    } catch (e) {
+                      this.opts.logger?.debug(
+                        `full text for ${key} skipped: ${e instanceof Error ? e.message : String(e)}`,
+                      );
+                      return undefined;
+                    }
+                  }),
+                ),
+              )
+            : undefined;
+        for (let i = 0; i < batch.length; i++) {
           if (token.cancelled) break;
-          if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
-          this.addOneItem(item, pending);
+          this.addOneItem(batch[i], pending, texts?.[i]);
           this.itemsFetched++;
           itemsSincePersist++;
           itemsSinceLog++;
@@ -449,16 +533,44 @@ export class SearchIndex {
   }
 
   /** Chunk a single library item into the keyword index and queue passages for embedding. */
-  private addOneItem(item: any, pending: ChunkRecord[]): void {
+  private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string): void {
     const d = item.data ?? item;
     const key = item.key ?? d.key;
     if (!key) return;
     this.items.add(key);
+    const title = d.title ?? '(untitled)';
     for (const ch of chunkText(itemText(d))) {
-      const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
+      const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title, text: ch.text };
       this.chunks.set(rec.id, rec);
       this.bm25.addDoc(rec.id, rec.text);
       if (this.hasEmbedder) pending.push(rec);
+    }
+    if (fulltext) this.addFulltext(key, title, fulltext, pending);
+  }
+
+  /**
+   * Index an item's attachment body text as extra passages. They carry the parent item's
+   * key, so a body hit is reported (and de-duplicated) as that item, exactly like a hit on
+   * its abstract. Ids are namespaced `#f<n>` so they can never collide with metadata ones.
+   */
+  private addFulltext(itemKey: string, title: string, text: string, pending: ChunkRecord[]): void {
+    let added = 0;
+    for (const ch of chunkText(text, FULLTEXT_CHUNK_SIZE, FULLTEXT_CHUNK_OVERLAP)) {
+      const rec: ChunkRecord = {
+        id: `${itemKey}#f${ch.index}`,
+        itemKey,
+        title,
+        text: ch.text,
+        source: 'fulltext',
+      };
+      this.chunks.set(rec.id, rec);
+      this.bm25.addDoc(rec.id, rec.text);
+      if (this.hasEmbedder) pending.push(rec);
+      added++;
+    }
+    if (added) {
+      this.fulltextItems.add(itemKey);
+      this.fulltextPassages += added;
     }
   }
 
@@ -485,7 +597,11 @@ export class SearchIndex {
       const rec = this.chunks.get(id);
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
-      hits.push({ itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score });
+      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
+      // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
+      // zotero_get_fulltext, whereas a metadata one is just the abstract.
+      if (rec.source === 'fulltext') hit.source = 'fulltext';
+      hits.push(hit);
       if (hits.length >= limit) break;
     }
     return hits;
@@ -501,7 +617,14 @@ export class SearchIndex {
       this.chunks.set(rec.id, rec);
       this.items.add(rec.itemKey);
       this.bm25.addDoc(rec.id, rec.text);
+      if (rec.source === 'fulltext') {
+        this.fulltextItems.add(rec.itemKey);
+        this.fulltextPassages++;
+      }
     }
+    // A reloaded index reports what it HOLDS: an index carrying full-text passages counts
+    // as full-text-enabled even before this process runs a build of its own.
+    this.fulltextEnabled = this.fulltextPassages > 0;
     this.vectors = VectorStore.fromJSON(data.vectors ?? []);
     this.builtFromVersion = data.builtFromVersion ?? 0;
   }

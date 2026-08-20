@@ -4,7 +4,7 @@
 
 ### Your Zotero library, inside every AI conversation — with real citations, not hallucinations.
 
-The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https://modelcontextprotocol.io) client complete, **safe** access to your [Zotero](https://www.zotero.org) library — search papers, add by DOI, format bibliographies in ~2,800 styles, run semantic search over your library's metadata and abstracts, pull exact passages from your PDFs, and ground every answer in a source you actually own. **Local-first. Private. One command.**
+The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https://modelcontextprotocol.io) client complete, **safe** access to your [Zotero](https://www.zotero.org) library — search papers, add by DOI, format bibliographies in ~2,800 styles, run semantic search over your library (metadata and abstracts, or full PDF text when you turn it on), pull exact passages from your PDFs, and ground every answer in a source you actually own. **Local-first. Private. One command.**
 
 [![npm](https://img.shields.io/npm/v/@oscardvs/zoteus.svg?color=2ea44f)](https://www.npmjs.com/package/@oscardvs/zoteus)
 [![npm downloads](https://img.shields.io/npm/dm/@oscardvs/zoteus.svg)](https://www.npmjs.com/package/@oscardvs/zoteus)
@@ -63,7 +63,7 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 
 ## What you can do
 
-- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search over your library's titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned **with the page number**.
+- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search over your library's titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned **with the page number**. Turn on `ZOTEUS_INDEX_FULLTEXT` (or pass `fulltext:true` to `zotero_index`) and semantic search covers the **body of every PDF** too, so a claim that never made it into an abstract is still findable.
 - **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
 - **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
 - **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
@@ -93,6 +93,7 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads + personal-library writes) |
 | `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
+| `ZOTEUS_INDEX_FULLTEXT` | `false` | Index PDF body text for semantic search (opt-in; costly) |
 | `ZOTEUS_TRANSFORMERS_PATH` | — | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
 

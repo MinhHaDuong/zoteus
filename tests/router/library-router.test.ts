@@ -9,11 +9,15 @@ function makeRouter(opts: { local: 'auto' | 'on' | 'off'; localApi: boolean }) {
     listItems: vi.fn(async () => ({ data: [{ key: 'CLOUD' }], totalResults: 1, lastModifiedVersion: 1 })),
     getItem: vi.fn(async () => ({ key: 'CLOUD' })),
     getItemChildren: vi.fn(async () => ({ data: [{ key: 'CLOUDCHILD' }], totalResults: 1, lastModifiedVersion: 1 })),
+    getFullText: vi.fn(async () => ({ content: 'CLOUD TEXT' })),
+    fullTextSince: vi.fn(async () => ({ CLOUDATT: 9 })),
   };
   const local = {
     listItems: vi.fn(async () => ({ data: [{ key: 'LOCAL' }], totalResults: 1, lastModifiedVersion: 1 })),
     getItem: vi.fn(async () => ({ key: 'LOCAL' })),
     getItemChildren: vi.fn(async () => ({ data: [{ key: 'LOCALCHILD' }], totalResults: 1, lastModifiedVersion: 1 })),
+    getFullText: vi.fn(async () => ({ content: 'LOCAL TEXT' })),
+    fullTextSince: vi.fn(async () => ({ LOCALATT: 4 })),
   };
   const cfg = loadConfig({ ZOTEUS_LOCAL: opts.local } as any);
   const router = new LibraryRouter({
@@ -64,6 +68,34 @@ describe('LibraryRouter', () => {
     expect(r.data[0].key).toBe('CLOUDCHILD');
     expect(web.getItemChildren).toHaveBeenCalledWith({ type: 'group', id: 999 }, 'ABCD1234', {});
     expect(local.getItemChildren).not.toHaveBeenCalled();
+  });
+
+  it('reads full text from the desktop app when it is running (no cloud key needed)', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true });
+    expect((await router.getFullText('ATT01'))?.content).toBe('LOCAL TEXT');
+    expect(local.getFullText).toHaveBeenCalledWith('ATT01');
+    expect(web.getFullText).not.toHaveBeenCalled();
+
+    expect(await router.fullTextSince(0)).toEqual({ LOCALATT: 4 });
+    expect(local.fullTextSince).toHaveBeenCalledWith(0);
+  });
+
+  it('falls back to the cloud for full text when the desktop app is closed', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: false });
+    expect((await router.getFullText('ATT01'))?.content).toBe('CLOUD TEXT');
+    expect(web.getFullText).toHaveBeenCalledWith({ type: 'user', id: cloudInfo.userID }, 'ATT01');
+    expect(local.getFullText).not.toHaveBeenCalled();
+  });
+
+  it('keeps group-library full text on the cloud even while the desktop app runs', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true });
+    const lib = { type: 'group' as const, id: 999 };
+    await router.getFullText('ATT01', { library: lib });
+    await router.fullTextSince(12, { library: lib });
+    expect(web.getFullText).toHaveBeenCalledWith(lib, 'ATT01');
+    expect(web.fullTextSince).toHaveBeenCalledWith(lib, 12);
+    expect(local.getFullText).not.toHaveBeenCalled();
+    expect(local.fullTextSince).not.toHaveBeenCalled();
   });
 
   it('defaultLibrary uses the resolved cloud userID', () => {

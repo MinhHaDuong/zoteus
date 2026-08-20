@@ -7,6 +7,20 @@ export interface LocalApiClientOptions {
 }
 
 /**
+ * A non-OK response from the desktop local API, carrying the HTTP status so callers can
+ * tell "this item has no full text" (404) apart from "the app is unreachable".
+ */
+export class LocalApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'LocalApiError';
+  }
+}
+
+/**
  * Read-only client for the Zotero desktop local API (Zotero 7+).
  * Base: http://127.0.0.1:<port>/api ; the personal library is always users/0.
  * Every endpoint here is GET. Native local-API writes exist from Zotero 10 and live in
@@ -45,7 +59,7 @@ export class LocalApiClient {
       { method: 'GET', headers: this.headers() },
       { maxRetries: 0 },
     );
-    if (!res.ok) throw new Error(`Local API ${res.status} for ${path}`);
+    if (!res.ok) throw new LocalApiError(res.status, `Local API ${res.status} for ${path}`);
     return { json: await res.json(), headers: res.headers };
   }
 
@@ -94,6 +108,28 @@ export class LocalApiClient {
       this.buildQuery(rest as any),
     );
     return this.toListResult(json, headers);
+  }
+
+  /**
+   * Indexed full text for an attachment, or null when the app has none for it.
+   *
+   * The desktop app serves the same `/fulltext` endpoints as the cloud, which is what lets
+   * full-text reads (and full-text indexing for semantic search) work with no cloud API key.
+   */
+  async getFullText(key: string): Promise<any | null> {
+    try {
+      const { json } = await this.getJson(`/users/0/items/${key}/fulltext`);
+      return json;
+    } catch (e) {
+      if (e instanceof LocalApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
+  /** Map of attachment key -> library version for full text changed after `since`. */
+  async fullTextSince(since: number): Promise<Record<string, number>> {
+    const { json } = await this.getJson('/users/0/fulltext', this.buildQuery({ since }));
+    return json;
   }
 
   async listCollections(

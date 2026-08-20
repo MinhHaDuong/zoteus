@@ -22,13 +22,16 @@ function makeLibrary(n: number): any[] {
  * Paginating Web API mock mirroring listItems({ limit, start, top }): slices the
  * library 100-at-a-time so the background build actually pages through it.
  */
-function makeWeb(library: any[]) {
+function makeWeb(library: any[], attachments: any[] = [], fulltext: Record<string, string> = {}) {
   return {
-    listItems: vi.fn(async (_lib: any, query: { limit?: number; start?: number }) => {
+    listItems: vi.fn(async (_lib: any, query: { limit?: number; start?: number; itemType?: string; top?: boolean }) => {
+      const source = query.itemType === 'attachment' ? attachments : library;
       const limit = query.limit ?? 100;
       const start = query.start ?? 0;
-      return { data: library.slice(start, start + limit), totalResults: library.length, lastModifiedVersion: 1 };
+      return { data: source.slice(start, start + limit), totalResults: source.length, lastModifiedVersion: 1 };
     }),
+    fullTextSince: vi.fn(async () => Object.fromEntries(Object.keys(fulltext).map((k, i) => [k, i + 1]))),
+    getFullText: vi.fn(async (_lib: any, key: string) => (fulltext[key] ? { content: fulltext[key] } : null)),
   };
 }
 
@@ -37,8 +40,8 @@ function makeWeb(library: any[]) {
  * the cloud Web API. Local-first routing has its own coverage in
  * tests/features/search-build-routing.test.ts.
  */
-function makeCtx(search: SearchIndex, library: any[]): any {
-  const web = makeWeb(library);
+function makeCtx(search: SearchIndex, library: any[], fullext?: { attachments: any[]; text: Record<string, string> }): any {
+  const web = makeWeb(library, fullext?.attachments, fullext?.text);
   const config = loadConfig({ ZOTEUS_LOCAL: 'off' } as any);
   const capabilities = { cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any, localApi: false };
   return {
@@ -166,5 +169,43 @@ describe('zotero_index async build', () => {
     expect(indexTool.description).toMatch(/background/i);
     expect(indexTool.description).toMatch(/poll/i);
     expect(indexTool.description).toMatch(/5000/);
+  });
+
+  it('advertises full-text indexing as an opt-in with a cost', () => {
+    expect(indexTool.inputSchema.fulltext).toBeDefined();
+    expect(indexTool.inputSchema.fulltext_max_chars).toBeDefined();
+    expect(indexTool.description).toMatch(/fulltext:true/);
+    expect(indexTool.description).toMatch(/off by default/i);
+  });
+
+  it('does not touch the full-text endpoints unless asked', async () => {
+    const ctx = makeCtx(new SearchIndex({ embedder: null, logger: silentLogger }), makeLibrary(3));
+    await indexTool.handler({ action: 'build' }, ctx);
+    const final = await pollStatus(ctx);
+    expect(ctx.web.fullTextSince).not.toHaveBeenCalled();
+    expect(final.structuredContent?.fulltextEnabled).toBe(false);
+  });
+
+  it('indexes attachment bodies with fulltext:true and reports the cost up front', async () => {
+    const attachments = [
+      { key: 'ATT1', data: { key: 'ATT1', itemType: 'attachment', parentItem: 'K1' } },
+      { key: 'ATT2', data: { key: 'ATT2', itemType: 'attachment', parentItem: 'K2' } },
+    ];
+    const text = { ATT1: 'diffusion schedules under a cosine noise budget. '.repeat(30) };
+    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const ctx = makeCtx(search, makeLibrary(3), { attachments, text });
+
+    const started = await indexTool.handler({ action: 'build', fulltext: true }, ctx);
+    expect(started.content[0].text).toMatch(/full text is included/i);
+
+    const final = await pollStatus(ctx);
+    expect(final.structuredContent?.fulltextEnabled).toBe(true);
+    expect(final.structuredContent?.fulltextItems).toBe(1);
+    // ATT2 has no extracted text, so it is never fetched.
+    expect(ctx.web.getFullText).toHaveBeenCalledTimes(1);
+
+    const hits = await search.query('cosine noise budget', { limit: 1 });
+    expect(hits[0]!.itemKey).toBe('K1');
+    expect(hits[0]!.source).toBe('fulltext');
   });
 });

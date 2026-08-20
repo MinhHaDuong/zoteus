@@ -13,7 +13,7 @@ const FT = {
 };
 
 function ctx(over: any = {}) {
-  return {
+  const c = {
     config: { dataDir: '/tmp' },
     router: {
       defaultLibrary: () => ({ type: 'user', id: 19552201 }),
@@ -31,6 +31,12 @@ function ctx(over: any = {}) {
     search: { hasEmbedder: false, embed: async () => [] },
     ...over,
   } as any;
+  // The real LibraryRouter serves full text from the desktop app when one is running and
+  // from the cloud otherwise. These doubles have no local API, so mirror the cloud path
+  // (resolved at call time, since individual tests swap `web` out).
+  c.router.getFullText ??= (key: string, opts: any = {}) =>
+    c.web.getFullText(opts.library ?? c.router.defaultLibrary(), key);
+  return c;
 }
 
 describe('zotero_get_fulltext', () => {
