@@ -41,4 +41,43 @@ describe('per-session transports (factory mode)', () => {
     await c1.close();
     await c2.close();
   }, 20_000);
+
+  /**
+   * Regression: a redeploy drops every in-memory session, and the client then presents a
+   * session ID this process never issued. Answering 400 wedged the connector (every later
+   * call failed, plain reads included, until the user reconnected by hand); 404 is the
+   * spec's signal to re-initialize, so clients heal themselves.
+   */
+  it('answers an unknown session ID with 404 so the client re-initializes', async () => {
+    httpServer = await startHttp(() => makePing(), { port: 0, host: '127.0.0.1' });
+    const address = httpServer.address();
+    const port = typeof address === 'object' && address ? address.port : 0;
+
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-session-id': 'a-session-from-a-previous-process',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    });
+    expect(res.status).toBe(404);
+    expect((await res.json()).error.code).toBe(-32001);
+
+    // A request with no session ID at all is still a plain bad request, not a dead session.
+    const noSession = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+    });
+    expect(noSession.status).toBe(400);
+
+    // ...and a fresh client still connects against the same server.
+    const c = new Client({ name: 'fresh', version: '0.0.0' });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+    const r = (await c.callTool({ name: 'ping', arguments: { msg: 'ok' } })) as { content: { text: string }[] };
+    expect(r.content[0].text).toBe('pong:ok');
+    await c.close();
+  }, 20_000);
 });

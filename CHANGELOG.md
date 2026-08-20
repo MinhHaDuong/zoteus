@@ -35,6 +35,13 @@ All notable changes to Zoteus are documented here. The format is based on
     `fulltextReason` says why, rather than looking complete.
 
 ### Fixed
+- **A redeploy no longer wedges a connected client.** A session id this process never
+  issued (any restart drops the in-memory transports, and sessions are also reaped) was
+  answered with `400`, which clients treat as a plain bad request: every later call kept
+  failing, plain reads included, until the user reconnected the connector by hand. The
+  Streamable HTTP spec makes `404` the signal a client MUST answer by re-initializing, so
+  it is now a `404` and clients heal themselves. A request with no session id at all is
+  still a `400`.
 - **Full-text reads no longer require a cloud API key.** `zotero_get_fulltext` and
   `zotero_fulltext` (`get`/`since`) went to `api.zotero.org` unconditionally, so in
   local-only mode (no key, personal library addressed as `users/0`) they failed outright

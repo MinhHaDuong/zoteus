@@ -120,6 +120,18 @@ export async function startHttp(
         };
         const server = await factory((req as express.Request & { auth?: AuthInfo }).auth);
         await server.connect(transport);
+      } else if (sessionId) {
+        // A session ID this process does not know: it restarted (any redeploy) or the
+        // session was reaped. The Streamable HTTP spec makes 404 the signal a client MUST
+        // answer by re-initializing, so clients recover on their own. Answering 400 here
+        // instead left every later call failing, plain reads included, until the user
+        // manually reconnected the connector.
+        res.status(404).json({
+          jsonrpc: '2.0',
+          error: { code: -32001, message: 'Session not found: reinitialize to start a new session.' },
+          id: null,
+        });
+        return;
       } else {
         res.status(400).json({
           jsonrpc: '2.0',
