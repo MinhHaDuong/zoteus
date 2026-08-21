@@ -38,7 +38,13 @@ function localClient(library: any[]) {
   };
 }
 
-function makeCtx(opts: { localApi: boolean; cloudKey?: boolean; items?: number }) {
+function makeCtx(opts: {
+  localApi: boolean;
+  cloudKey?: boolean;
+  items?: number;
+  /** Groups this desktop app holds. Empty = pre-Zotero-10, or a group it does not have. */
+  localGroupIds?: number[];
+}) {
   const items = opts.items ?? 250;
   const web = webClient(makeLibrary(items, 'W'));
   const local = localClient(makeLibrary(items, 'L'));
@@ -46,6 +52,7 @@ function makeCtx(opts: { localApi: boolean; cloudKey?: boolean; items?: number }
   const capabilities = {
     cloud: opts.cloudKey === false ? null : (cloudInfo as any),
     localApi: opts.localApi,
+    localGroupIds: opts.localGroupIds ?? [],
   };
   const router = new LibraryRouter({ config, capabilities, web: web as any, local: local as any });
   const search = new SearchIndex({ embedder: null, logger: silentLogger });
@@ -99,12 +106,26 @@ describe('index build routing (local-first)', () => {
     expect(hits[0]!.itemKey).toMatch(/^W/); // served by the cloud
   });
 
-  it('keeps group libraries on the cloud even while the desktop app is running', async () => {
-    const { ctx, web, local, search } = makeCtx({ localApi: true });
+  it('builds a group the desktop does not hold from the cloud', async () => {
+    const { ctx, web, local, search } = makeCtx({ localApi: true, localGroupIds: [] });
     startIndexBuild(ctx, { type: 'group', id: 999 });
     await finished(search);
     expect(local.listItems).not.toHaveBeenCalled();
     expect(web.listItems.mock.calls[0]![0]).toEqual({ type: 'group', id: 999 });
+    expect(search.buildStatus().items).toBe(250);
+  });
+
+  it('builds a group the desktop does hold from the desktop, with no cloud key', async () => {
+    const { ctx, web, local, search } = makeCtx({
+      localApi: true,
+      cloudKey: false,
+      localGroupIds: [999],
+    });
+    startIndexBuild(ctx, { type: 'group', id: 999 });
+    await finished(search);
+    expect(web.listItems).not.toHaveBeenCalled();
+    expect(local.listItems).toHaveBeenCalled();
+    expect(local.listItems.mock.calls[0]![1]).toEqual({ type: 'group', id: 999 });
     expect(search.buildStatus().items).toBe(250);
   });
 

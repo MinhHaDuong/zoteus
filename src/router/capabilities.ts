@@ -6,11 +6,17 @@ import type { Logger } from '../lib/logger.js';
 export interface Capabilities {
   cloud: KeyInfo | null;
   localApi: boolean;
+  /**
+   * Group libraries the desktop app serves locally (Zotero 10+). Empty on older
+   * versions, and empty when the local API is down — a group the cloud key can see but
+   * the desktop does not hold must still be read over the Web API.
+   */
+  localGroupIds: number[];
 }
 
 export interface ProbeDeps {
   web: Pick<WebApiClient, 'hasKey' | 'keysCurrent'>;
-  local?: Pick<LocalApiClient, 'ping'>;
+  local?: Pick<LocalApiClient, 'ping' | 'listLocalGroupIds'>;
   logger: Logger;
 }
 
@@ -42,8 +48,13 @@ export async function probeCapabilities(
       : Promise.resolve(false);
 
   const [cloud, localApi] = await Promise.all([cloudPromise, localPromise]);
+  const localGroupIds =
+    localApi && deps.local?.listLocalGroupIds
+      ? await deps.local.listLocalGroupIds().catch(() => [])
+      : [];
   deps.logger.info(
-    `Capabilities: cloud=${cloud ? `user ${cloud.userID}` : 'none'}, localApi=${localApi}`,
+    `Capabilities: cloud=${cloud ? `user ${cloud.userID}` : 'none'}, localApi=${localApi}` +
+      `, localGroups=${localGroupIds.length}`,
   );
-  return { cloud, localApi };
+  return { cloud, localApi, localGroupIds };
 }

@@ -1,5 +1,5 @@
 import { RateLimitedFetcher } from './http.js';
-import type { ItemQuery, ListResult } from './web-client.js';
+import type { ItemQuery, LibraryRef, ListResult } from './web-client.js';
 
 export interface LocalApiClientOptions {
   port?: number;
@@ -18,6 +18,18 @@ export class LocalApiError extends Error {
     super(message);
     this.name = 'LocalApiError';
   }
+}
+
+/**
+ * Path prefix for a library on the local API. The personal library is always `users/0`
+ * whatever its cloud id; a group keeps its real id, exactly as on the Web API.
+ *
+ * Group libraries are served locally from Zotero 10 — items, children, collections,
+ * searches and both /fulltext endpoints all answer under /groups/<id>. Before that they
+ * did not, which is why every path here used to be hardcoded to users/0.
+ */
+export function localLibraryPrefix(lib?: LibraryRef): string {
+  return lib && lib.type === 'group' ? `/groups/${lib.id}` : '/users/0';
 }
 
 /**
@@ -83,16 +95,26 @@ export class LocalApiClient {
     }
   }
 
-  async listItems(query: ItemQuery = {}): Promise<ListResult> {
+  async listItems(query: ItemQuery = {}, lib?: LibraryRef): Promise<ListResult> {
     const { top: _t, collectionKey, ...rest } = query;
     const base = collectionKey ? `/collections/${collectionKey}` : '';
     const segment = query.top ? `${base}/items/top` : `${base}/items`;
-    const { json, headers } = await this.getJson(`/users/0${segment}`, this.buildQuery(rest as any));
+    const { json, headers } = await this.getJson(
+      `${localLibraryPrefix(lib)}${segment}`,
+      this.buildQuery(rest as any),
+    );
     return this.toListResult(json, headers);
   }
 
-  async getItem(key: string, query: { include?: string; format?: string } = {}): Promise<any> {
-    const { json } = await this.getJson(`/users/0/items/${key}`, this.buildQuery(query));
+  async getItem(
+    key: string,
+    query: { include?: string; format?: string } = {},
+    lib?: LibraryRef,
+  ): Promise<any> {
+    const { json } = await this.getJson(
+      `${localLibraryPrefix(lib)}/items/${key}`,
+      this.buildQuery(query),
+    );
     return json;
   }
 
@@ -101,10 +123,10 @@ export class LocalApiClient {
    * silently ignores a `parentItem` query param on /items and answers with the whole
    * library, so the dedicated /children endpoint is the only correct way to ask.
    */
-  async getItemChildren(key: string, query: ItemQuery = {}): Promise<ListResult> {
+  async getItemChildren(key: string, query: ItemQuery = {}, lib?: LibraryRef): Promise<ListResult> {
     const { top: _t, collectionKey: _c, ...rest } = query;
     const { json, headers } = await this.getJson(
-      `/users/0/items/${key}/children`,
+      `${localLibraryPrefix(lib)}/items/${key}/children`,
       this.buildQuery(rest as any),
     );
     return this.toListResult(json, headers);
@@ -116,9 +138,9 @@ export class LocalApiClient {
    * The desktop app serves the same `/fulltext` endpoints as the cloud, which is what lets
    * full-text reads (and full-text indexing for semantic search) work with no cloud API key.
    */
-  async getFullText(key: string): Promise<any | null> {
+  async getFullText(key: string, lib?: LibraryRef): Promise<any | null> {
     try {
-      const { json } = await this.getJson(`/users/0/items/${key}/fulltext`);
+      const { json } = await this.getJson(`${localLibraryPrefix(lib)}/items/${key}/fulltext`);
       return json;
     } catch (e) {
       if (e instanceof LocalApiError && e.status === 404) return null;
@@ -127,17 +149,39 @@ export class LocalApiClient {
   }
 
   /** Map of attachment key -> library version for full text changed after `since`. */
-  async fullTextSince(since: number): Promise<Record<string, number>> {
-    const { json } = await this.getJson('/users/0/fulltext', this.buildQuery({ since }));
+  async fullTextSince(since: number, lib?: LibraryRef): Promise<Record<string, number>> {
+    const { json } = await this.getJson(
+      `${localLibraryPrefix(lib)}/fulltext`,
+      this.buildQuery({ since }),
+    );
     return json;
+  }
+
+  /**
+   * Group libraries the desktop app holds. Used to decide whether a group read can be
+   * served locally: a group the cloud key can see but the desktop does not have must
+   * still go to the Web API. Returns [] when the endpoint is absent (pre-Zotero-10).
+   */
+  async listLocalGroupIds(): Promise<number[]> {
+    try {
+      const { json } = await this.getJson('/users/0/groups', this.buildQuery({ limit: 100 }));
+      if (!Array.isArray(json)) return [];
+      return json.map((g: any) => Number(g?.id)).filter((n: number) => Number.isFinite(n));
+    } catch {
+      return [];
+    }
   }
 
   async listCollections(
     query: { top?: boolean; limit?: number; start?: number } = {},
+    lib?: LibraryRef,
   ): Promise<ListResult> {
     const segment = query.top ? '/collections/top' : '/collections';
     const { top: _t, ...rest } = query;
-    const { json, headers } = await this.getJson(`/users/0${segment}`, this.buildQuery(rest as any));
+    const { json, headers } = await this.getJson(
+      `${localLibraryPrefix(lib)}${segment}`,
+      this.buildQuery(rest as any),
+    );
     return this.toListResult(json, headers);
   }
 }
