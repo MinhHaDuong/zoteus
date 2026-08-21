@@ -13,7 +13,8 @@ import { SchemaService } from './schema/schema-service.js';
 import { join } from 'node:path';
 import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
-import { SearchIndex } from './features/search/index-manager.js';
+import { SearchIndex, type SearchIndexOptions } from './features/search/index-manager.js';
+import { CorruptSearchIndex, SearchIndexCorruptError, isCorruptionError } from './features/search/corruption.js';
 import { SqliteSearchIndex, defaultSearchDbPath } from './features/search/sqlite-index.js';
 import { maybeMigrateJsonIndex } from './features/search/migrate-json.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
@@ -52,6 +53,30 @@ function selectActiveTools(config: ZoteusConfig): ToolDefinition[] {
  * schema, search index, etc. With no overrides this is the operator/shared context
  * (identical to M10). With a per-user apiKey it is that tenant's context.
  */
+/**
+ * Open the SQLite-backed index, and survive a database that cannot be opened — ticket 0010.
+ *
+ * A corrupt `search-index.sqlite` used to take the whole MCP server down with it: the
+ * failure escaped a constructor as SQLite's own sentence, before any tool existed to say
+ * what had happened. The index is one derived file; item lookups, bibliographies and
+ * full-text reads never touch it. So the server starts, says exactly what is wrong and how
+ * to fix it, and every search REFUSES rather than answering emptily. See CorruptSearchIndex
+ * for why an empty index would be the worse failure.
+ */
+function openSqliteIndex(opts: SearchIndexOptions, dbPath: string, logger: Logger): SearchIndex {
+  try {
+    return new SqliteSearchIndex({ ...opts, dbPath });
+  } catch (e) {
+    if (!isCorruptionError(e)) throw e;
+    const failure =
+      e instanceof SearchIndexCorruptError
+        ? e
+        : new SearchIndexCorruptError(dbPath, e instanceof Error ? e.message : String(e));
+    logger.error(failure.message);
+    return new CorruptSearchIndex(opts, failure);
+  }
+}
+
 export async function buildContext(config: ZoteusConfig, overrides: ContextOverrides = {}): Promise<ToolContext> {
   const logger = createLogger(config.logLevel, config.logFormat);
   const apiKey = overrides.apiKey ?? config.apiKey;
@@ -94,6 +119,9 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     configured: embedding.configured,
     unavailable: embedding.unavailable,
     logger,
+    // Ticket 0007: the four chunk constants are configuration now. Passed to both
+    // backends, so a geometry set in the environment is what either one indexes at.
+    geometry: config.chunkGeometry,
   };
   // Both backends are wired at once and selected here; nothing downstream branches on the
   // choice except through `searchIndexPath` below.
@@ -111,9 +139,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   if (sqliteBackend) {
     await maybeMigrateJsonIndex({ jsonPath: jsonIndexPath, dbPath: searchDbPath, logger });
   }
-  const search = sqliteBackend
-    ? new SqliteSearchIndex({ ...searchOpts, dbPath: searchDbPath })
-    : new SearchIndex(searchOpts);
+  const search = sqliteBackend ? openSqliteIndex(searchOpts, searchDbPath, logger) : new SearchIndex(searchOpts);
 
   // Undefined on the SQLite backend, and that absence is the switch: it is what stops
   // `startIndexBuild` from building a persist callback and what makes `flushIndexes` skip

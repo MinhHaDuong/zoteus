@@ -183,8 +183,27 @@ async function runRefresh(ctx: ToolContext, lib: LibraryRef | undefined, opts: R
   const deadline = Date.now() + (opts.timeoutMs ?? DEFAULT_REFRESH_TIMEOUT_MS);
   const backend = ctx.router.backendFor(lib);
   const { version: watermark, backend: label } = ctx.search.watermark;
+  // A SECOND watermark, on a sequence with no relation to the first (ticket 0012). Read
+  // here rather than inside addNewlyExtracted so the two travel together through DeltaRun
+  // and cannot be confused at the call site, which is exactly how they came to be.
+  const fulltextWatermark = ctx.search.fulltextWatermark;
 
-  // The label check comes FIRST, before any request, because its verdict does not depend
+  // Geometry first, for the same reason the label check comes before any request: its
+  // verdict does not depend on the library's version either, and a delta that ran would
+  // write new-geometry passages beside old-geometry ones (ticket 0007). Nothing would
+  // error; the index would just become a mixture whose BM25 lengths average two
+  // populations.
+  const geometry = ctx.search.geometryMismatch;
+  if (geometry) {
+    ctx.logger.info(
+      `Search index: rebuilding rather than computing a delta — its passages were chunked at ` +
+        `${geometry.stored} and this process is configured for ${geometry.configured}. Passages cut ` +
+        'at two geometries cannot be ranked against each other, so the index is rebuilt once.',
+    );
+    return rebuild(ctx, lib, 0, `index chunked at ${geometry.stored}, configured for ${geometry.configured}`);
+  }
+
+  // The label check comes next, before any request, because its verdict does not depend
   // on the library's version: an unusable watermark means a rebuild whatever the number.
   if (label !== backend) {
     const from = label ?? 'an unlabelled build';
@@ -224,7 +243,7 @@ async function runRefresh(ctx: ToolContext, lib: LibraryRef | undefined, opts: R
   }
 
   try {
-    return await applyDelta(ctx, lib, { watermark, version, backend, deadline, opts });
+    return await applyDelta(ctx, lib, { watermark, fulltextWatermark, version, backend, deadline, opts });
   } catch (e) {
     // The watermark has NOT moved, so the next query retries the same delta. That is the
     // point of moving it only once everything has landed.
@@ -246,7 +265,14 @@ function rebuild(ctx: ToolContext, lib: LibraryRef | undefined, requests: number
 }
 
 interface DeltaRun {
+  /** Where the index sits on the **item** sequence (`Last-Modified-Version`). */
   watermark: number;
+  /**
+   * Where it sits on the **full-text** sequence. A different number from a different
+   * counter: on the library that motivated 0012, 410 against a full-text range running to
+   * 25 036. Passing `watermark` here is the defect that ticket names.
+   */
+  fulltextWatermark: number;
   version: number;
   backend: IndexBackend;
   deadline: number;
@@ -323,8 +349,11 @@ async function applyDelta(ctx: ToolContext, lib: LibraryRef | undefined, run: De
     const key = item?.key ?? item?.data?.key;
     if (key) changed.set(key, item);
   }
+  let fulltextVersion: number | undefined;
   if (wantFulltext) {
-    requests += await addNewlyExtracted(ctx, lib, run, changed, maxItems, check);
+    const sweep = await addNewlyExtracted(ctx, lib, run, changed, maxItems, check);
+    requests += sweep.requests;
+    fulltextVersion = sweep.fulltextVersion;
   }
 
   // ---- full text for everything being re-indexed ------------------------------------
@@ -353,6 +382,9 @@ async function applyDelta(ctx: ToolContext, lib: LibraryRef | undefined, run: De
     removed,
     version: run.version,
     backend: run.backend,
+    // Left undefined when the full-text sweep did not cover everything it saw; applyDelta
+    // then leaves the previous value standing, and the next delta resumes from there.
+    ...(fulltextVersion !== undefined ? { fulltextVersion } : {}),
   });
 
   ctx.logger.info(
@@ -363,12 +395,29 @@ async function applyDelta(ctx: ToolContext, lib: LibraryRef | undefined, run: De
 }
 
 /**
- * Fold in the items whose attachments Zotero extracted since the watermark.
+ * Fold in the items whose attachments Zotero extracted since the **full-text** watermark.
  *
  * This is the case a `?since=` pass alone will not reliably produce: extraction touches
  * the attachment, and the parent item — the one the index holds passages for — need not
  * appear in a top-level `?since=` page at all. `fullTextSince` names exactly the
  * attachments whose text changed, which is why it is asked separately.
+ *
+ * **Which number is handed to it is the whole of ticket 0012.** It used to be the item
+ * watermark. Zotero numbers full-text extraction on its own sequence, and on the library
+ * measured there the item sequence sat at 410 while the full-text one ran from 0 to
+ * 25 036 — so `fullTextSince(410)` returned 7 453 of 8 037 attachments, on every delta,
+ * forever. It failed quietly: `maxItems` capped the set, the handful of genuinely
+ * re-extracted items were lost in map order among ~7 400 candidates, each candidate cost
+ * a `getItem`, and the next delta was no closer because the number being advanced belonged
+ * to the other counter. 0006 guards carefully against exactly this class *across* backends
+ * — that is what `indexBackend` is for — and then compared two unrelated sequences inside
+ * one backend. Guarding one instance of a defect class does not guard the class.
+ *
+ * **Candidates are taken in ascending version order, not map order**, and the watermark is
+ * advanced only past versions swept *completely*. That is what makes a truncated sweep
+ * converge: the ceiling stops it partway, the watermark records how far it got, and the
+ * next delta resumes there instead of re-reading the same prefix. Map order plus an
+ * unmoved watermark is a loop that makes no progress, which is the shape the defect had.
  *
  * Items already recorded as present-without-text are then topped up into whatever room is
  * left. That set exists so an unextracted attachment does not become permanently
@@ -378,6 +427,9 @@ async function applyDelta(ctx: ToolContext, lib: LibraryRef | undefined, run: De
  *
  * `maxItems` is a hard ceiling on the whole re-index set, not just on this sweep: every
  * item added here costs a children listing plus a read per attachment later.
+ *
+ * Returns the requests spent and, when the sweep completed a version, the new full-text
+ * watermark. `undefined` means "do not move it" — see IndexDelta.fulltextVersion.
  */
 async function addNewlyExtracted(
   ctx: ToolContext,
@@ -386,33 +438,63 @@ async function addNewlyExtracted(
   changed: Map<string, any>,
   maxItems: number,
   check: (what: string) => void,
-): Promise<number> {
+): Promise<{ requests: number; fulltextVersion?: number }> {
   let requests = 0;
   const candidates = new Set<string>();
   const room = (): number => maxItems - changed.size - candidates.size;
+  let fulltextVersion: number | undefined;
 
   try {
     check('full-text delta');
-    const extracted = await ctx.router.fullTextSince(run.watermark, { library: lib });
+    const extracted = await ctx.router.fullTextSince(run.fulltextWatermark, { library: lib });
     requests++;
-    for (const attachmentKey of Object.keys(extracted ?? {})) {
+    // Ascending by version, so a sweep cut short by `room()` still leaves a version below
+    // which everything HAS been folded in. Ties are kept adjacent, which is what lets the
+    // "completed version" test below be exact rather than approximate.
+    const entries = Object.entries(extracted ?? {})
+      .filter((e): e is [string, number] => Number.isFinite(e[1]))
+      .sort((a, b) => a[1] - b[1]);
+
+    // The highest version every one of whose attachments was folded in. Advancing to a
+    // version whose group was only half-swept would retire the other half unseen — the
+    // failure 0012 warns about, the one where nothing ever looks newly extracted again.
+    let completed: number | undefined;
+    // Reset at each version boundary. A group in which one attachment could not be
+    // resolved is not a completed group: advancing past it would retire that attachment
+    // unseen, and nothing would ever look at it again.
+    let groupFailed = false;
+    for (let i = 0; i < entries.length; i++) {
+      const [attachmentKey, version] = entries[i]!;
       if (room() <= 0) break;
-      if (changed.has(attachmentKey)) continue;
-      check('full-text parent lookup');
-      try {
-        const att = await ctx.router.getItem(attachmentKey, { library: lib });
-        requests++;
-        // A top-level attachment with no parent is itself the indexed item.
-        const parent = att?.data?.parentItem ?? att?.parentItem ?? attachmentKey;
-        if (!changed.has(parent)) candidates.add(parent);
-      } catch (e) {
-        ctx.logger.debug(`Could not resolve attachment ${attachmentKey} to its item: ${why(e)}`);
+      if (!changed.has(attachmentKey)) {
+        check('full-text parent lookup');
+        try {
+          const att = await ctx.router.getItem(attachmentKey, { library: lib });
+          requests++;
+          // A top-level attachment with no parent is itself the indexed item.
+          const parent = att?.data?.parentItem ?? att?.parentItem ?? attachmentKey;
+          if (!changed.has(parent)) candidates.add(parent);
+        } catch (e) {
+          groupFailed = true;
+          ctx.logger.debug(`Could not resolve attachment ${attachmentKey} to its item: ${why(e)}`);
+        }
+      }
+      // Only once the NEXT entry belongs to a higher version is this one's group finished.
+      if (i + 1 === entries.length || entries[i + 1]![1] > version) {
+        if (!groupFailed) completed = version;
+        groupFailed = false;
       }
     }
+    // Undefined when nothing came back, when the ceiling stopped the sweep before a single
+    // version group closed, or when a resolution failed in the lowest group: all three mean
+    // "the sweep did not get past where we already were", and the watermark must not move.
+    if (completed !== undefined) fulltextVersion = completed;
   } catch (e) {
     // Best effort: a library whose full-text endpoints are unreachable still gets its
-    // metadata delta. Same reasoning as createFulltextSource's degradation.
+    // metadata delta. Same reasoning as createFulltextSource's degradation. The watermark
+    // stays put, so the sweep is retried rather than skipped.
     ctx.logger.debug(`Full-text delta skipped: ${why(e)}`);
+    fulltextVersion = undefined;
   }
 
   for (const key of ctx.search.fulltextPendingItems) {
@@ -430,7 +512,7 @@ async function addNewlyExtracted(
       ctx.logger.debug(`Could not fetch item ${key} for a full-text delta: ${why(e)}`);
     }
   }
-  return requests;
+  return fulltextVersion !== undefined ? { requests, fulltextVersion } : { requests };
 }
 
 /**

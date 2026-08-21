@@ -275,3 +275,29 @@ A few things to know when indexing a big Zotero library:
 - **Full text multiplies all of the above** by roughly the passage ratio above. On a large
   library, start with a `limit` or a smaller `fulltext_max_chars` before indexing
   everything.
+
+### How concentrated is the index?
+
+One very long document can hold a surprising share of an uncapped index. On a 7 540-item
+library indexed with `fulltext_max_chars: 0`, a single dictionary held **42 962 of 477 511
+passages — 9%**, against 1 449 for the next largest item. That depresses BM25's inverse
+document frequency for whatever vocabulary the document saturates.
+
+It is worth knowing about and, on the evidence, not worth bounding: measured against the
+shipped ranker, the dominant document takes one de-duplicated result slot and leaves the
+rest of the ordering essentially intact. Zoteus therefore ships **no per-item character
+cap by default**. `fulltext_max_chars` is there if you want one — a 2 000 000-character
+cap cut peak build memory 5,2x on that library — but it changes what is indexed, so it is
+your call rather than a default.
+
+To see the distribution for yourself, query the index directly (SQLite backend):
+
+```sql
+-- the ten items holding the most passages
+SELECT item, min(title) AS title, count(*) AS passages
+  FROM passage_meta GROUP BY item ORDER BY passages DESC LIMIT 10;
+```
+
+This is a documented query rather than a field in `action: "status"` on purpose: the
+`GROUP BY` costs ~374 ms cold (32-58 ms warm) on a 360 811-passage index, and `status` is
+polled every few seconds throughout a build, against the table the build is writing.

@@ -158,6 +158,11 @@ export function startIndexBuild(
           // silently skipped so "no text yet" stays distinguishable from "no attachment",
           // and so a later delta has somewhere to look. See FulltextSource.pendingItems.
           if (src.pendingItems.length) ctx.search.noteFulltextPending(src.pendingItems);
+          // Seed the full-text watermark from the very `/fulltext?since=0` read this
+          // source already made (ticket 0012). Free, and the only moment at which the
+          // whole full-text sequence is in hand: without it the first delta after a build
+          // asks `fullTextSince(<library version>)` and gets back most of the library.
+          ctx.search.noteFulltextVersion(src.fulltextVersion);
           return src;
         });
         return (await source).textFor(itemKey);

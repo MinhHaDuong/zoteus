@@ -62,6 +62,17 @@ export interface PassageStore {
    * from an attachment body.
    */
   fulltextStats?(): { items: string[]; passages: number };
+  /**
+   * The items holding the most passages, largest first — how concentrated the index is
+   * (ticket 0013).
+   *
+   * Optional, and deliberately NOT folded into `status()`. Measured on the real
+   * 360 811-passage index the `GROUP BY item` costs 374 ms cold and 32-58 ms warm, and
+   * `status()` is polled every few seconds for the whole length of a build, against the
+   * very table the build is writing. So this is a question a caller asks when it wants the
+   * answer, not a figure every status poll pays for.
+   */
+  itemPassageCounts?(limit: number): Array<{ item: string; title?: string; passages: number }>;
 
   /**
    * Attach an embedding to an already-added passage. Separate from `add` because the two

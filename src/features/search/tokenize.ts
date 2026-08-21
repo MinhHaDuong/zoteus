@@ -52,15 +52,20 @@ const UNIFY_RE = new RegExp(`[${Object.keys(UNIFY).join('')}]`, 'gu');
  * whole, so they stay whole here).
  *
  * Swept codepoint by codepoint over Latin, Greek, Cyrillic, Latin Extended Additional,
- * letterlike and number forms, fullwidth and the ligatures, 22 residual divergences remain
- * out of 1 287,
- * all rare and all in the direction of retrieving less rather than wrongly: letters whose
- * base is itself non-ASCII Latin (`Ǡ Ǣ Ǯ Ǽ Ǿ`), which NFD decomposes and SQLite's table
- * does not cover, and unassigned codepoints, which unicode61 indexes and `\p{L}` does not.
+ * letterlike and number forms, fullwidth and the ligatures — 1 301 codepoints, recorded in
+ * `bench/results/0009-fold-sweep/`. An earlier reading of that sweep called all its
+ * residual divergences harmless. **That was wrong**, and the sweep is what showed it:
+ * twelve of them sent the query to a token the index did not hold, which is 0009's own
+ * defect class on rarer input. Ten were `Ǡ Ǣ Ǯ Ǽ Ǿ` and their lowercase forms and two were
+ * gaps in unicode61's Greek case table; all twelve are handled by NO_MARK_STRIP and
+ * NO_CASE_FOLD below. What remains is fifteen unassigned or symbol codepoints that
+ * unicode61 indexes and `\p{L}\p{N}` does not — those genuinely do only retrieve less.
  */
 export function normalizeForSearch(text: string): string {
-  return text
-    .toLowerCase()
+  const [caseSafe, restoreCase] = shield(text, NO_CASE_FOLD, CASE_SLOT);
+  const lowered = caseSafe.toLowerCase();
+  const [markSafe, restoreMarks] = shield(lowered, NO_MARK_STRIP, MARK_SLOT);
+  const folded = markSafe
     // Lowercasing can itself introduce a mark (`İ` → `i` + U+0307), so decompose after it.
     .normalize('NFD')
     .replace(LATIN_MARKS, '$1')
@@ -68,6 +73,64 @@ export function normalizeForSearch(text: string): string {
     // treats them as separators, so a decomposed `ά` left standing would split in two.
     .normalize('NFC')
     .replace(UNIFY_RE, (c) => UNIFY[c]!);
+  return restoreCase(restoreMarks(folded));
+}
+
+/**
+ * Characters unicode61 lowercases but does NOT strip marks from, because its folding table
+ * does not reach them: their base is itself a non-ASCII Latin letter.
+ *
+ * `ǡ ǣ ǯ ǽ ǿ` (and their capitals, which unicode61 does lowercase). NFD decomposes them
+ * and the mark-stripping rule above then produces `a æ ʒ æ ø` — where the index holds
+ * `ǡ ǣ ǯ ǽ ǿ`. That is not a narrowing; it is the 0009 defect in miniature, on ten rare
+ * codepoints: the query lands on a real token that other documents genuinely contain, so
+ * it retrieves confidently and wrongly rather than retrieving nothing. Found by
+ * `bench/fold_sweep.mjs`, which is also the regression guard.
+ */
+const NO_MARK_STRIP = /[\u01e1\u01e3\u01ef\u01fd\u01ff]/gu;
+
+/**
+ * Characters unicode61 does not transform at all, where JavaScript would.
+ *
+ * `U+037F` GREEK CAPITAL LETTER YOT is absent from unicode61's case table (it was added to
+ * Unicode after it), so the index stores it uppercase while `toLowerCase` gives `ϳ`.
+ * `U+0374` GREEK NUMERAL SIGN is left alone by SQLite while `normalize` maps it to `U+02B9`
+ * MODIFIER LETTER PRIME — two codepoints that print alike and do not match.
+ */
+const NO_CASE_FOLD = /[\u0374\u037f]/gu;
+
+/**
+ * Disjoint placeholder blocks, one per shield.
+ *
+ * The two shields are nested — the case shield is still in force while the mark shield is
+ * applied — so sharing one block makes them collide: both would allocate `U+FDD0` first,
+ * and the inner restore would hand the outer one back the wrong character. That is not
+ * hypothetical; it is what the first version did, and `Ǽ Ϳ` came back as `ǽ ǽ`.
+ *
+ * `U+FDD0..U+FDEF` are permanently reserved as noncharacters, so they cannot occur in the
+ * text being folded — which is exactly what a placeholder needs and what a Private Use
+ * Area codepoint could not promise. Sixteen slots each, against two and five members.
+ */
+const CASE_SLOT = { base: 0xfdd0, re: /[\ufdd0-\ufddf]/gu } as const;
+const MARK_SLOT = { base: 0xfde0, re: /[\ufde0-\ufdef]/gu } as const;
+
+/** Hide the matched characters behind noncharacters from `slot`, and give back the undo. */
+function shield(
+  text: string,
+  pattern: RegExp,
+  slot: { base: number; re: RegExp },
+): [string, (s: string) => string] {
+  const seen: string[] = [];
+  const hidden = text.replace(pattern, (c) => {
+    let i = seen.indexOf(c);
+    if (i === -1) i = seen.push(c) - 1;
+    // More distinct members than slots would silently alias two characters onto one. The
+    // sets are fixed and small, so this cannot happen — and it fails loudly if that changes.
+    if (i >= 16) throw new Error(`normalizeForSearch: shield block exhausted at ${c}`);
+    return String.fromCharCode(slot.base + i);
+  });
+  if (seen.length === 0) return [text, (s) => s];
+  return [hidden, (s) => s.replace(slot.re, (m) => seen[m.charCodeAt(0) - slot.base] ?? m)];
 }
 
 /**

@@ -174,3 +174,50 @@ describe('makeSnippet', () => {
     expect(makeSnippet(`${filler}un élève très appliqué ${filler}`, 'eleve')).toContain('élève');
   });
 });
+
+/**
+ * The twelve codepoints the committed sweep caught going the WRONG way.
+ *
+ * `bench/results/0009-fold-sweep/codepoints.json` compares this fold against a real FTS5
+ * table declared with the shipped tokenizer, codepoint by codepoint. Before these two
+ * shields it reported twelve divergences classified `misses` — the query resolving to a
+ * token the index does not hold, which is 0009's own defect on rarer input rather than the
+ * harmless narrowing an earlier reading called it.
+ *
+ * Pinned here rather than left to the sweep because the sweep is a bench script nobody runs
+ * on a pull request. The expected values are what SQLite's `unicode61 remove_diacritics 2`
+ * actually stores, read off that artifact — not what a reading of the Unicode tables
+ * suggests it ought to.
+ */
+describe('codepoints unicode61 does not fold the way JavaScript would (ticket 0009 sweep)', () => {
+  it('keeps the mark on letters whose base is itself non-ASCII Latin', () => {
+    // NFD decomposes these and the mark-stripping rule would give `a æ ʒ æ ø`, each of
+    // which is a token other documents really contain — confident and wrong, not empty.
+    expect(normalizeForSearch('Ǡ')).toBe('ǡ');
+    expect(normalizeForSearch('ǡ')).toBe('ǡ');
+    expect(normalizeForSearch('Ǣ')).toBe('ǣ');
+    expect(normalizeForSearch('Ǯ')).toBe('ǯ');
+    expect(normalizeForSearch('Ǽ')).toBe('ǽ');
+    expect(normalizeForSearch('Ǿ')).toBe('ǿ');
+    // Still lowercased, because unicode61 does lowercase them — the shield is against the
+    // mark stripping alone, not against the whole fold.
+    expect(normalizeForSearch('ǠǢǮǼǾ')).toBe('ǡǣǯǽǿ');
+  });
+
+  it('leaves alone the two Greek codepoints unicode61 does not transform', () => {
+    // U+037F is newer than unicode61's case table: the index stores it uppercase.
+    expect(normalizeForSearch('Ϳ')).toBe('Ϳ');
+    // U+0374 is left as-is by SQLite while `normalize` maps it to U+02B9 — two codepoints
+    // that print alike and never match.
+    expect(normalizeForSearch('\u0374')).toBe('\u0374');
+  });
+
+  it('shields nothing when the text contains none of them, and does not leak a placeholder', () => {
+    // The shield hides characters behind U+FDD0..U+FDEF noncharacters. A restore that
+    // failed would leave one of those in a token, and it would match nothing forever.
+    const folded = normalizeForSearch('Théorie générale de l\'emploi Ǽ Ϳ');
+    expect(folded).toBe('theorie generale de l\'emploi ǽ Ϳ');
+    expect(/[\ufdd0-\ufdef]/u.test(folded)).toBe(false);
+    expect(normalizeForSearch('plain ascii text')).toBe('plain ascii text');
+  });
+});

@@ -56,15 +56,37 @@ export interface FulltextSource {
    * why the early exit is worth keeping.
    */
   pendingItems: string[];
+  /**
+   * Highest full-text version this source saw, and the seed for the index's full-text
+   * watermark (ticket 0012).
+   *
+   * It costs nothing to produce: the `/fulltext?since=0` request below is made anyway, to
+   * find which attachments have text at all, and its values are that sequence. Seeding
+   * from it is what keeps the FIRST delta after a build correct — a full-text watermark of
+   * 0 would report every extracted attachment in the library as newly extracted, which is
+   * the defect 0012 measured (7 453 of 8 037 entries, against a library version of 410).
+   *
+   * 0 when nothing is extracted or the endpoint was unreachable, which reads as "no
+   * full-text history recorded" and is the same thing an index built before this field
+   * existed says.
+   */
+  fulltextVersion: number;
   /** Set when full text cannot be indexed at all; the build then stays metadata-only. */
   unavailable?: string;
 }
 
 /** An inert source, for "full text requested but not obtainable". */
-function emptySource(unavailable?: string, pendingItems: string[] = []): FulltextSource {
-  const src: FulltextSource = { textFor: async () => undefined, attachments: 0, items: 0, pendingItems };
+function emptySource(unavailable?: string, pendingItems: string[] = [], fulltextVersion = 0): FulltextSource {
+  const src: FulltextSource = { textFor: async () => undefined, attachments: 0, items: 0, pendingItems, fulltextVersion };
   if (unavailable) src.unavailable = unavailable;
   return src;
+}
+
+/** Highest value in a Zotero `key -> version` map; 0 for an empty or malformed one. */
+export function highestVersion(map: Record<string, number>): number {
+  let max = 0;
+  for (const v of Object.values(map)) if (Number.isFinite(v) && v > max) max = v;
+  return max;
 }
 
 /**
@@ -203,5 +225,12 @@ export async function createFulltextSource(
     );
   }
 
-  return { textFor, attachments: mapped, items: byItem.size, pendingItems: [...pending] };
+  // Advance the full-text watermark ONLY when every attachment that has text was located.
+  // The walk above exits early on an error, and `mapped < total` then means some extracted
+  // attachments were never mapped to a parent and so were never indexed. Seeding the
+  // watermark past them would hide them from every future delta — seeding it wrong in the
+  // direction where nothing ever looks newly extracted, which 0012 names as the failure
+  // that hides itself.
+  const fulltextVersion = mapped >= total ? highestVersion(withText) : 0;
+  return { textFor, attachments: mapped, items: byItem.size, pendingItems: [...pending], fulltextVersion };
 }

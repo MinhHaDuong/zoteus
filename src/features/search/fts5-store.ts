@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import { rethrowCorruption } from './corruption.js';
 import { toMatchQuery } from './match-query.js';
 import type { ChunkRecord, PassageStore } from './passage-store.js';
 import type { VectorEntry } from './vector-store.js';
@@ -229,6 +230,8 @@ function floats(blob: Uint8Array): Float32Array {
  */
 export class Fts5PassageStore implements PassageStore {
   private readonly db: DatabaseSync;
+  /** Named in every corruption message, because "the index" is not a path a user can rm. */
+  private readonly dbPath: string;
   private readonly stmtInsertBody: StatementSync;
   private readonly stmtInsertMeta: StatementSync;
   private readonly stmtRowidOf: StatementSync;
@@ -284,15 +287,27 @@ export class Fts5PassageStore implements PassageStore {
     opts: { loadVec?: VecLoader; twoStage?: boolean; poolFactor?: number; poolMin?: number } = {},
   ) {
     const { DatabaseSync: Ctor } = loadSqlite();
+    this.dbPath = path;
     // `allowExtension` only *permits* enableLoadExtension to be called; loading is still
     // off until armVec asks for it, and off again the moment it is done.
-    this.db = new Ctor(path, { allowExtension: true });
-    // WAL lets a reader query while a build writes; NORMAL trades an fsync per commit for
-    // throughput, which is the right side of the trade for an index that can be rebuilt.
-    // Both are no-ops on ':memory:'.
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA synchronous = NORMAL');
-    this.db.exec(SCHEMA);
+    //
+    // Opening is where a corrupt file is normally met, and it is met LATE: SQLite reads no
+    // page at `new DatabaseSync`, so the constructor succeeds on a file of random bytes
+    // and the first `exec` is what fails. Both are inside the guard for that reason
+    // (ticket 0010) — without it the failure arrives as a bare "database disk image is
+    // malformed" from somewhere in a constructor, which names neither the file nor a
+    // remedy.
+    try {
+      this.db = new Ctor(path, { allowExtension: true });
+      // WAL lets a reader query while a build writes; NORMAL trades an fsync per commit for
+      // throughput, which is the right side of the trade for an index that can be rebuilt.
+      // Both are no-ops on ':memory:'.
+      this.db.exec('PRAGMA journal_mode = WAL');
+      this.db.exec('PRAGMA synchronous = NORMAL');
+      this.db.exec(SCHEMA);
+    } catch (e) {
+      rethrowCorruption(e, path);
+    }
     // Read before armVec so the two-stage query has its knobs whatever happens to vec0.
     this.twoStage = opts.twoStage ?? VEC_TWO_STAGE_DEFAULT;
     this.poolFactor = opts.poolFactor ?? VEC_POOL_FACTOR;
@@ -561,12 +576,23 @@ export class Fts5PassageStore implements PassageStore {
     // and callers elsewhere filter on `score > 0`. Negating gives both at once. A green
     // suite would not catch getting this backwards — the ORDER BY alone keeps the ranking
     // right — which is exactly why it is spelled out.
-    return this.stmtSearch.all(match, topK) as unknown as HitRow[];
+    // A file that opened cleanly can still hold a corrupt page, and the query that reads
+    // it is where that is discovered. Same treatment as the open path: name the file and
+    // the remedy rather than letting SQLite's sentence escape on its own.
+    try {
+      return this.stmtSearch.all(match, topK) as unknown as HitRow[];
+    } catch (e) {
+      rethrowCorruption(e, this.dbPath);
+    }
   }
 
   get(id: string): ChunkRecord | undefined {
-    const row = this.stmtGet.get(id) as unknown as MetaRow | undefined;
-    return row ? toChunk(row) : undefined;
+    try {
+      const row = this.stmtGet.get(id) as unknown as MetaRow | undefined;
+      return row ? toChunk(row) : undefined;
+    } catch (e) {
+      rethrowCorruption(e, this.dbPath);
+    }
   }
 
   values(): Iterable<ChunkRecord> {
@@ -701,6 +727,34 @@ export class Fts5PassageStore implements PassageStore {
   /** Every item the index holds a passage for — the delta's "what do I currently have". */
   itemKeys(): string[] {
     return (this.stmtItems.all() as unknown as Array<{ item: string }>).map((r) => r.item);
+  }
+
+  /**
+   * How concentrated the index is: the `limit` items holding the most passages.
+   *
+   * The question ticket 0013 was filed on. On the uncapped 477 511-passage build of the
+   * library that motivated this chantier, ONE dictionary held 42 962 passages — 9% of the
+   * index, against 1 449 for the next largest — which depresses idf for the vocabulary it
+   * saturates. Measurement found the effect on ranking order to be near-nil (the item
+   * takes one de-duplicated slot), so nothing here bounds anything; it reports.
+   *
+   * Prepared on demand rather than in the constructor: this runs when a human asks, not on
+   * the hot path, and a `GROUP BY` over every row does not belong among statements that
+   * are prepared whether or not they are ever used. See PassageStore.itemPassageCounts for
+   * the cost that keeps it out of `status()`.
+   */
+  itemPassageCounts(limit: number): Array<{ item: string; title?: string; passages: number }> {
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT item, count(*) AS passages, min(title) AS title
+             FROM passage_meta GROUP BY item ORDER BY passages DESC LIMIT ?`,
+        )
+        .all(limit) as unknown as Array<{ item: string; title: string | null; passages: number }>;
+      return rows.map((r) => (r.title ? { item: r.item, title: r.title, passages: r.passages } : { item: r.item, passages: r.passages }));
+    } catch (e) {
+      rethrowCorruption(e, this.dbPath);
+    }
   }
 
   fulltextStats(): { items: string[]; passages: number } {

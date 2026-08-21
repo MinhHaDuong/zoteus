@@ -1,10 +1,21 @@
 import { join } from 'node:path';
 import { Fts5PassageStore } from './fts5-store.js';
-import { SearchIndex, type IndexBackend, type SearchIndexOptions } from './index-manager.js';
+import { SearchIndex, geometryKey, type IndexBackend, type SearchIndexOptions } from './index-manager.js';
 
 /** `index_meta` keys holding the watermark and its provenance. */
 export const VERSION_KEY = 'builtFromVersion';
 export const BACKEND_KEY = 'indexBackend';
+/**
+ * `index_meta` key holding how far along Zotero's **full-text** sequence this index has
+ * been brought. A second watermark, on a sequence unrelated to the item one — ticket 0012.
+ * Unlabelled on purpose; see SearchIndex.fulltextWatermark for why one label covers both.
+ */
+export const FULLTEXT_VERSION_KEY = 'fulltextVersion';
+/**
+ * `index_meta` key recording the chunk geometry the rows were produced at — ticket 0007.
+ * Compared, never parsed: see SearchIndex.geometryMismatch for why a mismatch rebuilds.
+ */
+export const GEOMETRY_KEY = 'chunkGeometry';
 /** `index_meta` key holding the items whose attachments await extraction (JSON array). */
 export const PENDING_KEY = 'fulltextPending';
 /**
@@ -73,6 +84,15 @@ export class SqliteSearchIndex extends SearchIndex {
     this.db.setMeta(VERSION_KEY, String(version));
     if (backend) this.db.setMeta(BACKEND_KEY, backend);
     else this.db.deleteMeta(BACKEND_KEY);
+    // Deleted rather than written as 0, for the same reason the label is: absence is a
+    // real state (an index built before this key existed), and it must not be readable as
+    // "swept up to version 0", which would be a claim rather than a silence.
+    const ftVersion = this.fulltextWatermark;
+    if (ftVersion > 0) this.db.setMeta(FULLTEXT_VERSION_KEY, String(ftVersion));
+    else this.db.deleteMeta(FULLTEXT_VERSION_KEY);
+    // Written whenever the watermark is, so the stamp always describes the rows the
+    // watermark claims are current. Writing it anywhere else would let the two disagree.
+    this.db.setMeta(GEOMETRY_KEY, geometryKey(this.geometry));
     const pending = this.fulltextPendingItems.slice(0, MAX_PENDING_KEYS);
     if (pending.length) this.db.setMeta(PENDING_KEY, JSON.stringify(pending));
     else this.db.deleteMeta(PENDING_KEY);
@@ -121,16 +141,30 @@ function openStore(dbPath: string): {
   builtFromVersion: number;
   indexBackend?: IndexBackend;
   fulltextPending?: string[];
+  fulltextVersion?: number;
+  storedGeometry?: string;
 } {
   const store = new Fts5PassageStore(dbPath);
   const raw = store.getMeta(VERSION_KEY);
   const parsed = raw === undefined ? NaN : Number(raw);
   const label = store.getMeta(BACKEND_KEY);
-  const out: { store: Fts5PassageStore; builtFromVersion: number; indexBackend?: IndexBackend; fulltextPending?: string[] } = {
+  const out: {
+    store: Fts5PassageStore;
+    builtFromVersion: number;
+    indexBackend?: IndexBackend;
+    fulltextPending?: string[];
+    fulltextVersion?: number;
+    storedGeometry?: string;
+  } = {
     store,
     builtFromVersion: Number.isFinite(parsed) ? parsed : 0,
   };
   if (label === 'local' || label === 'web') out.indexBackend = label;
+  const geometry = store.getMeta(GEOMETRY_KEY);
+  if (geometry) out.storedGeometry = geometry;
+  const ftRaw = store.getMeta(FULLTEXT_VERSION_KEY);
+  const ftParsed = ftRaw === undefined ? NaN : Number(ftRaw);
+  if (Number.isFinite(ftParsed) && ftParsed > 0) out.fulltextVersion = ftParsed;
   const pending = readPending(store.getMeta(PENDING_KEY));
   if (pending) out.fulltextPending = pending;
   return out;

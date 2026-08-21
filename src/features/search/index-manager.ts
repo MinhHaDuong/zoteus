@@ -13,6 +13,46 @@ import type { Logger } from '../../lib/logger.js';
  */
 export const FULLTEXT_CHUNK_SIZE = 1200;
 export const FULLTEXT_CHUNK_OVERLAP = 150;
+/** Metadata passage geometry — `chunkText`'s own defaults, named so they can be reported. */
+export const META_CHUNK_SIZE = 512;
+export const META_CHUNK_OVERLAP = 64;
+
+/**
+ * The four numbers that decide how text becomes passages (ticket 0007).
+ *
+ * They were three hardcoded constants and a pair of default arguments, which made every
+ * measurement of "how many passages does this library have" a measurement of an
+ * unnamed choice. Reachable from configuration now, with the defaults byte-identical to
+ * what shipped — `tests/features/search-chunk-geometry.test.ts` pins that against a
+ * fixture, because the criterion this closes is "defaults unchanged", not "configurable".
+ *
+ * **Changing them changes results**, and not only future ones: an index built at one
+ * geometry and served by a process configured for another is a mixture, silently. So the
+ * geometry travels with the watermark and a mismatch forces a rebuild, exactly as a
+ * backend-label mismatch does. See `geometryKey`.
+ */
+export interface ChunkGeometry {
+  metaSize: number;
+  metaOverlap: number;
+  fulltextSize: number;
+  fulltextOverlap: number;
+}
+
+export const DEFAULT_CHUNK_GEOMETRY: ChunkGeometry = {
+  metaSize: META_CHUNK_SIZE,
+  metaOverlap: META_CHUNK_OVERLAP,
+  fulltextSize: FULLTEXT_CHUNK_SIZE,
+  fulltextOverlap: FULLTEXT_CHUNK_OVERLAP,
+};
+
+/**
+ * A compact, stable, comparable stamp for one geometry — what gets stored beside the
+ * watermark and compared on startup. A string rather than four columns because it is only
+ * ever tested for equality, and because one key cannot be half-updated.
+ */
+export function geometryKey(g: ChunkGeometry): string {
+  return `${g.metaSize}/${g.metaOverlap}+${g.fulltextSize}/${g.fulltextOverlap}`;
+}
 
 /**
  * Which Zotero client a build or delta read the library through.
@@ -82,6 +122,15 @@ export interface SearchIndexStatus {
    * delta can close, the second is nothing at all. Only meaningful with full text on.
    */
   fulltextPendingItems?: number;
+  /**
+   * The Zotero **full-text version** this index is current as of — a different sequence
+   * from `builtFromVersion`, and the whole point of ticket 0012. Zotero numbers full-text
+   * extraction independently of item versions: on the library that motivated this, the
+   * item sequence sat at 410 while the full-text one ran to 25 036. Reported so the two
+   * are visible side by side, because a report showing only one of them is how they came
+   * to be compared with each other.
+   */
+  fulltextVersion?: number;
 }
 
 /** Lifecycle of the asynchronous background index build. */
@@ -171,6 +220,14 @@ export interface IndexDelta {
   version: number;
   /** Which client produced it. Never optional here — see IndexBackend. */
   backend: IndexBackend;
+  /**
+   * The full-text version this delta brings the index up to, when the delta swept the
+   * full-text sequence far enough to say so. Absent leaves the previous value standing:
+   * a sweep that was cut short by the item ceiling has NOT covered everything below the
+   * highest version it saw, and advancing past that would retire attachments it never
+   * folded in. See `addNewlyExtracted` in delta.ts.
+   */
+  fulltextVersion?: number;
 }
 
 export interface DeltaResult {
@@ -216,6 +273,19 @@ export interface SearchIndexOptions {
   indexBackend?: IndexBackend;
   /** Seed for the pending-full-text set (SQLite recovers it from index_meta). */
   fulltextPending?: Iterable<string>;
+  /**
+   * Seed for the full-text watermark, recovered from `index_meta` the same way as
+   * `builtFromVersion`. It carries no label of its own: see `fulltextWatermark`.
+   */
+  fulltextVersion?: number;
+  /** How text becomes passages. Defaults to what shipped; see ChunkGeometry. */
+  geometry?: ChunkGeometry;
+  /**
+   * The geometry the passages ON DISK were produced at, recovered from `index_meta`.
+   * Absent on an index built before geometry was recorded, which is treated the same way
+   * as an absent backend label: not comparable, so rebuild rather than mix.
+   */
+  storedGeometry?: string;
 }
 
 function itemText(d: any): string {
@@ -291,6 +361,11 @@ export class SearchIndex {
   private fulltextPending = new Set<string>();
   private builtFromVersion = 0;
   private indexBackend: IndexBackend | undefined = undefined;
+  /** The full-text sequence's watermark; see `fulltextWatermark` (ticket 0012). */
+  private fulltextVersion = 0;
+  /** How this process chunks text, and how the rows on disk were chunked (ticket 0007). */
+  protected readonly geometry: ChunkGeometry;
+  private readonly storedGeometry: string | undefined;
 
   // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
   private buildState: BuildState = 'idle';
@@ -310,6 +385,9 @@ export class SearchIndex {
     this.store = opts.store ?? new MemoryPassageStore();
     this.builtFromVersion = opts.builtFromVersion ?? 0;
     this.indexBackend = opts.indexBackend;
+    this.fulltextVersion = opts.fulltextVersion ?? 0;
+    this.geometry = opts.geometry ?? DEFAULT_CHUNK_GEOMETRY;
+    this.storedGeometry = opts.storedGeometry;
     if (opts.fulltextPending) this.fulltextPending = new Set(opts.fulltextPending);
     // What the store already holds, read back before anything asks. Closes the gap ticket
     // 0005 left open: `builtFromVersion` was recovered at construction but `items` and
@@ -398,6 +476,55 @@ export class SearchIndex {
     return this.indexBackend
       ? { version: this.builtFromVersion, backend: this.indexBackend }
       : { version: this.builtFromVersion };
+  }
+
+  /**
+   * How far along **Zotero's full-text sequence** this index has been brought — a second,
+   * unrelated integer, and the fix for ticket 0012.
+   *
+   * `builtFromVersion` counts library transactions; full-text versions count extraction
+   * events, and the two are incommensurable. Measured on the library that motivated this:
+   * library version 410, full-text versions 0 to 25 036. Handing the item watermark to
+   * `fullTextSince` therefore returned 7 453 of 8 037 attachments as "newly extracted" on
+   * every single delta, and it could not converge, because the number it advanced belonged
+   * to the other sequence.
+   *
+   * **It carries no label of its own, deliberately.** A backend switch is caught before
+   * this value is ever read: the freshness check compares `watermark.backend` with the
+   * live backend first, and any mismatch rebuilds the whole index, which clears both
+   * watermarks together. They are written together by `recordWatermark` and cleared
+   * together by `forgetWatermark`, so no path exists on which one is attributable and the
+   * other is not. `tests/search-delta-fulltext.test.ts` pins that.
+   */
+  get fulltextWatermark(): number {
+    return this.fulltextVersion;
+  }
+
+  /**
+   * Set when the rows on disk were chunked at a geometry this process is not configured
+   * for (ticket 0007) — otherwise undefined.
+   *
+   * Making the geometry a knob creates a failure the constants could not have: change
+   * `ZOTEUS_FULLTEXT_CHUNK_SIZE`, restart, and every delta from then on writes passages at
+   * the new geometry beside passages at the old one. Nothing errors and nothing looks
+   * wrong; the index just quietly becomes a mixture, and its BM25 lengths are averages
+   * over two populations. So a mismatch is refused, exactly as an unattributable backend
+   * label is, and for exactly the same reason: the comparison is not meaningful, so the
+   * only answer that cannot be wrong is to rebuild.
+   */
+  get geometryMismatch(): { stored: string; configured: string } | undefined {
+    const configured = geometryKey(this.geometry);
+    if (this.storedGeometry === undefined || this.storedGeometry === configured) return undefined;
+    return { stored: this.storedGeometry, configured };
+  }
+
+  /**
+   * Seed the full-text watermark from the build's own `/fulltext?since=0` read. Called by
+   * the build path, which gets the map for free (see FulltextSource.fulltextVersion), and
+   * persisted with the rest of the watermark only if the crawl runs to its end.
+   */
+  noteFulltextVersion(version: number): void {
+    if (Number.isFinite(version) && version > 0) this.fulltextVersion = version;
   }
 
   /**
@@ -508,6 +635,7 @@ export class SearchIndex {
       builtFromVersion: this.builtFromVersion,
     };
     if (this.indexBackend) s.indexBackend = this.indexBackend;
+    if (this.fulltextVersion > 0) s.fulltextVersion = this.fulltextVersion;
     if (this.fulltextPending.size) s.fulltextPendingItems = this.fulltextPending.size;
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
@@ -540,6 +668,11 @@ export class SearchIndex {
   protected forgetWatermark(): void {
     this.builtFromVersion = 0;
     this.indexBackend = undefined;
+    // Cleared with the item watermark, never apart from it. That is what lets the
+    // full-text watermark go unlabelled: the label check on the item watermark is the
+    // only gate either of them needs, and it can only be reached with both present or
+    // both absent. See `fulltextWatermark`.
+    this.fulltextVersion = 0;
     this.recordWatermark();
   }
 
@@ -562,7 +695,7 @@ export class SearchIndex {
       const base = itemText(d);
       const extra = opts.extraText?.get(key);
       const text = extra ? `${base}. ${extra}` : base;
-      for (const ch of chunkText(text)) {
+      for (const ch of chunkText(text, this.geometry.metaSize, this.geometry.metaOverlap)) {
         const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
         records.push(rec);
         this.store.add(rec);
@@ -866,6 +999,11 @@ export class SearchIndex {
     this.adoptStoreCounters();
     this.builtFromVersion = delta.version;
     this.indexBackend = delta.backend;
+    // Only ever forward, and only when the caller says the sweep went that far. Absent
+    // means "the full-text sweep did not complete", and the previous value must stand.
+    if (delta.fulltextVersion !== undefined && delta.fulltextVersion > this.fulltextVersion) {
+      this.fulltextVersion = delta.fulltextVersion;
+    }
     this.recordWatermark();
     return { reindexed, removed, version: delta.version };
   }
@@ -877,7 +1015,7 @@ export class SearchIndex {
     if (!key) return;
     this.items.add(key);
     const title = d.title ?? '(untitled)';
-    for (const ch of chunkText(itemText(d))) {
+    for (const ch of chunkText(itemText(d), this.geometry.metaSize, this.geometry.metaOverlap)) {
       const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title, text: ch.text };
       this.store.add(rec);
       if (this.hasEmbedder) pending.push(rec);
@@ -892,7 +1030,7 @@ export class SearchIndex {
    */
   private addFulltext(itemKey: string, title: string, text: string, pending: ChunkRecord[]): void {
     let added = 0;
-    for (const ch of chunkText(text, FULLTEXT_CHUNK_SIZE, FULLTEXT_CHUNK_OVERLAP)) {
+    for (const ch of chunkText(text, this.geometry.fulltextSize, this.geometry.fulltextOverlap)) {
       const rec: ChunkRecord = {
         id: `${itemKey}#f${ch.index}`,
         itemKey,
