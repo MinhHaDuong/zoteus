@@ -16,8 +16,13 @@ export interface ReadOpts {
 
 /**
  * Decides whether a READ is served by the desktop local API or the cloud Web API.
- * Rule: use local only for the default personal (user) library when the local API
- * is up and not disabled; everything else (group libraries, or local down) -> cloud.
+ * Rule: use local for the default personal (user) library, and for a group library the
+ * desktop actually holds, whenever the local API is up and not disabled; everything else
+ * -> cloud.
+ *
+ * Groups were cloud-only until Zotero 10, which began serving /groups/<id> locally. That
+ * is why the rule used to read "personal library only": on a Zotero 10 install with no
+ * cloud key, the old rule returned nothing for a group the desktop was holding all along.
  */
 export class LibraryRouter {
   private readonly config: ZoteusConfig;
@@ -46,14 +51,16 @@ export class LibraryRouter {
   private useLocal(library: LibraryRef): boolean {
     if (!this.local || !this.capabilities.localApi || this.config.local === 'off') return false;
     const def = this.defaultLibrary();
-    // Local API only serves the personal library (users/0 maps to the default user library).
-    return library.type === 'user' && (library.id === def.id || library.id === 0);
+    // users/0 maps to the desktop's own personal library, whatever its cloud id.
+    if (library.type === 'user') return library.id === def.id || library.id === 0;
+    // A group only if this desktop holds it; otherwise the read belongs to the cloud.
+    return this.capabilities.localGroupIds.includes(library.id);
   }
 
   async searchItems(query: ItemQuery & ReadOpts = {}): Promise<ListResult> {
     const { library, ...q } = query;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.listItems(q);
+    if (this.useLocal(lib)) return this.local!.listItems(q, lib);
     return this.web.listItems(lib, q);
   }
 
@@ -63,7 +70,7 @@ export class LibraryRouter {
   ): Promise<any> {
     const { library, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.getItem(key, rest);
+    if (this.useLocal(lib)) return this.local!.getItem(key, rest, lib);
     return this.web.getItem(lib, key, rest);
   }
 
@@ -72,7 +79,7 @@ export class LibraryRouter {
     const lib = library ?? this.defaultLibrary();
     // Prefer the desktop app for the personal library (local-only mode has no cloud
     // fallback — hitting api.zotero.org with user id 0 yields "Invalid user ID").
-    if (this.useLocal(lib)) return this.local!.getItemChildren(key, rest);
+    if (this.useLocal(lib)) return this.local!.getItemChildren(key, rest, lib);
     return this.web.getItemChildren(lib, key, rest);
   }
 
@@ -86,14 +93,14 @@ export class LibraryRouter {
    */
   async getFullText(key: string, opts: ReadOpts = {}): Promise<any | null> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.getFullText(key);
+    if (this.useLocal(lib)) return this.local!.getFullText(key, lib);
     return this.web.getFullText(lib, key);
   }
 
   /** Attachment keys whose full text changed after `version`, mapped to that version. */
   async fullTextSince(version: number, opts: ReadOpts = {}): Promise<Record<string, number>> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.fullTextSince(version);
+    if (this.useLocal(lib)) return this.local!.fullTextSince(version, lib);
     return this.web.fullTextSince(lib, version);
   }
 
@@ -102,7 +109,7 @@ export class LibraryRouter {
   ): Promise<ListResult> {
     const { library, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.listCollections(rest);
+    if (this.useLocal(lib)) return this.local!.listCollections(rest, lib);
     return this.web.listCollections(lib, rest);
   }
 }
