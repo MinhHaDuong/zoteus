@@ -36,6 +36,45 @@ can never time out the MCP client, even on very large libraries.
 - `fulltext_max_chars` — cap on indexed full-text characters per item; `0` means no cap.
   Defaults to `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` (40000).
 
+### Keeping the index current
+
+Under `ZOTEUS_SEARCH_BACKEND=sqlite`, `zotero_semantic_search` brings the index up to date
+before it answers, so an added paper is findable without a manual rebuild and a deleted one
+stops returning hits. `ZOTEUS_INDEX_AUTO_REFRESH=false` turns it off.
+
+The index records the Zotero **library version** it was built from, together with the
+client that produced it — `local` (desktop app) or `web` (cloud). Both halves matter: the
+two APIs keep unrelated version sequences, so a version compared across a backend switch
+would either skip a real change for good or replay the whole library. A watermark whose
+label does not match the client now serving reads is therefore not used at all; the index
+is rebuilt instead, and the log says so. The same applies to an index built before this
+existed, whose `builtFromVersion` held an item count rather than a version.
+
+What a query costs:
+
+| Situation | Requests | What happens |
+|---|---|---|
+| Library unchanged | **1** | One `Last-Modified-Version` probe; results served from the index |
+| Library changed | 3+ | `?since=` for what changed, `?format=versions` for what still exists, then the delta is applied and the results served |
+| Label mismatch / no label | 0 | A full background rebuild is started; current contents still served |
+| Zotero unreachable | 1, then 0 for a minute | The index is served as it stands; the search does **not** fail |
+| A build already running | 0 | The refresh stands down rather than racing it |
+
+Deletions are found by subtraction, not by `/deleted?since=`: that endpoint is cloud-only
+and the desktop API answers it with 404. One `?format=versions` request returns a
+key → version map for the whole library, and any item the index holds that the map does not
+is one Zotero no longer has.
+
+A changed item is **dropped and re-indexed**, never merged into, so an edited abstract
+cannot leave stale passages answering beside the fresh ones. The recorded version moves
+only once the whole delta has landed, so an interrupted refresh is retried rather than
+skipped. A delta larger than 500 items, or one that runs past an 8-second deadline, is
+abandoned in favour of a background rebuild — inline is the wrong place for a crawl.
+
+Attachments Zotero has not extracted yet are recorded as **present without text** rather
+than skipped, and reported as `fulltextPendingItems`; a later refresh re-probes them, so
+"no text yet" does not become permanently indistinguishable from "no attachment".
+
 **Local-first, key-free.** The build pages items through the library router, exactly like
 every other read: a running Zotero desktop app serves them from its **local API** (no
 cloud API key required), and the cloud **Web API** takes over when the app is closed — and
@@ -184,6 +223,36 @@ After installing the runtime, run `zotero_index action:"build"` again: an index 
 without an embedder stays keyword-only until it is rebuilt.
 
 The index is stored at `<ZOTEUS_DATA_DIR>/search-index.json` and reloaded on startup.
+
+### Where the vectors live
+
+On the default `json` backend the vectors sit in the heap and are written into
+`search-index.json` beside the passages.
+
+On `ZOTEUS_SEARCH_BACKEND=sqlite` they go into the database instead, in a `vec0` table
+provided by **`sqlite-vec`** — a small prebuilt SQLite extension (~190 kB, no compile
+step), installed the same opt-in way as the embedding runtime:
+
+```bash
+npm i sqlite-vec
+```
+
+It is only ever needed when an embedder is already producing vectors, so the install is
+paired with the far heavier one above. The nearest-neighbour scan then runs in C over the
+on-disk table: nothing is loaded into the heap, and no column is read in full.
+
+If the extension cannot be loaded the backend degrades exactly like a missing embedding
+runtime — the index still builds, keyword search still works, and the cause is reported
+rather than left silent. It travels as `vectorReason` on `zotero_index action:"status"`,
+which is deliberately *not* `embedderReason`: the embedder is healthy, it is the index
+that has nowhere to put the output, and reinstalling the embedder would fix nothing.
+
+The embedding dimension is a property of the model, so the table is created at whatever
+width the first vector has and that width is recorded in the database. Changing
+`ZOTEUS_EMBEDDINGS` to a model of a different width therefore needs a rebuild
+(`zotero_index action:"build"`), which drops the table and recreates it; querying an index
+built by another model reports the mismatch instead of ranking on vectors that no longer
+mean anything.
 
 ## Large libraries
 

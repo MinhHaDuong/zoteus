@@ -14,6 +14,8 @@ import {
 import { loadConfig } from '../../src/config.js';
 import indexTool from '../../src/tools/index-tool.js';
 import semanticSearch from '../../src/tools/semantic-search.js';
+import { STORES } from './stores.js';
+import type { PassageStore } from '../../src/features/search/passage-store.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} } as any;
 
@@ -23,12 +25,13 @@ const items = [
 ];
 
 /** An index built while the local runtime is missing: keyword docs, zero vectors. */
-function keywordOnlyIndex(): SearchIndex {
+function keywordOnlyIndex(store?: PassageStore): SearchIndex {
   return new SearchIndex({
     embedder: null,
     configured: 'local',
     unavailable: missingTransformersHint({ dist: 'mcpb' }),
     logger: silentLogger,
+    store,
   });
 }
 
@@ -88,9 +91,9 @@ describe('createEmbeddingProvider preflight', () => {
   });
 });
 
-describe('status reports the effective embedder, not the configured one', () => {
+describe.each(STORES)('status reports the effective embedder, not the configured one [%s]', (_name, makeStore) => {
   it('names the requested provider and the reason it is not running', async () => {
-    const search = keywordOnlyIndex();
+    const search = keywordOnlyIndex(makeStore());
     await search.build(items);
     const status = search.buildStatus();
 
@@ -109,7 +112,7 @@ describe('status reports the effective embedder, not the configured one', () => 
         throw new Error('onnxruntime binding missing');
       },
     };
-    const search = new SearchIndex({ embedder: broken, configured: 'local', logger: silentLogger });
+    const search = new SearchIndex({ embedder: broken, configured: 'local', logger: silentLogger, store: makeStore() });
     await search.build(items);
 
     // The build still completes on keyword data, but it no longer claims to be embedding.
@@ -120,7 +123,7 @@ describe('status reports the effective embedder, not the configured one', () => 
   });
 
   it('says nothing extra when embeddings were switched off on purpose', async () => {
-    const search = new SearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
+    const search = new SearchIndex({ embedder: null, configured: 'off', logger: silentLogger, store: makeStore() });
     await search.build(items);
     const status = search.buildStatus();
     expect(status.embedder).toBe('none (keyword-only)');
@@ -136,7 +139,7 @@ describe('status reports the effective embedder, not the configured one', () => 
         return texts.map(() => [1, 0, 0]);
       },
     };
-    const search = new SearchIndex({ embedder: flaky, configured: 'local', logger: silentLogger });
+    const search = new SearchIndex({ embedder: flaky, configured: 'local', logger: silentLogger, store: makeStore() });
     await search.build(items);
     expect(search.embedderActive).toBe(false);
 
@@ -148,9 +151,9 @@ describe('status reports the effective embedder, not the configured one', () => 
   });
 });
 
-describe('zotero_index status surfaces the degradation', () => {
+describe.each(STORES)('zotero_index status surfaces the degradation [%s]', (_name, makeStore) => {
   it('puts the cause in the summary a client actually reads', async () => {
-    const search = keywordOnlyIndex();
+    const search = keywordOnlyIndex(makeStore());
     await search.build(items);
     const res = await indexTool.handler({ action: 'status' }, { search } as any);
     expect(res.content[0].text).toMatch(/Semantic ranking is OFF/);
@@ -160,9 +163,9 @@ describe('zotero_index status surfaces the degradation', () => {
   });
 });
 
-describe('zotero_semantic_search with no vectors', () => {
+describe.each(STORES)('zotero_semantic_search with no vectors [%s]', (_name, makeStore) => {
   it('errors instead of returning an empty hit list for mode:"semantic"', async () => {
-    const search = keywordOnlyIndex();
+    const search = keywordOnlyIndex(makeStore());
     await search.build(items);
     const res = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, { search } as any);
 
@@ -174,7 +177,7 @@ describe('zotero_semantic_search with no vectors', () => {
   });
 
   it('still answers in auto mode, but says semantic ranking is off', async () => {
-    const search = keywordOnlyIndex();
+    const search = keywordOnlyIndex(makeStore());
     await search.build(items);
     const res = await semanticSearch.handler({ q: 'deep learning' }, { search } as any);
 
@@ -185,7 +188,7 @@ describe('zotero_semantic_search with no vectors', () => {
   });
 
   it('leaves an explicit keyword search unannotated', async () => {
-    const search = keywordOnlyIndex();
+    const search = keywordOnlyIndex(makeStore());
     await search.build(items);
     const res = await semanticSearch.handler({ q: 'deep learning', mode: 'keyword' }, { search } as any);
     expect(res.isError).toBeUndefined();

@@ -20,6 +20,20 @@ const ATTACHMENT_PAGE_SIZE = 100;
  */
 const MAX_ATTACHMENT_PAGES = 500;
 
+/**
+ * Pages walked when NOTHING in the library is extracted yet.
+ *
+ * That walk cannot produce a single character of text — it buys only the
+ * present-without-text record — so it is capped far below MAX_ATTACHMENT_PAGES. The record
+ * is a bounded hint, for reporting and for re-probing; correctness rests on the delta's
+ * `fullTextSince` sweep, which names a newly extracted attachment whether or not it was
+ * ever listed here.
+ */
+const MAX_PENDING_PAGES = 20;
+
+/** Ceiling on the pending set, for the same reason: it is a hint, not an inventory. */
+const MAX_PENDING_ITEMS = 2000;
+
 export interface FulltextSource {
   /** Concatenated, capped full text of one item's attachments (undefined when it has none). */
   textFor(itemKey: string): Promise<string | undefined>;
@@ -27,13 +41,28 @@ export interface FulltextSource {
   attachments: number;
   /** Items those attachments belong to. */
   items: number;
+  /**
+   * Items carrying an attachment Zotero has **not extracted yet** — present without text.
+   *
+   * These used to be skipped, and skipping is what made "no text yet" indistinguishable
+   * from "no attachment": both produced an item with no full-text passages and nothing
+   * anywhere recording the difference, so nothing ever went back to look. Recorded here,
+   * a later delta can re-probe them.
+   *
+   * Best effort, and honestly so: the attachment walk below stops as soon as every
+   * attachment that HAS text has been located, so attachments sitting past that point are
+   * not seen. Correctness does not rest on this list — the delta's `fullTextSince` sweep
+   * finds a newly extracted attachment whether or not it was ever listed here — which is
+   * why the early exit is worth keeping.
+   */
+  pendingItems: string[];
   /** Set when full text cannot be indexed at all; the build then stays metadata-only. */
   unavailable?: string;
 }
 
 /** An inert source, for "full text requested but not obtainable". */
-function emptySource(unavailable?: string): FulltextSource {
-  const src: FulltextSource = { textFor: async () => undefined, attachments: 0, items: 0 };
+function emptySource(unavailable?: string, pendingItems: string[] = []): FulltextSource {
+  const src: FulltextSource = { textFor: async () => undefined, attachments: 0, items: 0, pendingItems };
   if (unavailable) src.unavailable = unavailable;
   return src;
 }
@@ -72,18 +101,18 @@ export async function createFulltextSource(
   }
 
   const total = Object.keys(withText).length;
-  if (total === 0) {
-    return emptySource(
-      'Zotero reports no attachments with extracted full text in this library, so there was nothing to index. ' +
-        'Zotero extracts a PDF the first time it is opened in the app; open some, then rebuild.',
-    );
-  }
+  // A library with nothing extracted used to return here, and that early return was itself
+  // the skip this ticket is about: it is precisely the case where EVERY attachment is
+  // present without text, and it recorded none of them. So the walk below still runs, on a
+  // much shorter leash (MAX_PENDING_PAGES), for the record alone.
+  const pageCeiling = total === 0 ? MAX_PENDING_PAGES : MAX_ATTACHMENT_PAGES;
 
   const byItem = new Map<string, string[]>();
+  const pending = new Set<string>();
   let mapped = 0;
   try {
     let start = 0;
-    for (let page = 0; page < MAX_ATTACHMENT_PAGES && mapped < total; page++) {
+    for (let page = 0; page < pageCeiling; page++) {
       const res = await ctx.router.searchItems({
         library,
         itemType: 'attachment',
@@ -95,9 +124,15 @@ export async function createFulltextSource(
       for (const it of items) {
         const d = it.data ?? it;
         const key = it.key ?? d.key;
-        if (!key || !(key in withText)) continue;
+        if (!key) continue;
         // A top-level attachment (no parent) is itself the indexed item.
         const parent = d.parentItem ?? key;
+        if (!(key in withText)) {
+          // Present without text: Zotero holds the attachment but has not extracted it
+          // (a PDF never opened in the app). Recorded, not skipped — see pendingItems.
+          if (pending.size < MAX_PENDING_ITEMS) pending.add(parent);
+          continue;
+        }
         const list = byItem.get(parent);
         if (list) list.push(key);
         else byItem.set(parent, [key]);
@@ -105,14 +140,21 @@ export async function createFulltextSource(
       }
       start += items.length;
       if (res.totalResults && start >= res.totalResults) break;
+      // Every attachment that HAS text has been located, so nothing further can be mapped.
+      // The pending record is best effort past this point — see FulltextSource.pendingItems.
+      if (total > 0 && mapped >= total) break;
     }
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
-    // Whatever was mapped before the failure is still usable; only say so when nothing was.
-    if (mapped === 0) {
+    if (total === 0) {
+      // No text was ever going to come of this walk; it was buying the pending record.
+      ctx.logger.debug(`Attachment walk stopped early while recording pending items: ${why}`);
+    } else if (mapped === 0) {
+      // Whatever was mapped before the failure is still usable; only say so when nothing was.
       return emptySource(`Attachments could not be listed (${why}). The index was built from metadata only.`);
+    } else {
+      ctx.logger.warn(`Full-text mapping stopped early after ${mapped}/${total} attachments: ${why}`);
     }
-    ctx.logger.warn(`Full-text mapping stopped early after ${mapped}/${total} attachments: ${why}`);
   }
 
   let failures = 0;
@@ -145,5 +187,21 @@ export async function createFulltextSource(
     return parts.length ? parts.join('\n\n') : undefined;
   };
 
-  return { textFor, attachments: mapped, items: byItem.size };
+  // An item with both an extracted attachment and an unextracted one is not pending: it
+  // already contributes body text, and a delta re-probing it would buy a second copy of
+  // what the index has. Pending means "this item has nothing indexed and might later".
+  for (const key of byItem.keys()) pending.delete(key);
+
+  if (total === 0) {
+    const waiting = pending.size
+      ? ` ${pending.size} item(s) hold an attachment awaiting extraction; a later refresh will index them.`
+      : '';
+    return emptySource(
+      'Zotero reports no attachments with extracted full text in this library, so there was nothing to index. ' +
+        `Zotero extracts a PDF the first time it is opened in the app; open some, then rebuild.${waiting}`,
+      [...pending],
+    );
+  }
+
+  return { textFor, attachments: mapped, items: byItem.size, pendingItems: [...pending] };
 }

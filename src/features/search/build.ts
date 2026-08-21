@@ -46,6 +46,16 @@ export function fulltextNotice(s: IndexBuildStatus): string {
 }
 
 /**
+ * Sentence appended when the *store* cannot hold vectors, whatever the embedder is doing.
+ * `embedderNotice` covers the producing end of that pipe and stays silent here, because
+ * the embedder is working perfectly: it is the index that has nowhere to put the output.
+ */
+export function vectorStorageNotice(s: IndexBuildStatus): string {
+  if (!s.vectorReason) return '';
+  return ` Vectors are not being stored: ${s.vectorReason}`;
+}
+
+/**
  * Sentence appended when the build limit stopped the crawl short of the library. Same
  * reasoning as `embedderNotice` and `fulltextNotice`: without it a capped build reports
  * `5000/5000` and reads as complete coverage, so a search that finds nothing in the
@@ -60,7 +70,7 @@ export function truncationNotice(s: IndexBuildStatus): string {
 
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
-  const notice = embedderNotice(s) + fulltextNotice(s) + truncationNotice(s);
+  const notice = embedderNotice(s) + vectorStorageNotice(s) + fulltextNotice(s) + truncationNotice(s);
   switch (s.state) {
     case 'building':
       return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
@@ -95,10 +105,13 @@ export interface BuildFulltextOptions {
  * the context (dataDir, plus the authenticated user in multi-tenant mode — see
  * `searchIndexPath`), never by the routed library id. So the local `users/0` addressing
  * cannot split the index from the one built against the real userID, and a build that
- * switched backends between runs stays coherent. Nothing here compares Zotero library
- * versions across backends either: `buildIncremental` always rebuilds from scratch and
- * reports `builtFromVersion` as the item count it fetched, so the local/cloud version
- * sequences (which differ — the desktop app has its own) are never mixed.
+ * switched backends between runs stays coherent.
+ *
+ * What DOES differ between the two is the version sequence, and that is now recorded
+ * rather than avoided. The build hands `buildIncremental` both the library version its
+ * first page carried and the label of the client that served it, so a later freshness
+ * check can tell a comparable watermark from an incomparable one instead of mixing two
+ * unrelated integer sequences. See `delta.ts`.
  */
 export function startIndexBuild(
   ctx: ToolContext,
@@ -109,17 +122,24 @@ export function startIndexBuild(
   // The configured limit is the ceiling; an explicit `maxItems` may only lower it.
   const configured = ctx.config.indexMaxItems;
   const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
+  // Resolved once, before any page is fetched, so the label recorded with the watermark
+  // names the client that actually served the crawl.
+  const backend = ctx.router.backendFor(lib);
   const fetchPage = async (start: number) => {
     // Page through the router, not the Web API directly: a running desktop app serves the
     // personal library key-free (users/0), so indexing needs no cloud key. The router still
     // sends group libraries — and everything else when the app is closed — to the cloud.
     // `lib` stays undefined for the default library so the router resolves it itself.
     const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true });
-    return { items: page.data, totalResults: page.totalResults };
+    return { items: page.data, totalResults: page.totalResults, libraryVersion: page.lastModifiedVersion };
   };
-  const persist = ctx.searchIndexPath
+  // No path means no JSON snapshot for this backend (see ToolContext.searchIndexPath), so
+  // no persist callback: buildIncremental's batch boundaries are the whole durability
+  // story there. Bound to a local so the narrowing survives into the closure.
+  const indexPath = ctx.searchIndexPath;
+  const persist = indexPath
     ? () =>
-        saveIndex(ctx.search, ctx.searchIndexPath).catch((e) =>
+        saveIndex(ctx.search, indexPath).catch((e) =>
           ctx.logger.warn(`Could not persist index: ${e instanceof Error ? e.message : String(e)}`),
         )
     : undefined;
@@ -134,6 +154,10 @@ export function startIndexBuild(
         source ??= createFulltextSource(ctx, lib, { maxChars }).then((src) => {
           if (src.unavailable) ctx.search.noteFulltextUnavailable(src.unavailable);
           else ctx.logger.info(`Full-text indexing: ${src.attachments} attachment(s) over ${src.items} item(s).`);
+          // Items whose attachments Zotero has not extracted yet. Recorded rather than
+          // silently skipped so "no text yet" stays distinguishable from "no attachment",
+          // and so a later delta has somewhere to look. See FulltextSource.pendingItems.
+          if (src.pendingItems.length) ctx.search.noteFulltextPending(src.pendingItems);
           return src;
         });
         return (await source).textFor(itemKey);
@@ -144,6 +168,7 @@ export function startIndexBuild(
     maxItems: cap,
     persist,
     fulltextFor,
+    backend,
     // A full-text index is far bigger, and persisting means re-serializing all of it. Save
     // less often so the write does not dominate the build.
     ...(wantFulltext ? { persistEveryItems: 500, persistEveryMs: 60_000 } : {}),

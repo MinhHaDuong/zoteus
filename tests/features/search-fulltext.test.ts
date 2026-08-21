@@ -4,6 +4,8 @@ import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import { createFulltextSource, DEFAULT_FULLTEXT_MAX_CHARS } from '../../src/features/search/fulltext-source.js';
 import { startIndexBuild, statusSummary, PAGE_SIZE } from '../../src/features/search/build.js';
 import { loadConfig } from '../../src/config.js';
+import { STORES } from './stores.js';
+import type { PassageStore } from '../../src/features/search/passage-store.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -23,9 +25,9 @@ function pager(library: any[], pageSize = 100) {
   return async (start: number) => ({ items: library.slice(start, start + pageSize), totalResults: library.length });
 }
 
-describe('SearchIndex full-text passages', () => {
+describe.each(STORES)('SearchIndex full-text passages [%s]', (_name, makeStore) => {
   it('indexes attachment body text and attributes the hit to the parent item', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     const final = await search.buildIncremental(pager(makeLibrary(3)), {
       fulltextFor: async (key) => (key === 'K1' ? BODY : undefined),
     });
@@ -48,7 +50,7 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('chunks body text at the larger full-text size and embeds every passage', async () => {
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
+    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger, store: makeStore() });
     const long = 'sedimentary layering in the outcrop. '.repeat(300); // ~11k chars
     const final = await search.buildIncremental(pager(makeLibrary(1)), { fulltextFor: async () => long });
 
@@ -58,7 +60,7 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('reports metadata-only when full text was never requested', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     const final = await search.buildIncremental(pager(makeLibrary(2)));
     expect(final.fulltextEnabled).toBe(false);
     expect(final.fulltextItems).toBe(0);
@@ -66,7 +68,7 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('keeps building when one item\'s full text fails, and never asks past the item cap', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     const asked: string[] = [];
     const final = await search.buildIncremental(pager(makeLibrary(50), 10), {
       maxItems: 12,
@@ -86,10 +88,10 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('round-trips full-text passages through persistence', async () => {
-    const a = new SearchIndex({ embedder: null, logger: silentLogger });
+    const a = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     await a.buildIncremental(pager(makeLibrary(2)), { fulltextFor: async (k) => (k === 'K0' ? BODY : undefined) });
 
-    const b = new SearchIndex({ embedder: null, logger: silentLogger });
+    const b = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     b.loadFromJSON(JSON.parse(JSON.stringify(a.toJSON())));
 
     const status = b.status();
@@ -109,6 +111,7 @@ function makeCtx(opts: {
   fulltext?: Record<string, any>;
   sinceThrows?: boolean;
   config?: Record<string, string>;
+  store?: PassageStore;
 } = {}) {
   const attachments = opts.attachments ?? [];
   const withText = opts.withText ?? {};
@@ -124,8 +127,15 @@ function makeCtx(opts: {
   });
   const ctx: any = {
     config: loadConfig((opts.config ?? {}) as any),
-    router: { fullTextSince, getFullText, searchItems, defaultLibrary: () => ({ type: 'user', id: 1 }) },
-    search: new SearchIndex({ embedder: null, logger: silentLogger }),
+    router: {
+      fullTextSince,
+      getFullText,
+      searchItems,
+      defaultLibrary: () => ({ type: 'user', id: 1 }),
+      // The build records which client served it, beside the library version.
+      backendFor: () => 'local' as const,
+    },
+    search: new SearchIndex({ embedder: null, logger: silentLogger, store: opts.store }),
     logger: silentLogger,
     searchIndexPath: '',
   };
@@ -222,7 +232,7 @@ describe('createFulltextSource', () => {
   });
 });
 
-describe('startIndexBuild with full text', () => {
+describe.each(STORES)('startIndexBuild with full text [%s]', (_name, makeStore) => {
   async function finished(search: SearchIndex): Promise<void> {
     for (let i = 0; i < 1000 && search.buildStatus().state === 'building'; i++) {
       await new Promise((r) => setTimeout(r, 2));
@@ -230,7 +240,7 @@ describe('startIndexBuild with full text', () => {
   }
 
   it('is off unless asked for, and ZOTEUS_INDEX_FULLTEXT is what asks by default', async () => {
-    const { ctx, fullTextSince } = makeCtx();
+    const { ctx, fullTextSince } = makeCtx({ store: makeStore() });
     ctx.router.searchItems = vi.fn(async (q: any) =>
       q.top
         ? { data: makeLibrary(2).slice(q.start ?? 0), totalResults: 2, lastModifiedVersion: 1 }
@@ -248,6 +258,7 @@ describe('startIndexBuild with full text', () => {
       withText: { ATT1: 9 },
       fulltext: { ATT1: { content: BODY } },
       config: { ZOTEUS_INDEX_FULLTEXT: 'true' },
+      store: makeStore(),
     });
     const items = makeLibrary(3);
     const listAttachments = ctx.router.searchItems;
@@ -271,7 +282,7 @@ describe('startIndexBuild with full text', () => {
   });
 
   it('says why a requested full-text build produced nothing', async () => {
-    const { ctx } = makeCtx({ sinceThrows: true });
+    const { ctx } = makeCtx({ sinceThrows: true, store: makeStore() });
     const items = makeLibrary(2);
     ctx.router.searchItems = vi.fn(async (q: any) => ({
       data: q.top ? items.slice(q.start ?? 0) : [],

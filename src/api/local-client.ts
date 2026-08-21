@@ -158,6 +158,27 @@ export class LocalApiClient {
   }
 
   /**
+   * key -> version for every object of `type` in the library (`?format=versions`), or only
+   * for those changed after `since`.
+   *
+   * This is how the search index finds DELETED items on the desktop app, because the
+   * obvious endpoint is not available to it: `/deleted?since=` is a cloud sync endpoint
+   * and the local API answers it with 404. The whole-library key set does the same job by
+   * subtraction — anything the index holds and this map does not, Zotero no longer has.
+   */
+  async versions(
+    type: 'items' | 'collections' | 'searches' | 'tags',
+    since: number | undefined,
+    lib?: LibraryRef,
+  ): Promise<Record<string, number>> {
+    const { json } = await this.getJson(
+      `${localLibraryPrefix(lib)}/${type}`,
+      this.buildQuery({ format: 'versions', since }),
+    );
+    return json;
+  }
+
+  /**
    * Group libraries the desktop app holds. Used to decide whether a group read can be
    * served locally: a group the cloud key can see but the desktop does not have must
    * still go to the Web API. Returns [] when the endpoint is absent (pre-Zotero-10).

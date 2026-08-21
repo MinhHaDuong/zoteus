@@ -6,6 +6,7 @@ import { SearchIndex } from '../../src/features/search/index-manager.js';
 import { FakeEmbeddingProvider, LocalEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import type { EmbeddingProvider } from '../../src/features/search/embeddings.js';
 import { saveIndex, loadIndex } from '../../src/features/search/persistence.js';
+import { STORES } from './stores.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -24,9 +25,9 @@ function tmpIndexFile(): string {
   return join(tmpdir(), `zoteus-search-async-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
 }
 
-describe('SearchIndex.buildIncremental', () => {
+describe.each(STORES)('SearchIndex.buildIncremental [%s]', (_name, makeStore) => {
   it('completes and reports live progress state transitions', async () => {
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
+    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger, store: makeStore() });
     expect(search.buildStatus().state).toBe('idle');
     const job = search.buildIncremental(pager(makeLibrary(30)), { maxItems: 30 });
     expect(search.isBuilding).toBe(true);
@@ -43,7 +44,7 @@ describe('SearchIndex.buildIncremental', () => {
   });
 
   it('rejects a concurrent build', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     const lib = makeLibrary(50);
     const j1 = search.buildIncremental(pager(lib));
     await expect(search.buildIncremental(pager(lib))).rejects.toThrow(/already in progress/i);
@@ -51,7 +52,7 @@ describe('SearchIndex.buildIncremental', () => {
   });
 
   it('records state=error with lastError when fetching fails, keeping partial data', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new SearchIndex({ embedder: null, logger: silentLogger, store: makeStore() });
     const fetchPage = vi.fn(async (start: number) => {
       if (start === 0) return { items: makeLibrary(10), totalResults: 30 };
       throw new Error('Web API exploded');
@@ -75,7 +76,7 @@ describe('SearchIndex.buildIncremental', () => {
         return texts.map(() => [1, 0, 0]);
       }),
     };
-    const search = new SearchIndex({ embedder: stalling, logger: silentLogger });
+    const search = new SearchIndex({ embedder: stalling, logger: silentLogger, store: makeStore() });
     const job = search.buildIncremental(pager(makeLibrary(400), 50));
     // Wait until we're mid-build (first page fetched, stalled in embedding).
     for (let i = 0; i < 500 && search.buildStatus().itemsFetched === 0; i++) await new Promise((r) => setTimeout(r, 2));
@@ -91,6 +92,12 @@ describe('SearchIndex.buildIncremental', () => {
   });
 });
 
+/**
+ * Memory-only on purpose: these two are about persistence.ts — the JSON snapshot's atomic
+ * rename and its mid-build readability — not about where passages are held. Ticket 0003
+ * retires that file, and the store's own toJSON/loadFromJSON path is covered against both
+ * backends by search.test.ts ('persists and reloads') and search-fulltext.test.ts.
+ */
 describe('incremental atomic persistence', () => {
   it('never leaves a corrupt index file mid-build and stays loadable', async () => {
     const library = makeLibrary(120);
@@ -201,7 +208,7 @@ describe('LocalEmbeddingProvider batching (fake extractor)', () => {
   });
 });
 
-describe('embedding failure falls back to keyword-only', () => {
+describe.each(STORES)('embedding failure falls back to keyword-only [%s]', (_name, makeStore) => {
   it('completes the build with vectors=0 when the embedder throws', async () => {
     const broken: EmbeddingProvider = {
       name: 'broken',
@@ -209,7 +216,7 @@ describe('embedding failure falls back to keyword-only', () => {
         throw new Error('model download failed');
       },
     };
-    const search = new SearchIndex({ embedder: broken, logger: silentLogger });
+    const search = new SearchIndex({ embedder: broken, logger: silentLogger, store: makeStore() });
     const final = await search.buildIncremental(pager(makeLibrary(20), 10));
     expect(final.state).toBe('done');
     expect(final.vectors).toBe(0);

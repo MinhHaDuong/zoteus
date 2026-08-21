@@ -4,6 +4,7 @@ import { VectorStore } from '../../src/features/search/vector-store.js';
 import { chunkText, chunkWithOffsets } from '../../src/features/search/chunker.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { STORES } from './stores.js';
 
 describe('BM25Index', () => {
   it('ranks the most relevant document first', () => {
@@ -45,9 +46,11 @@ const items = [
   { key: 'C', data: { itemType: 'journalArticle', title: 'Reinforcement learning', abstractNote: 'reward shaping for neural network policies', tags: [{ tag: 'rl' }] } },
 ];
 
-describe('SearchIndex (hybrid with fake embedder)', () => {
+// Upstream's own assertions, run against every passage backend: the FTS5 store has to
+// satisfy the definition of search this project already committed to, not a friendlier one.
+describe.each(STORES)('SearchIndex (hybrid with fake embedder) [%s]', (_name, makeStore) => {
   it('builds and returns item-cited hits', async () => {
-    const idx = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const idx = new SearchIndex({ embedder: new FakeEmbeddingProvider(), store: makeStore() });
     const status = await idx.build(items, { version: 3 });
     expect(status.items).toBe(3);
     expect(status.vectors).toBeGreaterThan(0);
@@ -58,7 +61,7 @@ describe('SearchIndex (hybrid with fake embedder)', () => {
   });
 
   it('works keyword-only when there is no embedder', async () => {
-    const idx = new SearchIndex({ embedder: null });
+    const idx = new SearchIndex({ embedder: null, store: makeStore() });
     await idx.build(items);
     expect(idx.status().vectors).toBe(0);
     const hits = await idx.query('tomatoes', { limit: 3 });
@@ -66,9 +69,9 @@ describe('SearchIndex (hybrid with fake embedder)', () => {
   });
 
   it('persists and reloads', async () => {
-    const a = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const a = new SearchIndex({ embedder: new FakeEmbeddingProvider(), store: makeStore() });
     await a.build(items);
-    const b = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const b = new SearchIndex({ embedder: new FakeEmbeddingProvider(), store: makeStore() });
     b.loadFromJSON(a.toJSON());
     expect(b.status().items).toBe(3);
     const hits = await b.query('gardening', { limit: 1 });
@@ -127,10 +130,10 @@ describe('SearchIndex embedder passthrough', () => {
   });
 });
 
-describe('snippet quality (W5)', () => {
+describe.each(STORES)('snippet quality (W5) [%s]', (_name, makeStore) => {
   it('centres the snippet on the query and does not start mid-word', async () => {
     const longAbstract = 'padding '.repeat(80) + 'the Gauss Newton Hessian decomposition matters here ' + 'tail '.repeat(80);
-    const idx = new SearchIndex({ embedder: null });
+    const idx = new SearchIndex({ embedder: null, store: makeStore() });
     await idx.build([{ key: 'Z', data: { itemType: 'journalArticle', title: 'Opt', abstractNote: longAbstract } }]);
     const hits = await idx.query('Hessian decomposition', { limit: 1 });
     expect(hits[0].snippet.toLowerCase()).toContain('hessian');

@@ -3,14 +3,19 @@ export interface VectorHit {
   score: number;
 }
 
-interface Entry {
+/**
+ * One stored vector. Exported because it is the currency of the JSON snapshot
+ * (`SearchIndex.toJSON().vectors`), which now travels through the PassageStore port
+ * rather than reaching into this class directly.
+ */
+export interface VectorEntry {
   id: string;
   vector: number[];
 }
 
 /** Brute-force cosine-similarity vector store (fine for a personal library). */
 export class VectorStore {
-  private entries: Entry[] = [];
+  private entries: VectorEntry[] = [];
 
   get size(): number {
     return this.entries.length;
@@ -18,6 +23,19 @@ export class VectorStore {
 
   add(id: string, vector: number[]): void {
     this.entries.push({ id, vector });
+  }
+
+  /**
+   * Drop every vector whose id is in `ids`. Added for PassageStore.deleteByItem: a vector
+   * that outlives its passage is a hit pointing at nothing, and SearchIndex.query drops
+   * such an id silently — a lost result with no trace of why.
+   *
+   * One filtering pass rather than a splice per id: the caller removes a whole item's
+   * passages at once, so the linear scan is paid once per item, not once per passage.
+   */
+  deleteMany(ids: ReadonlySet<string>): void {
+    if (ids.size === 0) return;
+    this.entries = this.entries.filter((e) => !ids.has(e.id));
   }
 
   search(query: number[], topK = 10): VectorHit[] {
@@ -30,11 +48,11 @@ export class VectorStore {
       .slice(0, topK);
   }
 
-  toJSON(): Entry[] {
+  toJSON(): VectorEntry[] {
     return this.entries;
   }
 
-  static fromJSON(entries: Entry[]): VectorStore {
+  static fromJSON(entries: VectorEntry[]): VectorStore {
     const vs = new VectorStore();
     vs.entries = entries ?? [];
     return vs;

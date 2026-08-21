@@ -35,8 +35,13 @@ export interface ToolContext {
   /** Shared rate-limited fetcher (used by built-in import resolution). */
   fetcher: RateLimitedFetcher;
   logger: Logger;
-  /** Absolute path to this context's semantic-search index file (per-user in multi-tenant mode). */
-  searchIndexPath: string;
+  /**
+   * Absolute path to this context's JSON search-index file (per-user in multi-tenant
+   * mode), and undefined under ZOTEUS_SEARCH_BACKEND=sqlite, where the database is the
+   * state and there is no snapshot to write. Every reader must treat absent as "this
+   * backend does not do JSON snapshots", not as a misconfiguration.
+   */
+  searchIndexPath?: string;
   /** Release update check (operator context only); zotero_whoami surfaces its result. */
   updates?: UpdateChecker;
   /** Lightweight catalog of all registered tools (for search_tools discovery). */

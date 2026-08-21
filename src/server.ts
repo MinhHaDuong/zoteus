@@ -14,6 +14,8 @@ import { join } from 'node:path';
 import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
 import { SearchIndex } from './features/search/index-manager.js';
+import { SqliteSearchIndex, defaultSearchDbPath } from './features/search/sqlite-index.js';
+import { maybeMigrateJsonIndex } from './features/search/migrate-json.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
 import { loadIndex, saveIndex } from './features/search/persistence.js';
 import { ScholarGraph } from './features/scholar/graph.js';
@@ -87,18 +89,39 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   // desktop bundle that cannot carry @huggingface/transformers) is reported as inactive
   // from the first status call, rather than discovered as a silently empty vector set.
   const embedding = createEmbeddingProvider(config, logger);
-  const search = new SearchIndex({
+  const searchOpts = {
     embedder: embedding.provider,
     configured: embedding.configured,
     unavailable: embedding.unavailable,
     logger,
-  });
-
-  const searchIndexPath = join(
+  };
+  // Both backends are wired at once and selected here; nothing downstream branches on the
+  // choice except through `searchIndexPath` below.
+  const sqliteBackend = config.searchBackend === 'sqlite';
+  const jsonIndexPath = join(
     config.dataDir,
     overrides.zoteroUserId !== undefined ? `search-index-${overrides.zoteroUserId}.json` : 'search-index.json',
   );
-  await loadIndex(search, searchIndexPath).catch(() => false);
+  const searchDbPath = defaultSearchDbPath(config.dataDir, overrides.zoteroUserId);
+  // Before the index is constructed, never after: the migration renames a finished
+  // database over `searchDbPath`, and renaming a file out from under an open connection is
+  // how you get a handle onto an inode nobody can find. A user switching backends therefore
+  // keeps the index they already built instead of facing a rebuild of the whole library.
+  // Deliberately not caught — see maybeMigrateJsonIndex on why a failure here is fatal.
+  if (sqliteBackend) {
+    await maybeMigrateJsonIndex({ jsonPath: jsonIndexPath, dbPath: searchDbPath, logger });
+  }
+  const search = sqliteBackend
+    ? new SqliteSearchIndex({ ...searchOpts, dbPath: searchDbPath })
+    : new SearchIndex(searchOpts);
+
+  // Undefined on the SQLite backend, and that absence is the switch: it is what stops
+  // `startIndexBuild` from building a persist callback and what makes `flushIndexes` skip
+  // this context. There is nothing to load either — the rows committed by the last build
+  // are already open in front of us, which is the whole point of moving them out of the
+  // heap. Reading search-index.json here would spend the memory the backend exists to save.
+  const searchIndexPath = sqliteBackend ? undefined : jsonIndexPath;
+  if (searchIndexPath) await loadIndex(search, searchIndexPath).catch(() => false);
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
   const ctx: ToolContext = {
@@ -216,7 +239,9 @@ export class ContextCache {
   /** Persist every live context's search index (operator + per-user). Best-effort. */
   async flushIndexes(): Promise<void> {
     const ctxs = [this.operatorCtx, ...[...this.entries.values()].map((e) => e.ctx)];
-    await Promise.allSettled(ctxs.map((c) => saveIndex(c.search, c.searchIndexPath)));
+    await Promise.allSettled(
+      ctxs.map((c) => (c.searchIndexPath ? saveIndex(c.search, c.searchIndexPath) : Promise.resolve())),
+    );
   }
 
   private evictIfNeeded(): void {

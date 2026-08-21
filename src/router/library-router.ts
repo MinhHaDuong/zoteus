@@ -57,6 +57,43 @@ export class LibraryRouter {
     return this.capabilities.localGroupIds.includes(library.id);
   }
 
+  /**
+   * Which client answers reads for this library — the desktop app or the cloud.
+   *
+   * Public, where `useLocal` is private, because the search index has to record it beside
+   * the library version it built from. The two clients keep unrelated version sequences,
+   * so a watermark compared across a switch is worse than no watermark at all. See
+   * `features/search/index-manager.ts`, IndexBackend.
+   */
+  backendFor(library?: LibraryRef): 'local' | 'web' {
+    return this.useLocal(library ?? this.defaultLibrary()) ? 'local' : 'web';
+  }
+
+  /**
+   * The library's current version, in ONE request.
+   *
+   * Both APIs stamp every list response with `Last-Modified-Version`, so a one-item page
+   * is the cheapest way to ask; there is no dedicated endpoint for it. This is the whole
+   * cost of the freshness check when nothing has changed.
+   */
+  async libraryVersion(opts: ReadOpts = {}): Promise<number> {
+    const res = await this.searchItems({ library: opts.library, limit: 1 });
+    return res.lastModifiedVersion;
+  }
+
+  /**
+   * key -> version for every item in the library, or for those changed after `since`.
+   *
+   * Routed like every other read, and the routing matters here more than usual: the
+   * cloud's `/deleted?since=` has no local equivalent (the desktop API 404s it), so this
+   * is the only endpoint that can tell a locally-served index what has been deleted.
+   */
+  async itemVersions(opts: ReadOpts & { since?: number } = {}): Promise<Record<string, number>> {
+    const lib = opts.library ?? this.defaultLibrary();
+    if (this.useLocal(lib)) return this.local!.versions('items', opts.since, lib);
+    return this.web.versions(lib, 'items', opts.since);
+  }
+
   async searchItems(query: ItemQuery & ReadOpts = {}): Promise<ListResult> {
     const { library, ...q } = query;
     const lib = library ?? this.defaultLibrary();

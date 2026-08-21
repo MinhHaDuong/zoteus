@@ -1,7 +1,36 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
-import { embedderNotice, fulltextNotice, progressLine, startIndexBuild } from '../features/search/build.js';
+import {
+  embedderNotice,
+  fulltextNotice,
+  progressLine,
+  startIndexBuild,
+  vectorStorageNotice,
+} from '../features/search/build.js';
+import { refreshIndexIfStale, type RefreshOutcome } from '../features/search/delta.js';
+
+/**
+ * A sentence about the index's currency, and only when it is not the boring answer.
+ *
+ * Same reasoning as embedderNotice: a search served from an index that could not be
+ * brought up to date is indistinguishable from one served from a current index, and the
+ * difference is precisely whether a missing result means "not in your library".
+ */
+function refreshNotice(r: RefreshOutcome): string {
+  switch (r.state) {
+    case 'applied':
+      return ` The index was brought up to date first (${r.reindexed} item(s) re-indexed, ${r.removed} removed).`;
+    case 'rebuilding':
+      return ` The index is being rebuilt in the background (${r.detail ?? 'watermark unusable'}); results may be partial until zotero_index action:"status" reports "done".`;
+    case 'unreachable':
+      return ' Zotero could not be reached to check for changes, so these results come from the index as it was last built.';
+    case 'skipped':
+      return ` The index could not be brought up to date (${r.detail ?? 'delta abandoned'}); these results come from the index as it was last built.`;
+    default:
+      return '';
+  }
+}
 
 const semanticSearch: ToolDefinition = {
   name: 'zotero_semantic_search',
@@ -19,6 +48,16 @@ const semanticSearch: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
+    // Before anything else, and before the isEmpty check below, because a backend switch
+    // or an unusable watermark starts a rebuild here — after which the index IS empty and
+    // the auto-build branch is exactly the right thing to report.
+    //
+    // Bounded three ways, and none of them can turn a search into a failure: it stands
+    // down while a build is running, it is raced against a wall-clock deadline, and an
+    // unreachable Zotero degrades to serving the current index rather than erroring. When
+    // nothing has changed it costs one request. See features/search/delta.ts.
+    const refresh = await refreshIndexIfStale(ctx);
+
     if (ctx.search.isEmpty) {
       // A build is already on its way (started here or via zotero_index): report progress.
       if (ctx.search.isBuilding) {
@@ -72,9 +111,15 @@ const semanticSearch: ToolDefinition = {
     // empty list, which reads exactly like "your library has nothing on this": the failure
     // mode reported in #7. Refuse instead, and name the cause.
     if (args.mode === 'semantic' && !ctx.search.hasVectors) {
-      const why = ctx.search.embedderActive
-        ? 'The index holds no vectors yet. Rebuild it with zotero_index action:"build" (an index built while the embedder was unavailable stays keyword-only until rebuilt).'
-        : `No vectors exist because the embedder is not active: ${ctx.search.embedderReason ?? 'unavailable'}`;
+      // Three distinct causes, and telling the user the wrong one sends them into a
+      // pointless rebuild: the embedder may be down, the *store* may be unable to hold
+      // vectors however well the embedder runs, or both may be fine and the index simply
+      // predates them. The store reason comes first because a rebuild will not fix it.
+      const why = ctx.search.vectorStorageReason
+        ? `No vectors are being stored: ${ctx.search.vectorStorageReason}`
+        : ctx.search.embedderActive
+          ? 'The index holds no vectors yet. Rebuild it with zotero_index action:"build" (an index built while the embedder was unavailable stays keyword-only until rebuilt).'
+          : `No vectors exist because the embedder is not active: ${ctx.search.embedderReason ?? 'unavailable'}`;
       return {
         content: [
           {
@@ -90,6 +135,7 @@ const semanticSearch: ToolDefinition = {
           embedderConfigured: status.embedderConfigured,
           embedderActive: status.embedderActive,
           ...(status.embedderReason ? { embedderReason: status.embedderReason } : {}),
+          ...(status.vectorReason ? { vectorReason: status.vectorReason } : {}),
           vectors: status.vectors,
         },
         isError: true,
@@ -102,7 +148,8 @@ const semanticSearch: ToolDefinition = {
       (hits.length
         ? `Top ${hits.length} match(es) for "${args.q}" (${ctx.search.embedderName}).`
         : `No matches for "${args.q}".`) +
-      (args.mode === 'keyword' ? '' : embedderNotice(after)) +
+      refreshNotice(refresh) +
+      (args.mode === 'keyword' ? '' : embedderNotice(after) + vectorStorageNotice(after)) +
       fulltextNotice(after);
     return ok(
       {
@@ -111,8 +158,12 @@ const semanticSearch: ToolDefinition = {
         embedderConfigured: after.embedderConfigured,
         embedderActive: after.embedderActive,
         ...(after.embedderReason ? { embedderReason: after.embedderReason } : {}),
+        ...(after.vectorReason ? { vectorReason: after.vectorReason } : {}),
         fulltextEnabled: after.fulltextEnabled,
         ...(after.fulltextReason ? { fulltextReason: after.fulltextReason } : {}),
+        indexRefresh: refresh.state,
+        builtFromVersion: after.builtFromVersion,
+        ...(after.indexBackend ? { indexBackend: after.indexBackend } : {}),
       },
       summary,
     );

@@ -17,6 +17,17 @@ describe('loadConfig', () => {
     expect(cfg.readOnly).toBe(false);
     expect(cfg.scholarProviders).toEqual(['openalex']);
     expect(typeof cfg.dataDir).toBe('string');
+    // The SQLite backend shadows the resident index, it does not replace it: an install
+    // that says nothing keeps search-index.json and the behaviour it already had.
+    expect(cfg.searchBackend).toBe('json');
+  });
+
+  it('selects the SQLite search backend, and rejects an unknown one', () => {
+    expect(loadConfig({ ZOTEUS_SEARCH_BACKEND: 'sqlite' } as unknown as NodeJS.ProcessEnv).searchBackend).toBe('sqlite');
+    expect(loadConfig({ ZOTEUS_SEARCH_BACKEND: 'json' } as unknown as NodeJS.ProcessEnv).searchBackend).toBe('json');
+    // A typo must be loud at startup rather than silently leaving the user on the backend
+    // they were trying to leave.
+    expect(() => loadConfig({ ZOTEUS_SEARCH_BACKEND: 'fts5' } as unknown as NodeJS.ProcessEnv)).toThrow();
   });
 
   it('reads values from env and coerces types', () => {
