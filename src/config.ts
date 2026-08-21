@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { defaultDataDir } from './lib/paths.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from './features/search/fulltext-source.js';
+import { DEFAULT_INDEX_MAX_ITEMS } from './features/search/limits.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
@@ -18,6 +19,8 @@ export interface ZoteusConfig {
   indexFulltext: boolean;
   /** Cap on indexed full-text characters per item (0 = no cap). */
   indexFulltextMaxChars: number;
+  /** Cap on items per index build. Raise it for libraries larger than the default. */
+  indexMaxItems: number;
   scholarProviders: string[];
   dataDir: string;
   contactEmail?: string;
@@ -87,6 +90,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTEUS_TRANSFORMERS_PATH: z.string().optional(),
     ZOTEUS_INDEX_FULLTEXT: bool(false),
     ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: z.coerce.number().int().nonnegative().default(DEFAULT_FULLTEXT_MAX_CHARS),
+    ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
     ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
     ZOTEUS_DATA_DIR: z.string().optional(),
     ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
@@ -167,6 +171,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
+    indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     scholarProviders: parsed.ZOTEUS_SCHOLAR_PROVIDERS.split(',')
       .map((s) => s.trim())
       .filter(Boolean),

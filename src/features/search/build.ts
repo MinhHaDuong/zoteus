@@ -3,15 +3,23 @@ import type { LibraryRef } from '../../api/web-client.js';
 import type { IndexBuildStatus } from './index-manager.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
 import { saveIndex } from './persistence.js';
+import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
 
-/** Hard cap on items per build — keeps very large libraries bounded. */
-export const MAX_ITEMS = 5000;
+/**
+ * Default cap on items per build — keeps very large libraries bounded. Re-exported from
+ * `limits.ts`; raise it at runtime with `ZOTEUS_INDEX_MAX_ITEMS`.
+ *
+ * @deprecated Read `ctx.config.indexMaxItems` instead: this is the default, not the cap
+ * in force. Kept so existing importers still resolve.
+ */
+export const MAX_ITEMS = DEFAULT_INDEX_MAX_ITEMS;
 /** Both Zotero APIs (cloud Web API and desktop local API) page items 100-at-a-time. */
 export const PAGE_SIZE = 100;
 
 /** One-line progress summary used in tool messages and status output. */
 export function progressLine(s: IndexBuildStatus): string {
-  const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
+  const capped = s.itemsAvailable > s.itemsTotal;
+  const total = s.itemsTotal > 0 ? `${s.itemsTotal}${capped ? ` of ${s.itemsAvailable}` : ''}` : '?';
   const fulltext = s.fulltextEnabled ? `, full text of ${s.fulltextItems} items (${s.fulltextPassages} passages)` : '';
   return `${s.itemsFetched}/${total} items, ${s.passages} passages, ${s.vectors} vectors${fulltext} (embedder=${s.embedder})`;
 }
@@ -37,9 +45,22 @@ export function fulltextNotice(s: IndexBuildStatus): string {
   return ` Full-text indexing produced nothing: ${s.fulltextReason}`;
 }
 
+/**
+ * Sentence appended when the build limit stopped the crawl short of the library. Same
+ * reasoning as `embedderNotice` and `fulltextNotice`: without it a capped build reports
+ * `5000/5000` and reads as complete coverage, so a search that finds nothing in the
+ * unindexed remainder is indistinguishable from a search over a library that holds
+ * nothing on the subject.
+ */
+export function truncationNotice(s: IndexBuildStatus): string {
+  if (s.itemsAvailable <= s.itemsTotal) return '';
+  const missing = s.itemsAvailable - s.itemsTotal;
+  return ` Only the first ${s.itemsTotal} of ${s.itemsAvailable} items were indexed — ${missing} are NOT searchable. Raise ZOTEUS_INDEX_MAX_ITEMS and rebuild to cover them.`;
+}
+
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
-  const notice = embedderNotice(s) + fulltextNotice(s);
+  const notice = embedderNotice(s) + fulltextNotice(s) + truncationNotice(s);
   switch (s.state) {
     case 'building':
       return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
@@ -82,10 +103,12 @@ export interface BuildFulltextOptions {
 export function startIndexBuild(
   ctx: ToolContext,
   lib?: LibraryRef,
-  maxItems = MAX_ITEMS,
+  maxItems?: number,
   opts: BuildFulltextOptions = {},
 ): IndexBuildStatus {
-  const cap = Math.min(maxItems, MAX_ITEMS);
+  // The configured limit is the ceiling; an explicit `maxItems` may only lower it.
+  const configured = ctx.config.indexMaxItems;
+  const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
   const fetchPage = async (start: number) => {
     // Page through the router, not the Web API directly: a running desktop app serves the
     // personal library key-free (users/0), so indexing needs no cloud key. The router still

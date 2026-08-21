@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
-import { MAX_ITEMS, progressLine, startIndexBuild, statusSummary } from '../features/search/build.js';
+import { progressLine, startIndexBuild, statusSummary } from '../features/search/build.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from '../features/search/fulltext-source.js';
 import type { LibraryRef } from '../api/web-client.js';
 
@@ -18,9 +18,11 @@ const indexTool: ToolDefinition = {
       .number()
       .int()
       .min(1)
-      .max(MAX_ITEMS)
       .optional()
-      .describe(`Max items to index (default ${MAX_ITEMS}, which is also the hard cap).`),
+      .describe(
+        'Max items to index. Lowers the configured cap for this build only; it cannot raise it. ' +
+          'The cap defaults to 5000 and is set by ZOTEUS_INDEX_MAX_ITEMS.',
+      ),
     fulltext: z
       .boolean()
       .optional()
@@ -66,7 +68,7 @@ const indexTool: ToolDefinition = {
     const lib: LibraryRef | undefined = args.library_id
       ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
       : undefined;
-    const maxItems = Math.min(args.limit ?? MAX_ITEMS, MAX_ITEMS);
+    const maxItems = Math.min(args.limit ?? ctx.config.indexMaxItems, ctx.config.indexMaxItems);
     const fulltext = args.fulltext ?? ctx.config.indexFulltext;
     const s = startIndexBuild(ctx, lib, maxItems, {
       fulltext,
