@@ -1,7 +1,7 @@
 import type { VectorEntry, VectorHit } from './vector-store.js';
 import { MemoryPassageStore, type ChunkRecord, type PassageStore } from './passage-store.js';
 import { chunkText } from './chunker.js';
-import { tokenize } from './tokenize.js';
+import { normalizeForSearch, tokenize } from './tokenize.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import { Semaphore } from '../../lib/semaphore.js';
 import type { Logger } from '../../lib/logger.js';
@@ -250,7 +250,12 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
 export function makeSnippet(text: string, query: string, max = 240): string {
   const clean = text.replace(/\s+/g, ' ').trim();
   if (clean.length <= max) return clean;
-  const lower = clean.toLowerCase();
+  // Folded the same way the query is, or an accented query would locate nothing and every
+  // snippet of a French passage would start at character zero. These are offsets into
+  // `clean`, so the folded form is only usable while it is the same length — which it is
+  // for precomposed text, NFD/NFC being a round trip there. The guard covers the rest.
+  const folded = normalizeForSearch(clean);
+  const lower = folded.length === clean.length ? folded : clean.toLowerCase();
   let pos = -1;
   for (const t of tokenize(query)) {
     const i = lower.indexOf(t);

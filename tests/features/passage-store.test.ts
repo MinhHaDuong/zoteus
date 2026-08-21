@@ -186,16 +186,18 @@ describe('Fts5PassageStore specifics', () => {
     expect(store.search('eleve', 5).map((h) => h.id)).toEqual(['F#0']);
   });
 
-  it('does NOT fold diacritics on the query side, because the sanitiser is ASCII-only', () => {
-    // Documented limitation, not an oversight. toMatchQuery deliberately tokenises with the
-    // index's own tokenize(), which matches [a-z0-9]+ — so an accented *query* is shredded
-    // ("élève" -> "ve") before FTS5 ever sees it, and remove_diacritics only helps in the
-    // ASCII-query -> accented-document direction. Diverging the query tokenizer from the
-    // index tokenizer would fix it and would also desynchronise the two backends' term
-    // sets, which is the thing the shared tokenizer exists to prevent.
+  it('folds diacritics on the query side too, so the accented spelling reaches it', () => {
+    // Ticket 0002 asserted the opposite here, and called it a documented limitation: an
+    // accented query was shredded ("élève" -> "ve") by a tokenize() matching [a-z0-9]+, so
+    // remove_diacritics only helped in the ASCII-query -> accented-document direction.
+    // That reasoning assumed the only repair was to diverge the query tokenizer from the
+    // index tokenizer, which is what the shared tokenizer exists to prevent. Ticket 0009
+    // took the third option instead — normalise in front of the shared tokenizer, so both
+    // sides fold and the tokenizers stay identical — and this assertion is inverted rather
+    // than dropped, because the old one recorded a real property that has now changed.
     const store = new Fts5PassageStore(':memory:');
     store.add({ id: 'F#0', itemKey: 'F', title: 'Scolarité', text: 'un élève très appliqué' });
-    expect(store.search('élève', 5)).toEqual([]);
+    expect(store.search('élève', 5).map((h) => h.id)).toEqual(['F#0']);
   });
 
   it('replaces rather than duplicates when the same id is added twice', () => {

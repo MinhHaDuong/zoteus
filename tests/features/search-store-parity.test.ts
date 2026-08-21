@@ -23,7 +23,8 @@ const CORPUS = [
   { key: 'F', data: { itemType: 'book', title: 'Bayesian inference', abstractNote: 'markov chain monte carlo sampling for posterior distributions' } },
   { key: 'G', data: { itemType: 'journalArticle', title: 'Sedimentary geology', abstractNote: 'layering in the outcrop records ancient river deltas and floodplains' } },
   { key: 'H', data: { itemType: 'journalArticle', title: 'Urban transport modelling', abstractNote: 'travel demand elasticity and congestion pricing in metropolitan networks' } },
-  // Accented, with the unaccented spelling alongside it: see the diacritics note below.
+  // Accented, with the unaccented spelling alongside it: kept from ticket 0002, when the
+  // JS index could only reach this item through the plain spelling. See the note below.
   { key: 'I', data: { itemType: 'thesis', title: 'Suivi scolaire', abstractNote: "le niveau de l'eleve progresse quand un élève motivé lit davantage" } },
   { key: 'J', data: { itemType: 'journalArticle', title: 'Protein folding', abstractNote: 'alphafold predicts tertiary structure from amino acid sequence alignments' } },
 ];
@@ -39,7 +40,8 @@ const QUERIES = [
   'river deltas outcrop',
   'congestion pricing networks',
   'amino acid sequence',
-  'eleve', // accented corpus, exercising unicode61 remove_diacritics 2
+  'eleve', // accented corpus: unicode61 remove_diacritics 2 on one side, the JS fold on both
+  'élève', // and the same query accented — the direction ticket 0009 repaired
   "d'eau", // apostrophe: hostile to MATCH, and absent from the corpus on both sides
   'the a of', // nothing survives tokenisation on either side
 ];
@@ -66,24 +68,29 @@ describe('retrieval parity: FTS5 store against the JS index', () => {
     expect(candidate.length === 0).toBe(reference.length === 0);
   });
 
-  it('finds the accented item from an ASCII query on both sides, for different reasons', async () => {
-    // FTS5 gets there through remove_diacritics 2, which normalises élève to eleve at index
-    // time. The JS index gets there only because the passage also spells "eleve" plainly:
-    // tokenize() matches [a-z0-9]+, so it stores "l" and "ve" for the accented spelling and
-    // could never match otherwise. Parity here is a coincidence of the fixture, and the
-    // next test is what actually pins the FTS5 behaviour.
+  it('finds the accented item from an ASCII query on both sides, now for the same reason', async () => {
+    // Both sides fold: FTS5 through remove_diacritics 2 at index time, the JS index through
+    // tokenize()'s own normalizeForSearch on both sides. Before ticket 0009 the JS index
+    // passed this only because the fixture also spells "eleve" plainly — parity was a
+    // coincidence of the corpus, which is why the next test drops that crutch.
     expect((await js.query('eleve', { limit: 3 }))[0]!.itemKey).toBe('I');
     expect((await fts.query('eleve', { limit: 3 }))[0]!.itemKey).toBe('I');
   });
 
-  it('reaches a purely accented passage that the JS index cannot', async () => {
+  it('reaches a purely accented passage on both backends, from either spelling', async () => {
+    // Ticket 0002 asserted here that the JS index returned nothing where FTS5 returned the
+    // item, and 0001's invariant carried that as a stated exception. Ticket 0009 removed
+    // the exception rather than the test: the fold now happens in JS, in front of the
+    // tokenizer both stores share, so the two backends answer the same on both spellings.
     const accented = [{ key: 'X', data: { itemType: 'thesis', title: 'Scolarité', abstractNote: 'un élève très appliqué' } }];
     const jsOnly = new SearchIndex({ embedder: null, store: new MemoryPassageStore() });
     const ftsOnly = new SearchIndex({ embedder: null, store: new Fts5PassageStore(':memory:') });
     await jsOnly.build(accented);
     await ftsOnly.build(accented);
-    expect(await jsOnly.query('eleve', { limit: 3 })).toEqual([]);
-    expect((await ftsOnly.query('eleve', { limit: 3 }))[0]!.itemKey).toBe('X');
+    for (const spelling of ['eleve', 'élève']) {
+      expect((await jsOnly.query(spelling, { limit: 3 }))[0]!.itemKey).toBe('X');
+      expect((await ftsOnly.query(spelling, { limit: 3 }))[0]!.itemKey).toBe('X');
+    }
   });
 });
 

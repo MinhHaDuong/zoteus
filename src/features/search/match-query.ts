@@ -12,10 +12,13 @@ import { tokenize } from './tokenize.js';
  *
  * Two decisions are worth naming:
  *
- * - Tokenising with the SAME `tokenize()` the JS index uses (lowercase, split on
+ * - Tokenising with the SAME `tokenize()` the JS index uses (fold, split on
  *   non-alphanumerics, drop stopwords and 1-char tokens) means the surviving tokens are
- *   `[a-z0-9]+` by construction. There is consequently nothing left to escape: quoting is
- *   belt-and-braces, and the two backends see the same query terms.
+ *   `[\p{L}\p{N}]+` by construction. Every character of FTS5's query language is ASCII
+ *   punctuation, so there is still nothing left to escape: quoting is belt-and-braces, and
+ *   the two backends see the same query terms. Since ticket 0009 the fold is what makes
+ *   that second clause true of accented text — `théorie` used to arrive here as
+ *   `"th" OR "orie"`, which is a different query, not a coarser one.
  * - Joining with ` OR ` settles the semantics. FTS5 defaults to an implicit AND between
  *   terms; zoteus's BM25 sums per-term contributions, i.e. it ORs. Matching today's
  *   behaviour is the point of the exercise, so OR wins.
