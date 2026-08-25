@@ -63,6 +63,13 @@ export interface IndexBuildStatus extends SearchIndexStatus {
   itemsFetched: number;
   /** Total items expected (0 = not yet known). Capped by the build limit. */
   itemsTotal: number;
+  /**
+   * Items the library actually holds, before the build limit is applied (0 = not yet
+   * known). Kept apart from `itemsTotal` so a truncated build stays legible: with only
+   * the capped figure, a build that stopped at the limit reports `5000/5000` and is
+   * indistinguishable from one that indexed the whole library.
+   */
+  itemsAvailable: number;
   /** Passages indexed so far (alias of documents). */
   passages: number;
   /** Set when state === 'error'. */
@@ -200,6 +207,7 @@ export class SearchIndex {
   private buildState: BuildState = 'idle';
   private itemsFetched = 0;
   private itemsTotal = 0;
+  private itemsAvailable = 0;
   private lastBuildError: string | undefined = undefined;
   private cancelToken: { cancelled: boolean } | null = null;
   /**
@@ -279,6 +287,7 @@ export class SearchIndex {
       state: this.buildState,
       itemsFetched: this.itemsFetched,
       itemsTotal: this.itemsTotal,
+      itemsAvailable: this.itemsAvailable,
     };
     if (this.buildState === 'error' && this.lastBuildError) s.lastError = this.lastBuildError;
     return s;
@@ -391,6 +400,7 @@ export class SearchIndex {
     this.fulltextUnavailable = undefined;
     this.itemsFetched = 0;
     this.itemsTotal = 0;
+    this.itemsAvailable = 0;
     const token = { cancelled: false };
     this.cancelToken = token;
     this.reset();
@@ -466,6 +476,7 @@ export class SearchIndex {
         const pageItems = page.items ?? [];
         if (pageItems.length === 0) break;
         if (!this.itemsTotal && page.totalResults) {
+          this.itemsAvailable = page.totalResults;
           this.itemsTotal = maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
         }
         // Only the items that still fit under the cap are worth fetching full text for.
