@@ -124,7 +124,13 @@ function makeCtx(opts: {
   });
   const ctx: any = {
     config: loadConfig((opts.config ?? {}) as any),
-    router: { fullTextSince, getFullText, searchItems, defaultLibrary: () => ({ type: 'user', id: 1 }) },
+    router: {
+      fullTextSince,
+      getFullText,
+      searchItems,
+      servesLocally: () => false,
+      defaultLibrary: () => ({ type: 'user', id: 1 }),
+    },
     search: new MemorySearchIndex({ embedder: null, logger: silentLogger }),
     logger: silentLogger,
     searchIndexPath: '',

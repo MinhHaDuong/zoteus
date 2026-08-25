@@ -12,9 +12,15 @@ export interface BM25Hit {
   score: number;
 }
 
-/** A compact in-memory BM25 index over short documents/passages. */
+/**
+ * A compact in-memory BM25 index over short documents/passages.
+ *
+ * Documents are held by id rather than in a list so a single passage can be removed in
+ * place: an incremental update re-indexes only the items that changed, and leaving stale
+ * postings behind would keep a deleted item findable and skew every idf in the index.
+ */
 export class BM25Index {
-  private readonly docs: Doc[] = [];
+  private readonly docs = new Map<string, Doc>();
   private readonly df = new Map<string, number>();
   private totalLength = 0;
 
@@ -24,25 +30,42 @@ export class BM25Index {
   ) {}
 
   get size(): number {
-    return this.docs.length;
+    return this.docs.size;
   }
 
   addDoc(id: string, text: string): void {
+    // Re-adding an id replaces it: the caller's ids are content-derived, so a re-chunked
+    // item reuses them and two copies of the same passage would double its term counts.
+    this.removeDoc(id);
     const tokens = tokenize(text);
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     for (const term of tf.keys()) this.df.set(term, (this.df.get(term) ?? 0) + 1);
-    this.docs.push({ id, tokens, length: tokens.length, tf });
+    this.docs.set(id, { id, tokens, length: tokens.length, tf });
     this.totalLength += tokens.length;
   }
 
-  search(query: string, topK = 10): BM25Hit[] {
-    if (this.docs.length === 0) return [];
-    const qTerms = [...new Set(tokenize(query))];
-    const avgdl = this.totalLength / this.docs.length;
-    const N = this.docs.length;
+  /** Remove one document and its postings. Returns false when the id was not indexed. */
+  removeDoc(id: string): boolean {
+    const doc = this.docs.get(id);
+    if (!doc) return false;
+    for (const term of doc.tf.keys()) {
+      const n = (this.df.get(term) ?? 0) - 1;
+      if (n > 0) this.df.set(term, n);
+      else this.df.delete(term);
+    }
+    this.totalLength -= doc.length;
+    this.docs.delete(id);
+    return true;
+  }
 
-    const hits: BM25Hit[] = this.docs.map((doc) => {
+  search(query: string, topK = 10): BM25Hit[] {
+    if (this.docs.size === 0) return [];
+    const qTerms = [...new Set(tokenize(query))];
+    const avgdl = this.totalLength / this.docs.size;
+    const N = this.docs.size;
+
+    const hits: BM25Hit[] = [...this.docs.values()].map((doc) => {
       let score = 0;
       for (const term of qTerms) {
         const f = doc.tf.get(term);

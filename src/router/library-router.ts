@@ -1,6 +1,13 @@
 import type { ZoteusConfig } from '../config.js';
 import type { Capabilities } from './capabilities.js';
-import type { WebApiClient, LibraryRef, ItemQuery, ListResult, KeyInfo } from '../api/web-client.js';
+import type {
+  WebApiClient,
+  LibraryRef,
+  ItemQuery,
+  ListResult,
+  KeyInfo,
+  VersionsResult,
+} from '../api/web-client.js';
 import type { LocalApiClient } from '../api/local-client.js';
 
 export interface LibraryRouterOptions {
@@ -57,6 +64,26 @@ export class LibraryRouter {
     // Capabilities is a published interface: an older caller may hand us a literal with
     // no localGroupIds at all, and a missing field must route to the cloud, not throw.
     return (this.capabilities.localGroupIds ?? []).includes(library.id);
+  }
+
+  /**
+   * Whether a read of this library goes to the desktop app rather than the cloud. Public
+   * because the two APIs number their library versions independently: anything that STORES
+   * a version (the search index's stamp) has to record which sequence it came from, and a
+   * routing change between runs must invalidate it rather than diff across the two.
+   */
+  servesLocally(library?: LibraryRef): boolean {
+    return this.useLocal(library ?? this.defaultLibrary());
+  }
+
+  /** Item keys and versions (`?format=versions`), routed like every other read. */
+  async itemVersions(
+    opts: ReadOpts & { since?: number; top?: boolean; limit?: number; start?: number } = {},
+  ): Promise<VersionsResult> {
+    const { library, ...rest } = opts;
+    const lib = library ?? this.defaultLibrary();
+    if (this.useLocal(lib)) return this.local!.itemVersions(rest, lib);
+    return this.web.itemVersions(lib, rest);
   }
 
   async searchItems(query: ItemQuery & ReadOpts = {}): Promise<ListResult> {

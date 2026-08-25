@@ -8,18 +8,25 @@ M6 adds local-first hybrid retrieval: BM25 keyword scoring fused with vector sim
 The build runs **asynchronously on the server** so the tool call returns immediately and
 can never time out the MCP client, even on very large libraries.
 
-- `action: "build"` / `"refresh"` — start a **background job** that pages the library's
-  top-level items (100-at-a-time, stopping at `ZOTEUS_INDEX_MAX_ITEMS`, **5000 by
-  default**, or at a smaller `limit`) and indexes their text (title, abstract, creators,
-  tags) for BM25, plus vector embeddings if an embedder is configured. Returns at once;
-  **poll `action: "status"`**
+- `action: "build"` / `"refresh"` start a **background job** that rebuilds the whole
+  index: it pages the library's top-level items (100-at-a-time, stopping at
+  `ZOTEUS_INDEX_MAX_ITEMS`, **5000 by default**, or at a smaller `limit`) and indexes
+  their text (title, abstract, creators, tags) for BM25, plus vector embeddings if an
+  embedder is configured. Returns at once; **poll `action: "status"`**
   every few seconds until `state` is `done` (or `error`). Calling build again while one
   is running does **not** start a second build — it returns the current progress.
+  `refresh` is an alias: both mean *from scratch*.
+- `action: "update"` re-indexes only what changed since the last build, and drops what the
+  library no longer holds. This is the cheap one; see
+  [Updating the index](#updating-the-index).
 - `action: "status"` — live progress and index size. Reports
-  `state` (`idle` | `building` | `done` | `error`), `itemsFetched` / `itemsTotal`,
+  `state` (`idle` | `building` | `done` | `error`), `operation` (`build` | `update`),
+  `itemsFetched` / `itemsTotal`, `itemsRemoved`,
   `itemsAvailable` (what the library holds, before the cap; larger than `itemsTotal`
   exactly when the build was truncated), `passages`, `vectors`, `items`, the
-  **effective** `embedder`, and `lastError` when
+  **effective** `embedder`, `libraryVersion` / `libraryBackend` (the version stamp an
+  update diffs from), `updateNotice` (what the last update did, or why a rebuild replaced
+  it), and `lastError` when
   `state` is `error`. Backward-compatible fields (`documents`, `vectors`, `items`,
   `embedder`, `builtFromVersion`) are still present. Progress is also logged on the
   server (every 500 items / 10s).
@@ -37,8 +44,10 @@ can never time out the MCP client, even on very large libraries.
   `memory`, see [Storage backends](#storage-backends)), `storageNotice` (present when
   opening it imported a JSON index, or refused to), and `persistError` (present when the
   index could not be written).
-- `action: "stop"` — cooperatively cancel a running build. The build halts between
-  pages/batches and the partial index is kept and stays searchable.
+- `action: "stop"` cooperatively cancels a running job. A build halts between
+  pages/batches and the partial index is kept and stays searchable; a stopped **update**
+  keeps what it applied but leaves the version stamp where it was, so the next update
+  simply repeats the delta.
 - `limit` — optional max number of items to index. It lowers the configured cap for one
   build and can never raise it: the build stops at the lower of `limit` and
   `ZOTEUS_INDEX_MAX_ITEMS` (default 5000).
@@ -81,6 +90,75 @@ summary, because a build whose artifact never reached disk still reports `state:
   a page locator via `zotero_get_fulltext`.
 
 For exact field/tag/itemType filtering, use `zotero_search_items`. Use semantic search for conceptual "papers about X" queries.
+
+## Updating the index
+
+A library changes by a handful of items at a time; rebuilding it from scratch to absorb
+that is the wrong shape of work. `zotero_index action:"update"` re-indexes **only what
+moved**:
+
+```jsonc
+{ "tool": "zotero_index", "action": "update" }
+```
+
+**What it does.**
+
+1. Reads the **version stamp** the last build or update recorded: Zotero's
+   `Last-Modified-Version` for the library, plus which API issued it
+   (`libraryVersion` / `libraryBackend` in `status`).
+2. Pages `?since=<stamp>` for the items that changed after it, and upserts each one:
+   the item's old passages, vectors and keyword rows are removed, then it is re-chunked,
+   its attachment full text re-fetched if `fulltext` is on, and its new passages embedded.
+   **Untouched items are never re-chunked and never re-embedded**, which is where the
+   saving comes from.
+3. Reconciles deletions by diffing its own item keys against a
+   `?format=versions` census of the library (keys and versions only, no item bodies).
+   The `/deleted` endpoint is cloud-only, so a key-set diff is the only way this works
+   against the desktop app too. A deleted item takes its passages, its vectors and its
+   FTS5 rows with it.
+4. Advances the version stamp **only after all of that succeeded**, and persists once.
+   On SQLite the whole update is one transaction: a failure rolls back to the last good
+   state rather than leaving an index that is half fresh. On the JSON backend nothing is
+   written until the update succeeds, so the file on disk stays the last good one (the
+   in-memory copy can be partially refreshed until the next restart, and `updateNotice`
+   says so instead of claiming a rollback).
+   Either way the stamp does not move, and the next `update` simply repeats the delta.
+
+**When it falls back to a full rebuild.** An update is refused whenever a delta would be
+*wrong* rather than merely stale. The fallback is never silent: the rebuild starts
+immediately and `updateNotice` (repeated in the `status` summary) says which case it was.
+
+| Condition | Why a delta cannot work |
+|---|---|
+| No version stamp | An index built before 1.7, imported from an older JSON file, or left by a cancelled build, covers an unknown slice of the library. |
+| The serving backend changed | The desktop app and the cloud number their library versions independently, so a stamp from one names a different point in the other's sequence. Closing Zotero between runs is enough to trigger this. |
+| The embedding model changed | Only the changed items would come back with vectors in the new space; the rest would be ranked against a foreign one. (Same rule as [Changing the model](#tuning-api-embeddings).) |
+| The store cannot delete rows | Deleted items could never leave the index. Both shipped backends can, so this is a guard for future stores. |
+| The census came back empty | Treated as a failed read, not an emptied library: deletions are skipped, the stamp is withheld, and `updateNotice` says so rather than erasing the index. |
+
+**One caveat, for full text.** The delta is over top-level items, so an update sees an item
+whose own record changed. Newly extracted text on an attachment does not always bump its
+parent's version, so a PDF you opened in Zotero for the first time may not be picked up
+until that item is edited, or until the next full `action:"build"`.
+
+**The item cap still applies.** An update maintains the subset the index already holds: an
+item already indexed is refreshed however full the index is, a *new* one only while there
+is room under `ZOTEUS_INDEX_MAX_ITEMS` (or `limit`). If the previous build was truncated,
+`updateNotice` says that the items the cap left out stay unindexed until a full
+`action:"build"` covers them.
+
+**Cost.** Measured shape rather than a benchmark, because the ratio is what matters: an
+update's work is proportional to the *delta*, a build's to the *library*.
+
+| | items fetched | passages embedded | requests |
+|---|---:|---:|---:|
+| `action:"build"`, 5000-item library | 5000 | all of them | 50 item pages (+ full-text reads) |
+| `action:"update"`, 7 items changed | 7 | 7 items' worth | 1 item page + 1 census page |
+
+With `ZOTEUS_EMBEDDINGS=openai` that is the difference between re-embedding the whole
+library and embedding seven items: minutes and real API spend against seconds and
+almost none. Rebuild when the model changes, when you raise the cap, or when the index is
+new; update the rest of the time.
 
 ## Full-text indexing (opt-in)
 
@@ -232,7 +310,9 @@ nothing. Zoteus therefore stores the embedder identity (`openai:text-embedding-3
 alongside the vectors: when the index is loaded under a different one, the stored vectors are
 **discarded** and `zotero_index action:"status"` (plus every `zotero_semantic_search`
 summary) says so and names the remedy. Keyword search keeps working throughout; run
-`zotero_index action:"build"` once to re-embed the library with the new model. Index files
+`zotero_index action:"build"` once to re-embed the library with the new model (an
+`action:"update"` refuses for the same reason and rebuilds for you, see
+[Updating the index](#updating-the-index)). Index files
 written before the identity was recorded carry none and are kept as they are; a switch under
 one is caught at the first search instead, where the query vector turns out to be a different
 width from the stored ones.
@@ -306,6 +386,11 @@ A few things to know when indexing a big Zotero library:
   and in every later `zotero_semantic_search` result, so a bigger library never looks
   fully indexed when it is not. Raise the variable to cover it, or pass a smaller `limit`
   to index a subset faster.
+- **Build once, then update.** `action: "update"` costs the delta rather than the library
+  (see [Updating the index](#updating-the-index)), which on a big library is the
+  difference between seconds and ten minutes of embedding. Keep the same backend between
+  runs where you can: closing the desktop app between a build and an update forces a
+  rebuild, because the two APIs number their library versions independently.
 - **Indexing a big library is fastest against the desktop app** — it is served from disk
   over loopback, with no cloud rate limits to back off from.
 - **Don't block on the build call.** `build` returns immediately; poll

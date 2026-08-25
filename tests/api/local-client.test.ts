@@ -236,6 +236,22 @@ describe('LocalApiClient.listLocalGroupIds', () => {
     expect(ids[149]).toBe(1149);
   });
 
+  it('reads the item key census from the desktop app, per library', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('http://127.0.0.1:23119/api/groups/999/items/top');
+      expect(url).toContain('format=versions');
+      expect(url).toContain('since=13');
+      return new Response(JSON.stringify({ AAAA: 13 }), {
+        status: 200,
+        headers: { 'Total-Results': '1', 'Last-Modified-Version': '14' },
+      });
+    });
+    const r = await makeLocal(fetchImpl).itemVersions({ top: true, since: 13 }, { type: 'group', id: 999 });
+    expect(r.versions).toEqual({ AAAA: 13 });
+    // The desktop keeps its own sequence, far behind the cloud's; nothing here compares them.
+    expect(r.lastModifiedVersion).toBe(14);
+  });
+
   it('keeps the pages it already read when a later one fails', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       if (url.includes('start=100')) throw new Error('ECONNRESET');

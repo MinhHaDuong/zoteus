@@ -47,6 +47,11 @@ interface Statements {
   insertItem: StatementSync;
   insertPassage: StatementSync;
   insertFts: StatementSync;
+  deleteFts: StatementSync;
+  itemPassages: StatementSync;
+  deletePassages: StatementSync;
+  deleteItemRow: StatementSync;
+  itemKeys: StatementSync;
   setVector: StatementSync;
   selectPassage: StatementSync;
   keyword: StatementSync;
@@ -67,6 +72,7 @@ interface Statements {
  */
 export class SqliteSearchIndex extends SearchIndexBase {
   readonly storage = 'sqlite' as const;
+  readonly supportsDelete = true;
   private db: Database | undefined;
   private stmts!: Statements;
   /** True while a write transaction is open; save() is what commits it. */
@@ -155,6 +161,17 @@ export class SqliteSearchIndex extends SearchIndexBase {
         'INSERT INTO passages(id, item_key, title, text, source) VALUES (?, ?, ?, ?, ?)',
       ),
       insertFts: db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)'),
+      // The external-content delete protocol: FTS5 stores no text of its own, so a row is
+      // retired by handing back the exact rowid and text that were indexed. A bare DELETE
+      // on `passages` would leave the index pointing at a rowid that no longer resolves,
+      // and the next query over those terms fails or returns a stale hit.
+      deleteFts: db.prepare("INSERT INTO passages_fts(passages_fts, rowid, text) VALUES('delete', ?, ?)"),
+      itemPassages: db.prepare(
+        'SELECT pid, text, source, vector IS NOT NULL AS has_vector FROM passages WHERE item_key = ?',
+      ),
+      deletePassages: db.prepare('DELETE FROM passages WHERE item_key = ?'),
+      deleteItemRow: db.prepare('DELETE FROM items WHERE item_key = ?'),
+      itemKeys: db.prepare('SELECT item_key AS k FROM items'),
       setVector: db.prepare('UPDATE passages SET vector = ? WHERE id = ?'),
       selectPassage: db.prepare('SELECT id, item_key, title, text, source FROM passages WHERE id = ?'),
       // Deliberately never selects `vector`: a keyword query must not pull vectors into JS.
@@ -195,6 +212,11 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.itemsTotal = Number(this.meta('itemsTotal') ?? 0) || 0;
     this.itemsAvailable = Number(this.meta('itemsAvailable') ?? 0) || 0;
     this.vectorEmbedderId = this.meta('embedderId') || undefined;
+    // Absent in databases written before incremental updates: version 0 blocks an update,
+    // which is the safe answer (one full build stamps it and every later update is cheap).
+    this.libraryVersion = Number(this.meta('libraryVersion') ?? 0) || 0;
+    const backend = this.meta('libraryBackend');
+    this.libraryBackend = backend === 'local' || backend === 'cloud' ? backend : undefined;
     // An index that HOLDS full-text passages counts as full-text-enabled, even before this
     // process runs a build of its own (same rule as the JSON backend's load).
     this.fulltextEnabled = this.c.fulltextPassages > 0;
@@ -207,6 +229,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
     set.run('itemsTotal', String(this.itemsTotal));
     set.run('itemsAvailable', String(this.itemsAvailable));
     set.run('embedderId', this.vectorEmbedderId ?? '');
+    set.run('libraryVersion', String(this.libraryVersion));
+    set.run('libraryBackend', this.libraryBackend ?? '');
   }
 
   private refreshCounts(): void {
@@ -309,6 +333,51 @@ export class SqliteSearchIndex extends SearchIndexBase {
         this.c.fulltextItems++;
       }
     }
+  }
+
+  /**
+   * Remove one item: its FTS5 rows first (through the external-content delete protocol,
+   * while the text they were indexed from is still readable), then the passages that hold
+   * that text, then the item row itself. Counts are adjusted from the rows that were
+   * actually removed rather than re-counted, so a delete costs the item, not the index.
+   */
+  protected deleteItem(itemKey: string): void {
+    this.begin();
+    const rows = this.stmts.itemPassages.all(itemKey) as Array<{
+      pid: number;
+      text: string;
+      source: string | null;
+      has_vector: number;
+    }>;
+    for (const row of rows) {
+      this.stmts.deleteFts.run(row.pid, row.text);
+      this.c.documents--;
+      if (row.has_vector) this.c.vectors--;
+      if (row.source === 'fulltext') this.c.fulltextPassages--;
+    }
+    this.stmts.deletePassages.run(itemKey);
+    if (this.fulltextKeys.delete(itemKey)) this.c.fulltextItems--;
+    if (Number(this.stmts.deleteItemRow.run(itemKey).changes) > 0) this.c.items--;
+  }
+
+  protected listItemKeys(): string[] {
+    return (this.stmts.itemKeys.all() as Array<{ k: string }>).map((r) => r.k);
+  }
+
+  /**
+   * Discard the open transaction, i.e. everything an update wrote, and re-read the
+   * database's own view of itself. The in-memory counters and meta fields are derived
+   * state: after a rollback they describe rows that no longer exist unless reloaded.
+   */
+  protected rollback(): boolean {
+    if (!this.db) return false;
+    if (this.inTransaction) {
+      this.handle.exec('ROLLBACK');
+      this.inTransaction = false;
+    }
+    this.refreshCounts();
+    this.loadMeta();
+    return true;
   }
 
   protected putVector(id: string, vector: number[]): void {
