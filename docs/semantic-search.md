@@ -9,14 +9,17 @@ The build runs **asynchronously on the server** so the tool call returns immedia
 can never time out the MCP client, even on very large libraries.
 
 - `action: "build"` / `"refresh"` — start a **background job** that pages the library's
-  top-level items (100-at-a-time, capped at **5000 items** unless a smaller `limit` is
-  given) and indexes their text (title, abstract, creators, tags) for BM25, plus vector
-  embeddings if an embedder is configured. Returns at once; **poll `action: "status"`**
+  top-level items (100-at-a-time, stopping at `ZOTEUS_INDEX_MAX_ITEMS`, **5000 by
+  default**, or at a smaller `limit`) and indexes their text (title, abstract, creators,
+  tags) for BM25, plus vector embeddings if an embedder is configured. Returns at once;
+  **poll `action: "status"`**
   every few seconds until `state` is `done` (or `error`). Calling build again while one
   is running does **not** start a second build — it returns the current progress.
 - `action: "status"` — live progress and index size. Reports
   `state` (`idle` | `building` | `done` | `error`), `itemsFetched` / `itemsTotal`,
-  `passages`, `vectors`, `items`, the **effective** `embedder`, and `lastError` when
+  `itemsAvailable` (what the library holds, before the cap; larger than `itemsTotal`
+  exactly when the build was truncated), `passages`, `vectors`, `items`, the
+  **effective** `embedder`, and `lastError` when
   `state` is `error`. Backward-compatible fields (`documents`, `vectors`, `items`,
   `embedder`, `builtFromVersion`) are still present. Progress is also logged on the
   server (every 500 items / 10s).
@@ -29,7 +32,9 @@ can never time out the MCP client, even on very large libraries.
   | `embedderReason` | present when it is not: why, and what to do about it |
 - `action: "stop"` — cooperatively cancel a running build. The build halts between
   pages/batches and the partial index is kept and stays searchable.
-- `limit` — optional max number of items to index (default and hard cap: 5000).
+- `limit` — optional max number of items to index. It lowers the configured cap for one
+  build and can never raise it: the build stops at the lower of `limit` and
+  `ZOTEUS_INDEX_MAX_ITEMS` (default 5000).
 - `fulltext` — also index the body text of each item's attachments (see
   [Full-text indexing](#full-text-indexing-opt-in) below). Defaults to
   `ZOTEUS_INDEX_FULLTEXT` (off).
@@ -194,8 +199,11 @@ A few things to know when indexing a big Zotero library:
   keyword search, set `ZOTEUS_EMBEDDINGS=off` for a quick keyword-only (BM25) index.
 - **First local run downloads the model** (~25 MB) before embedding begins — expect a
   one-time delay (and a slower first build) while it fetches and caches.
-- **Builds are capped at 5000 items** (both Zotero APIs page 100-at-a-time). Pass a
-  smaller `limit` to index a subset faster.
+- **Builds stop at `ZOTEUS_INDEX_MAX_ITEMS`, 5000 by default** (both Zotero APIs page
+  100-at-a-time). A build that hits the cap reports how many items it left out, in status
+  and in every later `zotero_semantic_search` result, so a bigger library never looks
+  fully indexed when it is not. Raise the variable to cover it, or pass a smaller `limit`
+  to index a subset faster.
 - **Indexing a big library is fastest against the desktop app** — it is served from disk
   over loopback, with no cloud rate limits to back off from.
 - **Don't block on the build call.** `build` returns immediately; poll

@@ -16,12 +16,18 @@ export const MAX_ITEMS = DEFAULT_INDEX_MAX_ITEMS;
 /** Both Zotero APIs (cloud Web API and desktop local API) page items 100-at-a-time. */
 export const PAGE_SIZE = 100;
 
-/** One-line progress summary used in tool messages and status output. */
+/**
+ * One-line progress summary shared by tool messages, status output and the server build
+ * log, which must not diverge: a log reading `5000/5000` beside tool output reading
+ * `5000 of 12000` invites the conclusion that one of them is wrong. The library total is
+ * spelled out rather than appended after a second slash, which made one line carry two
+ * different senses of "/".
+ */
 export function progressLine(s: IndexBuildStatus): string {
-  const capped = s.itemsAvailable > s.itemsTotal;
-  const total = s.itemsTotal > 0 ? `${s.itemsTotal}${capped ? ` of ${s.itemsAvailable}` : ''}` : '?';
+  const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
+  const library = s.itemsAvailable > s.itemsTotal ? ` (${s.itemsAvailable} in library)` : '';
   const fulltext = s.fulltextEnabled ? `, full text of ${s.fulltextItems} items (${s.fulltextPassages} passages)` : '';
-  return `${s.itemsFetched}/${total} items, ${s.passages} passages, ${s.vectors} vectors${fulltext} (embedder=${s.embedder})`;
+  return `${s.itemsFetched} of ${total} items indexed${library}, ${s.passages} passages, ${s.vectors} vectors${fulltext} (embedder=${s.embedder})`;
 }
 
 /**
@@ -48,14 +54,21 @@ export function fulltextNotice(s: IndexBuildStatus): string {
 /**
  * Sentence appended when the build limit stopped the crawl short of the library. Same
  * reasoning as `embedderNotice` and `fulltextNotice`: without it a capped build reports
- * `5000/5000` and reads as complete coverage, so a search that finds nothing in the
- * unindexed remainder is indistinguishable from a search over a library that holds
- * nothing on the subject.
+ * complete coverage, so a search that finds nothing in the unindexed remainder is
+ * indistinguishable from a search over a library that holds nothing on the subject.
+ *
+ * The advice names both dials because the limit in force is min(the caller's `limit`,
+ * ZOTEUS_INDEX_MAX_ITEMS) and a status snapshot cannot tell which one bit: telling a
+ * caller whose own `limit` truncated the build to raise the environment variable sends
+ * them to a setting that is already high enough.
  */
 export function truncationNotice(s: IndexBuildStatus): string {
   if (s.itemsAvailable <= s.itemsTotal) return '';
   const missing = s.itemsAvailable - s.itemsTotal;
-  return ` Only the first ${s.itemsTotal} of ${s.itemsAvailable} items were indexed — ${missing} are NOT searchable. Raise ZOTEUS_INDEX_MAX_ITEMS and rebuild to cover them.`;
+  return (
+    ` Only the first ${s.itemsTotal} of ${s.itemsAvailable} items were indexed, so ${missing} are NOT searchable.` +
+    ' A build stops at the lower of the `limit` argument and ZOTEUS_INDEX_MAX_ITEMS: raise whichever one bound this build, then rebuild to cover them.'
+  );
 }
 
 /** Human summary of a build/status snapshot. */

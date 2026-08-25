@@ -3,13 +3,14 @@ import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
 import { progressLine, startIndexBuild, statusSummary } from '../features/search/build.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from '../features/search/fulltext-source.js';
+import { DEFAULT_INDEX_MAX_ITEMS } from '../features/search/limits.js';
 import type { LibraryRef } from '../api/web-client.js';
 
 const indexTool: ToolDefinition = {
   name: 'zotero_index',
   title: 'Build the semantic search index',
   description:
-    "Manage the local hybrid-search index used by zotero_semantic_search. The build runs as a background job on the server, so this tool returns immediately — never blocks on large libraries. `action: \"build\"` (or \"refresh\") starts a background build: it pages the library's top-level items (100-at-a-time, capped at 5000 items unless a smaller `limit` is given), indexes their text (title, abstract, creators, tags) for BM25 keyword search and — if an embedding provider is configured — vector search, persisting partial progress atomically as it goes. Set `fulltext:true` to ALSO index the body text Zotero extracted from each item's attachments, which is what makes semantic search match a claim buried in a PDF rather than only its title and abstract; it is off by default because it multiplies build time and index size (default cap: 40000 characters per item, tunable with `fulltext_max_chars`), and only attachments Zotero has already extracted are available. Start a build, then POLL `action: \"status\"` every few seconds until `state` is \"done\" (or \"error\"); calling build again while one is running just returns current progress. `action: \"status\"` reports the build state (idle|building|done|error), fetch/embed progress, index size, the active embedder, and (when full text was requested) `fulltextItems`/`fulltextPassages` plus `fulltextReason` if it produced nothing. `action: \"stop\"` cancels a running build (partial data is kept and stays searchable). A partially built index is always usable for keyword search. Local embeddings are CPU-bound (see ZOTEUS_EMBEDDINGS), so large builds take a while — poll status rather than retrying build.",
+    `Manage the local hybrid-search index used by zotero_semantic_search. The build runs as a background job on the server, so this tool returns immediately — never blocks on large libraries. \`action: "build"\` (or "refresh") starts a background build: it pages the library's top-level items (100-at-a-time, stopping at the server's item cap, ZOTEUS_INDEX_MAX_ITEMS, default ${DEFAULT_INDEX_MAX_ITEMS}, or at a smaller \`limit\` if one is given), indexes their text (title, abstract, creators, tags) for BM25 keyword search and — if an embedding provider is configured — vector search, persisting partial progress atomically as it goes. Set \`fulltext:true\` to ALSO index the body text Zotero extracted from each item's attachments, which is what makes semantic search match a claim buried in a PDF rather than only its title and abstract; it is off by default because it multiplies build time and index size (default cap: ${DEFAULT_FULLTEXT_MAX_CHARS} characters per item, tunable with \`fulltext_max_chars\`), and only attachments Zotero has already extracted are available. Start a build, then POLL \`action: "status"\` every few seconds until \`state\` is "done" (or "error"); calling build again while one is running just returns current progress. \`action: "status"\` reports the build state (idle|building|done|error), fetch/embed progress, index size, the active embedder, \`itemsTotal\`/\`itemsAvailable\` (which differ, with a warning, when the cap stopped the crawl short of the library), and (when full text was requested) \`fulltextItems\`/\`fulltextPassages\` plus \`fulltextReason\` if it produced nothing. \`action: "stop"\` cancels a running build (partial data is kept and stays searchable). A partially built index is always usable for keyword search. Local embeddings are CPU-bound (see ZOTEUS_EMBEDDINGS), so large builds take a while — poll status rather than retrying build.`,
   inputSchema: {
     action: z.enum(['build', 'refresh', 'status', 'stop']),
     library_type: z.enum(['user', 'group']).optional(),
@@ -21,7 +22,7 @@ const indexTool: ToolDefinition = {
       .optional()
       .describe(
         'Max items to index. Lowers the configured cap for this build only; it cannot raise it. ' +
-          'The cap defaults to 5000 and is set by ZOTEUS_INDEX_MAX_ITEMS.',
+          `The cap defaults to ${DEFAULT_INDEX_MAX_ITEMS} and is set by ZOTEUS_INDEX_MAX_ITEMS.`,
       ),
     fulltext: z
       .boolean()
