@@ -6,6 +6,45 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-25
+
+### Added
+- **Group libraries are served from the desktop app when it holds them** (#12, #14, thanks
+  @MinhHaDuong). Zotero 10 serves `/groups/<id>` on the local API, so zoteus now probes
+  which groups the desktop holds at startup (and again if Zotero starts later), routes
+  those reads locally with no cloud key, and still sends groups the app does not hold to
+  the Web API. One server and one index cover the personal library plus groups.
+- **The index item cap is configurable** (#11, #13, thanks @MinhHaDuong).
+  `ZOTEUS_INDEX_MAX_ITEMS` (default 5000) replaces the hardcoded cap. A build that
+  truncates now says so, naming the real library size next to what was indexed, in the
+  build status, in `zotero_semantic_search` results, and after a restart.
+- **SQLite full-text index backend** (#10). On Node 22.13+ the search index lives in
+  SQLite with FTS5 (built-in `node:sqlite`, no new dependency), removing the 512 MB
+  persistence ceiling and the multi-gigabyte memory residency of the JSON index: builds
+  are faster, reloads are instant, and keyword search never materializes the corpus in
+  memory. `ZOTEUS_INDEX_BACKEND` selects `auto` | `sqlite` | `memory`; the JSON backend
+  remains the fallback on older Node. Small existing JSON indexes are imported
+  automatically, oversized ones get an explicit rebuild notice.
+- **Incremental index updates** (#16). `zotero_index action:"update"` fetches only items
+  changed since the last stamped library version, re-embeds only their passages, and
+  reconciles deletions with a cheap key census. It falls back to a full rebuild, saying
+  why, whenever the stamp, serving backend, or embedding model cannot be trusted.
+- **Configurable embeddings** (#15). `ZOTEUS_EMBEDDING_MODEL`, `ZOTEUS_EMBED_BATCH_SIZE`
+  and `ZOTEUS_EMBED_BATCH_DELAY_MS` tune the OpenAI/Gemini embedding calls for large
+  builds and per-tier rate limits. The model is stamped into the index; switching models
+  drops the stale vectors with a visible notice instead of mixing vector spaces.
+- **Desktop settings** (#9): the extension settings screen now exposes full-text
+  characters per item (0 = no cap), the item cap, and the embedding model, batch size
+  and delay.
+
+### Fixed
+- A blank environment variable (an empty field in the desktop settings screen, or a bare
+  `KEY=` line in `.env`) no longer crashes boot or, for `ZOTEUS_DATA_DIR`, silently
+  relocates the data directory: blank now means unset everywhere.
+- Index persist failures are recorded on the build status (`persistError`) and surfaced
+  wherever status is read, instead of vanishing into a log warning while the build
+  reports done (#10).
+
 ## [1.6.0] - 2026-08-20
 
 ### Added
