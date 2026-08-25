@@ -11,6 +11,8 @@ interface Entry {
 /** Brute-force cosine-similarity vector store (fine for a personal library). */
 export class VectorStore {
   private entries: Entry[] = [];
+  /** Position of each id in `entries`, so a delete does not scan the store. */
+  private at = new Map<string, number>();
 
   get size(): number {
     return this.entries.length;
@@ -22,7 +24,29 @@ export class VectorStore {
   }
 
   add(id: string, vector: number[]): void {
+    const i = this.at.get(id);
+    if (i !== undefined) {
+      this.entries[i] = { id, vector };
+      return;
+    }
+    this.at.set(id, this.entries.length);
     this.entries.push({ id, vector });
+  }
+
+  /**
+   * Remove one vector. The last entry is swapped into the hole rather than splicing, so an
+   * update that drops a deleted item stays O(1) per vector; nothing here depends on order.
+   */
+  remove(id: string): boolean {
+    const i = this.at.get(id);
+    if (i === undefined) return false;
+    const last = this.entries.pop()!;
+    if (i < this.entries.length) {
+      this.entries[i] = last;
+      this.at.set(last.id, i);
+    }
+    this.at.delete(id);
+    return true;
   }
 
   search(query: number[], topK = 10): VectorHit[] {
@@ -42,6 +66,7 @@ export class VectorStore {
   static fromJSON(entries: Entry[]): VectorStore {
     const vs = new VectorStore();
     vs.entries = entries ?? [];
+    vs.entries.forEach((e, i) => vs.at.set(e.id, i));
     return vs;
   }
 }

@@ -74,6 +74,23 @@ describe('WebApiClient', () => {
     );
   });
 
+  it('reads the item key census from /items/top?format=versions', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/users/19552201/items/top');
+      expect(url).toContain('format=versions');
+      expect(url).toContain('limit=5000');
+      expect(url).not.toContain('top=');
+      return new Response(JSON.stringify({ AAAA: 12, BBBB: 2114 }), {
+        status: 200,
+        headers: { 'Total-Results': '2', 'Last-Modified-Version': '2114' },
+      });
+    });
+    const r = await makeClient(fetchImpl).itemVersions({ type: 'user', id: 19552201 }, { top: true, limit: 5000 });
+    expect(r.versions).toEqual({ AAAA: 12, BBBB: 2114 });
+    expect(r.totalResults).toBe(2);
+    expect(r.lastModifiedVersion).toBe(2114);
+  });
+
   it('fetches the global schema without auth', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       expect(url).toBe('https://api.zotero.org/schema');

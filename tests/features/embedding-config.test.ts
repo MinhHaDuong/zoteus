@@ -69,6 +69,7 @@ function ctxFor(index: SearchIndex, library: any[], env: Record<string, string> 
     search: index,
     logger: silentLogger,
     router: {
+      servesLocally: () => false,
       searchItems: async ({ start }: { start: number }) => {
         const p = await page(start);
         return { data: p.items, totalResults: p.totalResults };

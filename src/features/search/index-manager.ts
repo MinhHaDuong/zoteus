@@ -12,6 +12,7 @@ import type {
   BuildState,
   ChunkRecord,
   IncrementalBuildOptions,
+  IncrementalUpdateOptions,
   IndexBuildStatus,
   IndexCounts,
   IndexSnapshot,
@@ -23,6 +24,7 @@ import type {
   SearchIndexOptions,
   SearchIndexStatus,
   StorageBackend,
+  VersionBackend,
 } from './backend.js';
 
 // The contract and its types live in backend.ts (two implementations share them); they are
@@ -32,6 +34,7 @@ export type {
   BuildState,
   ChunkRecord,
   IncrementalBuildOptions,
+  IncrementalUpdateOptions,
   IndexBuildStatus,
   IndexCounts,
   IndexSnapshot,
@@ -44,6 +47,7 @@ export type {
   SearchIndexOptions,
   SearchIndexStatus,
   StorageBackend,
+  VersionBackend,
 } from './backend.js';
 
 /**
@@ -71,6 +75,13 @@ function shortCause(reason: string): string {
   const first = reason.split(/(?<=\.)\s/)[0] ?? reason;
   const trimmed = first.replace(/\.$/, '').trim();
   return trimmed.length > 90 ? `${trimmed.slice(0, 89).trimEnd()}...` : trimmed;
+}
+
+/** How a version stamp's origin reads inside a sentence. */
+function labelFor(backend: VersionBackend | undefined): string {
+  if (backend === 'local') return 'desktop app';
+  if (backend === 'cloud') return 'cloud Web API';
+  return 'unrecorded';
 }
 
 /** Reciprocal Rank Fusion of multiple ranked lists. */
@@ -120,8 +131,21 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected fulltextEnabled = false;
   protected fulltextUnavailable: string | undefined = undefined;
   protected builtFromVersion = 0;
-  /** Embedder identity that produced the vectors currently held (persisted with them). */
-  protected vectorEmbedderId: string | undefined = undefined;
+  /**
+   * Zotero's Last-Modified-Version this index was built or updated from, and the API that
+   * issued it. Persisted together because neither is meaningful alone: a local version
+   * number read as a cloud one asks for a delta that spans the wrong sequence entirely.
+   */
+  protected libraryVersion = 0;
+  protected libraryBackend: VersionBackend | undefined = undefined;
+  /** What the last update did, or why a rebuild replaced it (see IndexBuildStatus). */
+  protected updateNotice: string | undefined = undefined;
+  /**
+   * Embedder identity that produced the vectors currently held (persisted with them).
+   * Public because the update path compares it against the live embedder before deciding
+   * whether a delta is even meaningful.
+   */
+  vectorEmbedderId: string | undefined = undefined;
   /** Set when a load discarded vectors another embedder had produced. */
   protected vectorsStale: string | undefined = undefined;
   /** What opening the store had to do or refused to do (JSON migration; see #10). */
@@ -129,7 +153,9 @@ export abstract class SearchIndexBase implements SearchIndex {
 
   // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
   private buildState: BuildState = 'idle';
+  private operation: 'build' | 'update' = 'build';
   private itemsFetched = 0;
+  private itemsRemoved = 0;
   protected itemsTotal = 0;
   protected itemsAvailable = 0;
   private lastBuildError: string | undefined = undefined;
@@ -159,6 +185,19 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected abstract putItem(itemKey: string, title: string): void;
   /** Store one passage (also updating item and full-text bookkeeping). */
   protected abstract putPassage(rec: ChunkRecord): void;
+  /**
+   * Remove one item: its passages, their vectors and their keyword-index rows. Must be
+   * exact, not best-effort. A passage left behind stays rankable, so a deleted item goes
+   * on being returned by search with no way for the caller to fetch it.
+   */
+  protected abstract deleteItem(itemKey: string): void;
+  /**
+   * Every item key in the store. Bounded by ITEMS (thousands), never by passages, which is
+   * why this may be materialized: the deletion diff needs the whole set at once anyway.
+   */
+  protected abstract listItemKeys(): string[];
+  /** False when this store cannot delete rows, which makes an update impossible. */
+  abstract readonly supportsDelete: boolean;
   /** Attach a vector to an already-stored passage. */
   protected abstract putVector(id: string, vector: number[]): void;
   /** Discard every stored vector, keeping the passages. */
@@ -173,6 +212,16 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected abstract passage(id: string): ChunkRecord | undefined;
   abstract save(): Promise<void>;
   abstract close(): Promise<void>;
+
+  /**
+   * Discard everything written since the last save and reload the store's own view of
+   * itself. Returns false where the store cannot: an update that fails on one of those is
+   * left partially applied in memory, never on disk, since nothing is persisted until the
+   * update succeeds. Callers must report the difference rather than claim a rollback.
+   */
+  protected rollback(): boolean {
+    return false;
+  }
 
   /** What ZOTEUS_EMBEDDINGS asked for. */
   get embedderConfigured(): string {
@@ -277,12 +326,15 @@ export abstract class SearchIndexBase implements SearchIndex {
       ...base,
       passages: base.documents,
       state: this.buildState,
+      operation: this.operation,
       itemsFetched: this.itemsFetched,
+      itemsRemoved: this.itemsRemoved,
       itemsTotal: this.itemsTotal,
       itemsAvailable: this.itemsAvailable,
     };
     if (this.buildState === 'error' && this.lastBuildError) s.lastError = this.lastBuildError;
     if (this.persistError) s.persistError = this.persistError;
+    if (this.updateNotice) s.updateNotice = this.updateNotice;
     return s;
   }
 
@@ -316,7 +368,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextItems: c.fulltextItems,
       fulltextPassages: c.fulltextPassages,
       builtFromVersion: this.builtFromVersion,
+      libraryVersion: this.libraryVersion,
     };
+    if (this.libraryBackend) s.libraryBackend = this.libraryBackend;
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
     if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
@@ -335,6 +389,10 @@ export abstract class SearchIndexBase implements SearchIndex {
     // The vectors are gone, so their provenance and any staleness verdict go with them.
     this.vectorEmbedderId = undefined;
     this.vectorsStale = undefined;
+    // So is the version stamp: an emptied index is a delta from nothing, and a stamp left
+    // behind would make the next update fetch `?since=` against passages that are gone.
+    this.libraryVersion = 0;
+    this.libraryBackend = undefined;
   }
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
@@ -389,6 +447,7 @@ export abstract class SearchIndexBase implements SearchIndex {
   async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
     this.buildState = 'building';
+    this.operation = 'build';
     this.lastBuildError = undefined;
     this.embedderError = undefined;
     this.persistError = undefined;
@@ -397,8 +456,12 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.fulltextEnabled = Boolean(opts.fulltextFor);
     this.fulltextUnavailable = undefined;
     this.itemsFetched = 0;
+    this.itemsRemoved = 0;
     this.itemsTotal = 0;
     this.itemsAvailable = 0;
+    // Carried from the caller, e.g. the reason an update fell back to this rebuild, so it
+    // must survive the reset below rather than being cleared with the rest of the state.
+    this.updateNotice = opts.note;
     const token = { cancelled: false };
     this.cancelToken = token;
     this.reset();
@@ -418,6 +481,7 @@ export abstract class SearchIndexBase implements SearchIndex {
 
     const pending: ChunkRecord[] = []; // passages awaiting embedding
     let start = 0;
+    let crawlVersion = 0;
     let itemsSincePersist = 0;
     let lastPersistAt = Date.now();
     let itemsSinceLog = 0;
@@ -447,36 +511,17 @@ export abstract class SearchIndexBase implements SearchIndex {
       this.opts.logger?.info(`index build: ${progressLine(s)}`);
       opts.onProgress?.(s);
     };
-    const embedPending = async (force: boolean): Promise<void> => {
-      if (!this.hasEmbedder) {
-        pending.length = 0;
-        return;
-      }
-      while (pending.length >= (force ? 1 : embedBatchSize)) {
-        if (token.cancelled) return;
-        const batch = pending.splice(0, Math.min(embedBatchSize, pending.length));
-        try {
-          const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text));
-          batch.forEach((r, i) => {
-            if (vecs[i]) this.putVector(r.id, vecs[i]!);
-          });
-        } catch (e) {
-          // hasEmbedder goes false from here, which both stops this loop and makes every
-          // later status report say why the index has no vectors.
-          this.noteEmbedFailure(e);
-          pending.length = 0;
-        }
-        // Yield so long embedding runs stay interruptible and the event loop breathes; a
-        // configured delay additionally paces requests against a provider's rate limit.
-        await batchPause(embedBatchDelayMs);
-      }
-    };
+    const embedPending = (force: boolean): Promise<void> =>
+      this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, force);
 
     try {
       for (;;) {
         if (token.cancelled) break;
         if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
         const page = await fetchPage(start);
+        // The library as it stood when the crawl began: recorded once, from the first page,
+        // so a change made mid-crawl stays after the stamp and the next update still sees it.
+        if (!crawlVersion && page.lastModifiedVersion) crawlVersion = page.lastModifiedVersion;
         const pageItems = page.items ?? [];
         if (pageItems.length === 0) break;
         if (!this.itemsTotal && page.totalResults) {
@@ -486,29 +531,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         // Only the items that still fit under the cap are worth fetching full text for.
         const room = maxItems === undefined ? pageItems.length : Math.max(0, maxItems - this.itemsFetched);
         const batch = pageItems.slice(0, room);
-        // Full text is fetched a page at a time, several attachments in flight, so the
-        // per-item round trip does not serialize the whole build behind the network.
-        const texts =
-          opts.fulltextFor && !token.cancelled
-            ? await Promise.all(
-                batch.map((item) =>
-                  fulltextLimit.run(async () => {
-                    if (token.cancelled) return undefined;
-                    const d = item.data ?? item;
-                    const key = item.key ?? d.key;
-                    if (!key) return undefined;
-                    try {
-                      return await opts.fulltextFor!(key, item);
-                    } catch (e) {
-                      this.opts.logger?.debug(
-                        `full text for ${key} skipped: ${e instanceof Error ? e.message : String(e)}`,
-                      );
-                      return undefined;
-                    }
-                  }),
-                ),
-              )
-            : undefined;
+        const texts = await this.fulltextForPage(batch, opts, token, fulltextLimit);
         for (let i = 0; i < batch.length; i++) {
           if (token.cancelled) break;
           this.addOneItem(batch[i], pending, texts?.[i]);
@@ -524,6 +547,12 @@ export abstract class SearchIndexBase implements SearchIndex {
       }
       if (!token.cancelled) await embedPending(true);
       this.builtFromVersion = this.itemsFetched;
+      // A cancelled crawl covers an unknown prefix of the library, so it gets no stamp: an
+      // update against one would treat every item it never reached as unchanged forever.
+      if (!token.cancelled && crawlVersion) {
+        this.libraryVersion = crawlVersion;
+        this.libraryBackend = opts.versionBackend;
+      }
       await persistNow();
       this.buildState = 'done';
       const final = this.buildStatus();
@@ -540,6 +569,272 @@ export abstract class SearchIndexBase implements SearchIndex {
       return this.buildStatus();
     } finally {
       this.cancelToken = null;
+    }
+  }
+
+  /**
+   * Why a delta update cannot run against this index, or undefined when it can. Every
+   * refusal here is a correctness one, not a heuristic: each would otherwise produce an
+   * index that looks fresh and is not.
+   */
+  updateBlocker(backend: VersionBackend): string | undefined {
+    if (!this.supportsDelete) {
+      return `the ${this.storage} index cannot remove rows, so deleted items could never leave it`;
+    }
+    if (this.isEmpty) return 'the index is empty';
+    if (!this.libraryVersion) {
+      return 'this index carries no library version stamp (it predates incremental updates, or its last build was cancelled)';
+    }
+    if (this.libraryBackend && this.libraryBackend !== backend) {
+      return (
+        `the stamp came from the ${labelFor(this.libraryBackend)} and this update would be served by the ` +
+        `${labelFor(backend)}, whose version sequences are unrelated`
+      );
+    }
+    if (this.embedderId !== this.vectorEmbedderId) {
+      return (
+        `the stored vectors were produced by ${this.vectorEmbedderId ?? 'no embedder'} and this server now embeds ` +
+        `with ${this.embedderId ?? 'no embedder'}, so only the changed items would carry usable vectors`
+      );
+    }
+    return undefined;
+  }
+
+  /**
+   * Apply a delta update: re-index the items the library changed since the stored version
+   * stamp, drop the ones it no longer holds, and leave everything else exactly as it is.
+   * Unchanged passages are never re-chunked and never re-embedded, which is the entire
+   * point: a seven-item change costs seven items of API spend, not a whole library.
+   *
+   * Nothing is persisted until the update has fully succeeded, and the version stamp only
+   * advances then. A failure rolls the store back (where it can) and leaves the previous
+   * stamp in place, so the same delta is simply retried next time.
+   */
+  async updateIncremental(opts: IncrementalUpdateOptions): Promise<IndexBuildStatus> {
+    if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
+    const fromVersion = this.libraryVersion;
+    this.buildState = 'building';
+    this.operation = 'update';
+    this.lastBuildError = undefined;
+    this.embedderError = undefined;
+    this.persistError = undefined;
+    this.updateNotice = undefined;
+    this.itemsFetched = 0;
+    this.itemsRemoved = 0;
+    if (opts.fulltextFor) {
+      // An update is the retry for full text as well, but only upwards: an index that
+      // already holds body passages does not stop being a full-text index when a metadata
+      // update runs over it.
+      this.fulltextEnabled = true;
+      this.fulltextUnavailable = undefined;
+    }
+    const token = { cancelled: false };
+    this.cancelToken = token;
+
+    const embedBatchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
+    const embedBatchDelayMs = opts.embedBatchDelayMs ?? 0;
+    const progressEveryItems = opts.progressEveryItems ?? 500;
+    const progressEveryMs = opts.progressEveryMs ?? 10_000;
+    const maxItems = opts.maxItems;
+    const fulltextLimit = new Semaphore(Math.max(1, opts.fulltextConcurrency ?? 4));
+    const persist = opts.persist ?? (() => this.save());
+
+    const pending: ChunkRecord[] = [];
+    // The keys the index holds, which the upsert loop keeps current: it is both the cap
+    // check ("is this item already indexed?") and, at the end, the left side of the
+    // deletion diff, so the store is walked once rather than per item.
+    const known = new Set(this.listItemKeys());
+    let start = 0;
+    let crawlVersion = 0;
+    let itemsSinceLog = 0;
+    let lastLogAt = Date.now();
+    let skippedByCap = 0;
+    let reconciled = false;
+
+    const maybeLog = (): void => {
+      if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
+      itemsSinceLog = 0;
+      lastLogAt = Date.now();
+      const s = this.buildStatus();
+      this.opts.logger?.info(`index update: ${progressLine(s)}`);
+      opts.onProgress?.(s);
+    };
+
+    try {
+      for (;;) {
+        if (token.cancelled) break;
+        const page = await opts.fetchChanged(start);
+        if (!crawlVersion && page.lastModifiedVersion) crawlVersion = page.lastModifiedVersion;
+        const pageItems = page.items ?? [];
+        if (pageItems.length === 0) break;
+        const texts = await this.fulltextForPage(pageItems, opts, token, fulltextLimit);
+        for (let i = 0; i < pageItems.length; i++) {
+          if (token.cancelled) break;
+          const item = pageItems[i];
+          const d = item?.data ?? item;
+          const key = item?.key ?? d?.key;
+          if (!key) continue;
+          // The cap bounds the index, not the delta: an item already in it is refreshed
+          // however full the index is, a new one only while there is room under the cap.
+          if (!known.has(key) && maxItems !== undefined && known.size >= maxItems) {
+            skippedByCap++;
+            continue;
+          }
+          // Upsert. The old passages carry the old text and the old vectors, and their ids
+          // are only mostly stable (a shorter abstract yields fewer chunks), so replacing
+          // the item wholesale is the only way to leave no orphans behind.
+          this.deleteItem(key);
+          this.addOneItem(item, pending, texts?.[i]);
+          known.add(key);
+          this.itemsFetched++;
+          itemsSinceLog++;
+        }
+        start += pageItems.length;
+        await this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, false);
+        maybeLog();
+        if (start >= page.totalResults) break;
+      }
+      if (!token.cancelled) await this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, true);
+
+      if (!token.cancelled) {
+        const live = await opts.liveKeys();
+        if (live.size === 0 && known.size > 0) {
+          // A library reporting no items at all, against an index holding thousands, is a
+          // failed read far more often than an emptied library, and acting on it would
+          // erase the index. Skip the pass and withhold the stamp so the next update retries.
+          this.updateNotice =
+            'Deletions were NOT reconciled: the library reported no items at all, which is treated as a failed ' +
+            'read rather than an emptied library. The version stamp was left where it was, so the next ' +
+            'action:"update" repeats this delta.';
+          this.opts.logger?.warn(this.updateNotice);
+        } else {
+          for (const key of known) {
+            if (live.has(key)) continue;
+            this.deleteItem(key);
+            this.itemsRemoved++;
+          }
+          // The versions scan is a free, exact census of the library, so the truncation
+          // counters are re-derived from it rather than left at the last build's figures.
+          this.itemsAvailable = live.size;
+          this.itemsTotal = maxItems === undefined ? live.size : Math.min(live.size, maxItems);
+          this.builtFromVersion = this.counts().items;
+          reconciled = true;
+        }
+      }
+
+      if (!token.cancelled && reconciled && crawlVersion) {
+        this.libraryVersion = crawlVersion;
+        this.libraryBackend = opts.backend;
+      }
+      // Persisted once, at the end: the delta is small by construction, and one commit is
+      // what makes "the stamp advanced" and "the rows are on disk" a single durable fact.
+      try {
+        await persist();
+        this.persistError = undefined;
+      } catch (e) {
+        this.persistError = e instanceof Error ? e.message : String(e);
+        this.opts.logger?.warn(`Could not persist index: ${this.persistError}`);
+      }
+      this.buildState = 'done';
+      if (reconciled) {
+        this.updateNotice =
+          `Updated ${this.itemsFetched} changed and removed ${this.itemsRemoved} deleted items since ` +
+          `${opts.backend} library version ${fromVersion}.` +
+          (skippedByCap
+            ? ` ${skippedByCap} new items were left out because the index is at its item cap.`
+            : '') +
+          (this.itemsAvailable > this.itemsTotal
+            ? ' An update maintains only the subset this index already holds: the items the cap left out stay' +
+              ' unindexed until a full action:"build" covers them.'
+            : '');
+      } else if (token.cancelled) {
+        this.updateNotice =
+          `Update stopped after ${this.itemsFetched} changed items. Deletions were not reconciled and the version ` +
+          'stamp was left where it was, so the next action:"update" repeats this delta.';
+      }
+      const final = this.buildStatus();
+      this.opts.logger?.info(`index update ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`);
+      opts.onProgress?.(final);
+      return final;
+    } catch (e) {
+      this.buildState = 'error';
+      this.lastBuildError = e instanceof Error ? e.message : String(e);
+      this.opts.logger?.error(`index update failed: ${this.lastBuildError}`);
+      // The opposite of a build's behaviour, and deliberately: a half-applied delta is not
+      // a partial index but a wrong one (items refreshed, deletions not, stamp ambiguous),
+      // so it is discarded and the last good state stands.
+      const rolledBack = this.rollback();
+      this.updateNotice = rolledBack
+        ? `The update failed and was rolled back: the index is unchanged, at ${labelFor(this.libraryBackend)} ` +
+          `library version ${this.libraryVersion}. Retry action:"update", or run action:"build" to rebuild.`
+        : `The update failed partway through. The ${this.storage} store cannot roll back, so some items were ` +
+          'refreshed in memory and others were not; nothing was written, so the last saved index is intact and ' +
+          'the version stamp did not move. Retry action:"update", or run action:"build" to rebuild.';
+      opts.onProgress?.(this.buildStatus());
+      return this.buildStatus();
+    } finally {
+      this.cancelToken = null;
+    }
+  }
+
+  /**
+   * Full text for one page of items, several attachments in flight, so the per-item round
+   * trip does not serialize the whole crawl behind the network.
+   */
+  private async fulltextForPage(
+    batch: any[],
+    opts: IncrementalBuildOptions,
+    token: { cancelled: boolean },
+    limit: Semaphore,
+  ): Promise<Array<string | undefined> | undefined> {
+    if (!opts.fulltextFor || token.cancelled) return undefined;
+    return Promise.all(
+      batch.map((item) =>
+        limit.run(async () => {
+          if (token.cancelled) return undefined;
+          const d = item.data ?? item;
+          const key = item.key ?? d.key;
+          if (!key) return undefined;
+          try {
+            return await opts.fulltextFor!(key, item);
+          } catch (e) {
+            this.opts.logger?.debug(`full text for ${key} skipped: ${e instanceof Error ? e.message : String(e)}`);
+            return undefined;
+          }
+        }),
+      ),
+    );
+  }
+
+  /** Embed and store queued passages in batches; `force` drains a partial last batch. */
+  private async embedPending(
+    pending: ChunkRecord[],
+    token: { cancelled: boolean },
+    batchSize: number,
+    delayMs: number,
+    force: boolean,
+  ): Promise<void> {
+    if (!this.hasEmbedder) {
+      pending.length = 0;
+      return;
+    }
+    while (pending.length >= (force ? 1 : batchSize)) {
+      if (token.cancelled) return;
+      const batch = pending.splice(0, Math.min(batchSize, pending.length));
+      try {
+        const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text));
+        batch.forEach((r, i) => {
+          if (vecs[i]) this.putVector(r.id, vecs[i]!);
+        });
+      } catch (e) {
+        // hasEmbedder goes false from here, which both stops this loop and makes every
+        // later status report say why the index has no vectors.
+        this.noteEmbedFailure(e);
+        pending.length = 0;
+      }
+      // Yield so long embedding runs stay interruptible and the event loop breathes; a
+      // configured delay additionally paces requests against a provider's rate limit.
+      await batchPause(delayMs);
     }
   }
 
@@ -637,10 +932,18 @@ export interface MemorySearchIndexOptions extends SearchIndexOptions {
  */
 export class MemorySearchIndex extends SearchIndexBase {
   readonly storage = 'memory' as const;
+  /**
+   * BM25 postings, vectors and chunks are all keyed by passage id, so removing one item is
+   * an exact in-place operation on each of the three (see BM25Index.removeDoc and
+   * VectorStore.remove). That is what lets this backend serve incremental updates too.
+   */
+  readonly supportsDelete = true;
   private bm25 = new BM25Index();
   private vectors = new VectorStore();
   private chunks = new Map<string, ChunkRecord>();
   private items = new Set<string>();
+  /** Passage ids per item, so a delete does not scan every chunk in the index. */
+  private byItem = new Map<string, Set<string>>();
   /** Items with at least one full-text passage, and how many such passages exist. */
   private fulltextItems = new Set<string>();
   private fulltextPassages = 0;
@@ -666,6 +969,7 @@ export class MemorySearchIndex extends SearchIndexBase {
     this.vectors = new VectorStore();
     this.chunks = new Map();
     this.items = new Set();
+    this.byItem = new Map();
     this.fulltextItems = new Set();
     this.fulltextPassages = 0;
   }
@@ -677,11 +981,31 @@ export class MemorySearchIndex extends SearchIndexBase {
   protected putPassage(rec: ChunkRecord): void {
     this.chunks.set(rec.id, rec);
     this.items.add(rec.itemKey);
+    const ids = this.byItem.get(rec.itemKey);
+    if (ids) ids.add(rec.id);
+    else this.byItem.set(rec.itemKey, new Set([rec.id]));
     this.bm25.addDoc(rec.id, rec.text);
     if (rec.source === 'fulltext') {
       this.fulltextItems.add(rec.itemKey);
       this.fulltextPassages++;
     }
+  }
+
+  protected deleteItem(itemKey: string): void {
+    for (const id of this.byItem.get(itemKey) ?? []) {
+      const rec = this.chunks.get(id);
+      if (rec?.source === 'fulltext') this.fulltextPassages--;
+      this.chunks.delete(id);
+      this.bm25.removeDoc(id);
+      this.vectors.remove(id);
+    }
+    this.byItem.delete(itemKey);
+    this.fulltextItems.delete(itemKey);
+    this.items.delete(itemKey);
+  }
+
+  protected listItemKeys(): string[] {
+    return [...this.items];
   }
 
   protected putVector(id: string, vector: number[]): void {
@@ -718,7 +1042,7 @@ export class MemorySearchIndex extends SearchIndexBase {
   async close(): Promise<void> {}
 
   toJSON(): IndexSnapshot {
-    return {
+    const snapshot: IndexSnapshot = {
       chunks: [...this.chunks.values()],
       vectors: this.vectors.toJSON(),
       builtFromVersion: this.builtFromVersion,
@@ -729,7 +1053,12 @@ export class MemorySearchIndex extends SearchIndexBase {
       // dropped them reported total=0 available=0 and silently stopped warning.
       itemsTotal: this.itemsTotal,
       itemsAvailable: this.itemsAvailable,
+      // The real library version, and the API whose sequence it belongs to: an update
+      // reads them back to decide whether a `?since=` delta is even addressable.
+      libraryVersion: this.libraryVersion,
     };
+    if (this.libraryBackend) snapshot.libraryBackend = this.libraryBackend;
+    return snapshot;
   }
 
   loadFromJSON(data: IndexSnapshot): void {
@@ -750,5 +1079,9 @@ export class MemorySearchIndex extends SearchIndexBase {
     // check false, so an old index stays silent rather than inventing a shortfall.
     this.itemsTotal = data.itemsTotal ?? 0;
     this.itemsAvailable = data.itemsAvailable ?? 0;
+    // Absent in files written before incremental updates existed: version 0 blocks an
+    // update, which is the safe answer (the first action:"update" rebuilds once and stamps).
+    this.libraryVersion = data.libraryVersion ?? 0;
+    this.libraryBackend = data.libraryBackend;
   }
 }

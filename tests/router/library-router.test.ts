@@ -20,6 +20,7 @@ function makeRouter(opts: {
     getItemChildren: vi.fn(async () => ({ data: [{ key: 'CLOUDCHILD' }], totalResults: 1, lastModifiedVersion: 1 })),
     getFullText: vi.fn(async () => ({ content: 'CLOUD TEXT' })),
     fullTextSince: vi.fn(async () => ({ CLOUDATT: 9 })),
+    itemVersions: vi.fn(async () => ({ versions: { CLOUD: 2114 }, totalResults: 1, lastModifiedVersion: 2114 })),
   };
   const local = {
     listItems: vi.fn(async () => ({ data: [{ key: 'LOCAL' }], totalResults: 1, lastModifiedVersion: 1 })),
@@ -27,6 +28,7 @@ function makeRouter(opts: {
     getItemChildren: vi.fn(async () => ({ data: [{ key: 'LOCALCHILD' }], totalResults: 1, lastModifiedVersion: 1 })),
     getFullText: vi.fn(async () => ({ content: 'LOCAL TEXT' })),
     fullTextSince: vi.fn(async () => ({ LOCALATT: 4 })),
+    itemVersions: vi.fn(async () => ({ versions: { LOCAL: 13 }, totalResults: 1, lastModifiedVersion: 13 })),
   };
   const cfg = loadConfig({ ZOTEUS_LOCAL: opts.local } as any);
   const capabilities: any = { cloud: cloudInfo, localApi: opts.localApi };
@@ -163,5 +165,26 @@ describe('LibraryRouter', () => {
   it('defaultLibrary uses the resolved cloud userID', () => {
     const { router } = makeRouter({ local: 'auto', localApi: true });
     expect(router.defaultLibrary()).toEqual({ type: 'user', id: 19552201 });
+  });
+
+  it('routes the ?format=versions census like every other read', async () => {
+    const up = makeRouter({ local: 'auto', localApi: true });
+    expect((await up.router.itemVersions({ top: true })).versions).toEqual({ LOCAL: 13 });
+    expect(up.local.itemVersions).toHaveBeenCalledWith({ top: true }, defaultUserLib);
+    expect(up.web.itemVersions).not.toHaveBeenCalled();
+
+    const down = makeRouter({ local: 'auto', localApi: false });
+    expect((await down.router.itemVersions({ top: true, since: 5 })).versions).toEqual({ CLOUD: 2114 });
+    expect(down.web.itemVersions).toHaveBeenCalledWith(defaultUserLib, { top: true, since: 5 });
+  });
+
+  it('reports which API serves a library, because their version sequences differ', () => {
+    expect(makeRouter({ local: 'auto', localApi: true }).router.servesLocally()).toBe(true);
+    expect(makeRouter({ local: 'auto', localApi: false }).router.servesLocally()).toBe(false);
+    expect(makeRouter({ local: 'off', localApi: true }).router.servesLocally()).toBe(false);
+    // A group the desktop does not hold is a cloud read even while the app is running.
+    const held = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
+    expect(held.router.servesLocally({ type: 'group', id: 999 })).toBe(true);
+    expect(held.router.servesLocally({ type: 'group', id: 1000 })).toBe(false);
   });
 });

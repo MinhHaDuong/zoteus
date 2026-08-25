@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
-import { progressLine, startIndexBuild, statusSummary } from '../features/search/build.js';
+import {
+  progressLine,
+  startIndexBuild,
+  startIndexUpdate,
+  statusSummary,
+  updateNotice,
+} from '../features/search/build.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from '../features/search/fulltext-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from '../features/search/limits.js';
 import type { LibraryRef } from '../api/web-client.js';
@@ -10,9 +16,9 @@ const indexTool: ToolDefinition = {
   name: 'zotero_index',
   title: 'Build the semantic search index',
   description:
-    `Manage the local hybrid-search index used by zotero_semantic_search. The build runs as a background job on the server, so this tool returns immediately — never blocks on large libraries. \`action: "build"\` (or "refresh") starts a background build: it pages the library's top-level items (100-at-a-time, stopping at the server's item cap, ZOTEUS_INDEX_MAX_ITEMS, default ${DEFAULT_INDEX_MAX_ITEMS}, or at a smaller \`limit\` if one is given), indexes their text (title, abstract, creators, tags) for BM25 keyword search and — if an embedding provider is configured — vector search, persisting partial progress atomically as it goes. Set \`fulltext:true\` to ALSO index the body text Zotero extracted from each item's attachments, which is what makes semantic search match a claim buried in a PDF rather than only its title and abstract; it is off by default because it multiplies build time and index size (default cap: ${DEFAULT_FULLTEXT_MAX_CHARS} characters per item, tunable with \`fulltext_max_chars\`), and only attachments Zotero has already extracted are available. Start a build, then POLL \`action: "status"\` every few seconds until \`state\` is "done" (or "error"); calling build again while one is running just returns current progress. \`action: "status"\` reports the build state (idle|building|done|error), fetch/embed progress, index size, the active embedder, \`itemsTotal\`/\`itemsAvailable\` (which differ, with a warning, when the cap stopped the crawl short of the library), and (when full text was requested) \`fulltextItems\`/\`fulltextPassages\` plus \`fulltextReason\` if it produced nothing. It also reports where the index is stored (\`storage\`: sqlite or memory, set by ZOTEUS_INDEX_BACKEND), \`storageNotice\` when opening that store imported or refused an older JSON index, and \`persistError\` when the index could not be written to disk at all. \`action: "stop"\` cancels a running build (partial data is kept and stays searchable). A partially built index is always usable for keyword search. Local embeddings are CPU-bound (see ZOTEUS_EMBEDDINGS), so large builds take a while — poll status rather than retrying build.`,
+    `Manage the local hybrid-search index used by zotero_semantic_search. Every job runs in the background on the server, so this tool returns immediately and never blocks on large libraries. THREE write actions, and picking the right one matters: \`action: "update"\` is the cheap one and should be the default for a library that is already indexed; \`action: "build"\` and its alias \`action: "refresh"\` both rebuild the WHOLE index from scratch, which on a large library means many minutes and, with an API embedding provider, real spend. \`action: "build"\`/"refresh" pages the library's top-level items (100-at-a-time, stopping at the server's item cap, ZOTEUS_INDEX_MAX_ITEMS, default ${DEFAULT_INDEX_MAX_ITEMS}, or at a smaller \`limit\` if one is given), indexes their text (title, abstract, creators, tags) for BM25 keyword search and, if an embedding provider is configured, for vector search, persisting partial progress atomically as it goes; use it for the first build, after changing the embedding model, or to widen a previously capped build. \`action: "update"\` instead fetches only the items changed since the version the index recorded (Zotero's \`?since=\`), re-chunks and re-embeds just those, and removes items the library no longer holds (diffed from a cheap keys-only \`?format=versions\` census, since the deletion log is cloud-only); untouched items are never re-embedded, so adding a handful of items costs seconds instead of a full rebuild. Update falls back to a full rebuild by itself, and says so in \`updateNotice\`, when a delta would be wrong: no version stamp recorded yet, the library is now served by a different Zotero API (the desktop app and the cloud number their versions independently), or the embedding model changed. Set \`fulltext:true\` to ALSO index the body text Zotero extracted from each item's attachments, which is what makes semantic search match a claim buried in a PDF rather than only its title and abstract; it is off by default because it multiplies build time and index size (default cap: ${DEFAULT_FULLTEXT_MAX_CHARS} characters per item, tunable with \`fulltext_max_chars\`), and only attachments Zotero has already extracted are available. Start a job, then POLL \`action: "status"\` every few seconds until \`state\` is "done" (or "error"); calling build or update again while one is running just returns current progress. \`action: "status"\` reports \`state\` (idle|building|done|error), \`operation\` (build|update), fetch/embed progress, \`itemsRemoved\`, index size, the active embedder, \`libraryVersion\`/\`libraryBackend\` (the version stamp an update diffs from), \`itemsTotal\`/\`itemsAvailable\` (which differ, with a warning, when the cap stopped the crawl short of the library), and (when full text was requested) \`fulltextItems\`/\`fulltextPassages\` plus \`fulltextReason\` if it produced nothing. It also reports where the index is stored (\`storage\`: sqlite or memory, set by ZOTEUS_INDEX_BACKEND), \`storageNotice\` when opening that store imported or refused an older JSON index, and \`persistError\` when the index could not be written to disk at all. \`action: "stop"\` cancels a running job (partial data is kept and stays searchable; a stopped update leaves the version stamp untouched so the next one repeats the delta). A partially built index is always usable for keyword search. Local embeddings are CPU-bound (see ZOTEUS_EMBEDDINGS), so large builds take a while: poll status rather than retrying build.`,
   inputSchema: {
-    action: z.enum(['build', 'refresh', 'status', 'stop']),
+    action: z.enum(['build', 'refresh', 'update', 'status', 'stop']),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
     limit: z
@@ -58,7 +64,7 @@ const indexTool: ToolDefinition = {
       return ok({ ...ctx.search.buildStatus() }, 'No build is currently running.');
     }
 
-    // build / refresh: kick off a background job and return immediately.
+    // build / refresh / update: kick off a background job and return immediately.
     if (ctx.search.isBuilding) {
       const s = ctx.search.buildStatus();
       return ok(
@@ -71,10 +77,19 @@ const indexTool: ToolDefinition = {
       : undefined;
     const maxItems = Math.min(args.limit ?? ctx.config.indexMaxItems, ctx.config.indexMaxItems);
     const fulltext = args.fulltext ?? ctx.config.indexFulltext;
-    const s = startIndexBuild(ctx, lib, maxItems, {
-      fulltext,
-      fulltextMaxChars: args.fulltext_max_chars,
-    });
+    const opts = { fulltext, fulltextMaxChars: args.fulltext_max_chars };
+    if (args.action === 'update') {
+      const s = startIndexUpdate(ctx, lib, maxItems, opts);
+      // The status already says whether this became a rebuild, and why, so the summary
+      // must not promise a delta the update path may have refused: report what started.
+      const kind = s.operation === 'update' ? 'Index update' : 'Full index rebuild';
+      return ok(
+        { ...s },
+        `${kind} started in the background.${updateNotice(s)} ` +
+          'Poll zotero_index action:"status" every few seconds until state is "done"; use action:"stop" to cancel.',
+      );
+    }
+    const s = startIndexBuild(ctx, lib, maxItems, opts);
     const ftNote = fulltext
       ? ' Attachment full text is included, so expect a noticeably longer build and a larger index.'
       : '';

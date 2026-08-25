@@ -22,6 +22,13 @@ export interface ListResult<T = any> {
   lastModifiedVersion: number;
 }
 
+/** A `?format=versions` response: object keys mapped to their versions, plus the headers. */
+export interface VersionsResult {
+  versions: Record<string, number>;
+  totalResults: number;
+  lastModifiedVersion: number;
+}
+
 export interface WriteResult {
   successful: Array<{ index: number; key: string; version?: number }>;
   unchanged: string[];
@@ -293,6 +300,30 @@ export class WebApiClient {
   ): Promise<Record<string, number>> {
     const { json } = await this.getJson(this.prefix(lib) + `/${type}`, this.buildQuery({ format: 'versions', since }));
     return json;
+  }
+
+  /**
+   * Item keys mapped to their versions, with the response headers that give the library
+   * version and the item count. Cheaper than any item read by a wide margin (keys only, no
+   * item bodies), which is what makes it usable as a full census: the search index diffs
+   * its own key set against this to find deletions, because `/deleted` is cloud-only and
+   * indexing must work off the desktop app too.
+   */
+  async itemVersions(
+    lib: LibraryRef,
+    query: { since?: number; top?: boolean; limit?: number; start?: number } = {},
+  ): Promise<VersionsResult> {
+    const { top, ...rest } = query;
+    const { json, headers } = await this.getJson(
+      this.prefix(lib) + (top ? '/items/top' : '/items'),
+      this.buildQuery({ ...rest, format: 'versions' }),
+    );
+    const versions = (json ?? {}) as Record<string, number>;
+    return {
+      versions,
+      totalResults: numOrUndef(headers.get('total-results')) ?? Object.keys(versions).length,
+      lastModifiedVersion: numOrUndef(headers.get('last-modified-version')) ?? 0,
+    };
   }
 
   async deleted(lib: LibraryRef, since: number): Promise<Record<string, string[]>> {

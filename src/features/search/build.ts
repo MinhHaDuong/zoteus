@@ -1,6 +1,6 @@
 import type { ToolContext } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
-import type { IndexBuildStatus } from './backend.js';
+import type { IndexBuildStatus, VersionBackend } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
 
@@ -16,6 +16,17 @@ export const MAX_ITEMS = DEFAULT_INDEX_MAX_ITEMS;
 export const PAGE_SIZE = 100;
 
 /**
+ * Page size for the `?format=versions` census an update diffs deletions against. Far larger
+ * than PAGE_SIZE because the rows are a key and an integer, not item bodies, and the
+ * endpoint commonly answers with the whole library at once. The loop advances by what came
+ * back rather than by this number, so a server that caps the page still pages correctly.
+ */
+export const VERSIONS_PAGE_SIZE = 5000;
+
+/** Ceiling on those pages, so a pathological library cannot page forever. */
+const MAX_VERSION_PAGES = 200;
+
+/**
  * One-line progress summary shared by tool messages, status output and the server build
  * log, which must not diverge: a log reading `5000/5000` beside tool output reading
  * `5000 of 12000` invites the conclusion that one of them is wrong. The library total is
@@ -23,9 +34,14 @@ export const PAGE_SIZE = 100;
  * different senses of "/".
  */
 export function progressLine(s: IndexBuildStatus): string {
+  const fulltext = s.fulltextEnabled ? `, full text of ${s.fulltextItems} items (${s.fulltextPassages} passages)` : '';
+  // An update's itemsFetched is the size of the delta, not progress through the library, so
+  // rendering it as "7 of 5000" would read as a build that stalled on its first page.
+  if (s.operation === 'update') {
+    return `${s.itemsFetched} changed items re-indexed, ${s.itemsRemoved} removed, ${s.items} items total, ${s.passages} passages, ${s.vectors} vectors${fulltext} (embedder=${s.embedder})`;
+  }
   const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
   const library = s.itemsAvailable > s.itemsTotal ? ` (${s.itemsAvailable} in library)` : '';
-  const fulltext = s.fulltextEnabled ? `, full text of ${s.fulltextItems} items (${s.fulltextPassages} passages)` : '';
   return `${s.itemsFetched} of ${total} items indexed${library}, ${s.passages} passages, ${s.vectors} vectors${fulltext} (embedder=${s.embedder})`;
 }
 
@@ -105,20 +121,36 @@ export function storageNotice(s: IndexBuildStatus): string {
   return s.storageNotice ? ` ${s.storageNotice}` : '';
 }
 
+/**
+ * Sentence appended when an incremental update ran, or when one could not and a full
+ * rebuild took its place. Same reasoning as `embedderNotice`: an `action:"update"` that
+ * silently became a ten-minute rebuild with real embedding spend, or one that skipped its
+ * deletion pass, must not be indistinguishable from the cheap update that was asked for.
+ */
+export function updateNotice(s: IndexBuildStatus): string {
+  return s.updateNotice ? ` ${s.updateNotice}` : '';
+}
+
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
+  const job = s.operation === 'update' ? 'update' : 'build';
   const notice =
     embedderNotice(s) +
     staleVectorsNotice(s) +
     fulltextNotice(s) +
     truncationNotice(s) +
     persistNotice(s) +
-    storageNotice(s);
+    storageNotice(s) +
+    updateNotice(s);
   switch (s.state) {
     case 'building':
-      return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
-    case 'error':
-      return `Index build failed: ${s.lastError ?? 'unknown error'}. Partial data kept — ${progressLine(s)}.${notice}`;
+      return `Index ${job} in progress: ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
+    case 'error': {
+      // A failed build keeps what it got; a failed update keeps nothing of its own, because
+      // a half-applied delta is a wrong index rather than a partial one.
+      const kept = job === 'update' ? 'Index unchanged' : 'Partial data kept';
+      return `Index ${job} failed: ${s.lastError ?? 'unknown error'}. ${kept}: ${progressLine(s)}.${notice}`;
+    }
     case 'done': {
       const ft = s.fulltextEnabled
         ? `, including attachment full text for ${s.fulltextItems} of them (${s.fulltextPassages} passages)`
@@ -135,6 +167,12 @@ export interface BuildFulltextOptions {
   fulltext?: boolean;
   /** Cap on indexed full-text characters per item, 0 = no cap (defaults to config). */
   fulltextMaxChars?: number;
+  /**
+   * Sentence to carry on the resulting status, e.g. why an update fell back to this
+   * rebuild. Passed into the build rather than set beforehand because the build's own
+   * prologue resets the status it would otherwise be written on.
+   */
+  note?: string;
 }
 
 /**
@@ -149,10 +187,14 @@ export interface BuildFulltextOptions {
  * `searchIndexPath`), never by the routed library id. So neither the local `users/0`
  * addressing of the personal library nor a group served locally under its own id can
  * split the index from the one built against the cloud, and a build that switched
- * backends between runs stays coherent. Nothing here compares Zotero library versions
- * across backends either: `buildIncremental` always rebuilds from scratch and reports
- * `builtFromVersion` as the item count it fetched, so the local/cloud version
- * sequences (which differ — the desktop app has its own) are never mixed.
+ * backends between runs stays coherent.
+ *
+ * A completed build also stamps the library's real Last-Modified-Version and the API that
+ * issued it, which is what `startIndexUpdate` later diffs against. The two sequences are
+ * never mixed: the stamp is only usable while the routing that produced it still holds, and
+ * a mismatch sends the update back through this function. `builtFromVersion` keeps its
+ * older, unrelated meaning (the item count the crawl fetched); the version stamp lives in
+ * `libraryVersion` / `libraryBackend`.
  */
 export function startIndexBuild(
   ctx: ToolContext,
@@ -170,12 +212,91 @@ export function startIndexBuild(
     // group this desktop does not hold, and everything once the app is closed.
     // `lib` stays undefined for the default library so the router resolves it itself.
     const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true });
-    return { items: page.data, totalResults: page.totalResults };
+    return { items: page.data, totalResults: page.totalResults, lastModifiedVersion: page.lastModifiedVersion };
   };
+
+  // The index persists itself (JSON file or SQLite commit), and a failure to do so is
+  // recorded on the build status rather than swallowed here: see persistNotice.
+  const job = ctx.search.buildIncremental(fetchPage, {
+    maxItems: cap,
+    versionBackend: ctx.router.servesLocally(lib) ? 'local' : 'cloud',
+    ...crawlOptions(ctx, lib, opts),
+  });
+  job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
+  return ctx.search.buildStatus();
+}
+
+/**
+ * Kick off an incremental UPDATE: re-index only what the library changed since the stored
+ * version stamp, and drop what it no longer holds. Same contract as `startIndexBuild`
+ * (fire-and-forget, poll `buildStatus()`), and the same fallback in every case where a
+ * delta would be wrong rather than merely stale: no stamp, a different serving backend, a
+ * different embedder, or a store that cannot delete. The fallback is a full rebuild with
+ * the reason attached to the status, never a silent one.
+ */
+export function startIndexUpdate(
+  ctx: ToolContext,
+  lib?: LibraryRef,
+  maxItems?: number,
+  opts: BuildFulltextOptions = {},
+): IndexBuildStatus {
+  const backend: VersionBackend = ctx.router.servesLocally(lib) ? 'local' : 'cloud';
+  const blocker = ctx.search.updateBlocker(backend);
+  if (blocker) {
+    return startIndexBuild(ctx, lib, maxItems, {
+      ...opts,
+      note:
+        `An incremental update was not possible (${blocker}), so the whole library is being rebuilt instead. ` +
+        'The rebuild records a version stamp, so the next action:"update" is a cheap delta.',
+    });
+  }
+
+  const configured = ctx.config.indexMaxItems;
+  const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
+  const since = ctx.search.buildStatus().libraryVersion;
+  const fetchChanged = async (start: number) => {
+    // The same routed, top-level crawl a build does, narrowed by `?since=`: on a library
+    // where nothing moved this is a single request that returns an empty page.
+    const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true, since });
+    return { items: page.data, totalResults: page.totalResults, lastModifiedVersion: page.lastModifiedVersion };
+  };
+  const liveKeys = async (): Promise<Set<string>> => {
+    // `?format=versions` with no `since`: the whole key set, keys and versions only, which
+    // is the only way to find deletions on the desktop app (`/deleted` is cloud-only).
+    const keys = new Set<string>();
+    let start = 0;
+    for (let page = 0; page < MAX_VERSION_PAGES; page++) {
+      const res = await ctx.router.itemVersions({ library: lib, top: true, limit: VERSIONS_PAGE_SIZE, start });
+      const batch = Object.keys(res.versions ?? {});
+      for (const k of batch) keys.add(k);
+      // Advance by what actually came back, not by the requested page size: the endpoint
+      // may answer with the whole library at once, or cap the page at its own limit.
+      if (!batch.length) break;
+      start += batch.length;
+      if (res.totalResults && start >= res.totalResults) break;
+    }
+    return keys;
+  };
+
+  const job = ctx.search.updateIncremental({
+    backend,
+    fetchChanged,
+    liveKeys,
+    maxItems: cap,
+    ...crawlOptions(ctx, lib, opts),
+  });
+  job.catch((e) => ctx.logger.error(`Index update crashed: ${e instanceof Error ? e.message : String(e)}`));
+  return ctx.search.buildStatus();
+}
+
+/**
+ * The options a build and an update share: full text (resolved lazily, because both
+ * starters are synchronous by contract and must return a status for the caller to poll)
+ * and the embedding batch dials.
+ */
+function crawlOptions(ctx: ToolContext, lib: LibraryRef | undefined, opts: BuildFulltextOptions) {
   const wantFulltext = opts.fulltext ?? ctx.config.indexFulltext;
   const maxChars = opts.fulltextMaxChars ?? ctx.config.indexFulltextMaxChars;
-  // The attachment map is resolved lazily, on the first item, because startIndexBuild is
-  // synchronous by contract: it must return a status immediately and let the caller poll.
   let source: Promise<FulltextSource> | undefined;
   const fulltextFor = wantFulltext
     ? async (itemKey: string) => {
@@ -187,12 +308,9 @@ export function startIndexBuild(
         return (await source).textFor(itemKey);
       }
     : undefined;
-
-  // The index persists itself (JSON file or SQLite commit), and a failure to do so is
-  // recorded on the build status rather than swallowed here: see persistNotice.
-  const job = ctx.search.buildIncremental(fetchPage, {
-    maxItems: cap,
+  return {
     fulltextFor,
+    ...(opts.note ? { note: opts.note } : {}),
     // Passages per embedding request, and the pause between requests: the dials an API
     // provider's per-request token cap and per-minute rate limit are tuned against.
     embedBatchSize: ctx.config.embedBatchSize,
@@ -201,7 +319,5 @@ export function startIndexBuild(
     // re-serializing all of it. Save less often so the write does not dominate the build.
     // (On SQLite a persist is a commit, so this only costs a slightly longer transaction.)
     ...(wantFulltext ? { persistEveryItems: 500, persistEveryMs: 60_000 } : {}),
-  });
-  job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
-  return ctx.search.buildStatus();
+  };
 }

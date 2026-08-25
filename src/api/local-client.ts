@@ -1,5 +1,5 @@
 import { RateLimitedFetcher } from './http.js';
-import type { ItemQuery, LibraryRef, ListResult } from './web-client.js';
+import type { ItemQuery, LibraryRef, ListResult, VersionsResult } from './web-client.js';
 
 export interface LocalApiClientOptions {
   port?: number;
@@ -146,6 +146,28 @@ export class LocalApiClient {
       if (e instanceof LocalApiError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  /**
+   * Item keys mapped to their versions (`?format=versions`), served by the desktop app
+   * from Zotero 10. The desktop keeps its OWN version sequence, so these numbers are only
+   * comparable with other local reads, never with the cloud's.
+   */
+  async itemVersions(
+    query: { since?: number; top?: boolean; limit?: number; start?: number } = {},
+    lib?: LibraryRef,
+  ): Promise<VersionsResult> {
+    const { top, ...rest } = query;
+    const { json, headers } = await this.getJson(
+      `${localLibraryPrefix(lib)}${top ? '/items/top' : '/items'}`,
+      this.buildQuery({ ...rest, format: 'versions' }),
+    );
+    const versions = (json ?? {}) as Record<string, number>;
+    return {
+      versions,
+      totalResults: numOrUndef(headers.get('total-results')) ?? Object.keys(versions).length,
+      lastModifiedVersion: numOrUndef(headers.get('last-modified-version')) ?? 0,
+    };
   }
 
   /** Map of attachment key -> library version for full text changed after `since`. */
