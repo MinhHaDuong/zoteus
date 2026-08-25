@@ -79,11 +79,12 @@ npm i pdfjs-dist
 
 Zoteus uses both Zotero backends and chooses per request:
 
-- **Desktop app** (`http://127.0.0.1:23119`, library `users/0`) — fast, key-free reads with full local PDFs and real saved-search execution. It also takes **writes** for your personal library: local-API writes on Zotero 10+ (behind a key granted once in-app, or `ZOTEUS_LOCAL_API_KEY`), else the connector protocol. Preferred whenever the app is running. See [`writing.md`](./writing.md).
-- **Cloud Web API v3** (`https://api.zotero.org`) — universal, and the fallback for writes; still required for sync, group libraries, and personal-library writes with no desktop app.
+- **Desktop app** (`http://127.0.0.1:23119`, personal library `users/0`) — fast, key-free reads with full local PDFs and real saved-search execution. From Zotero 10 it serves **group libraries** it holds too, under `groups/<id>`; a group the app does not hold still reads from the cloud. It also takes **writes** for your personal library: local-API writes on Zotero 10+ (behind a key granted once in-app, or `ZOTEUS_LOCAL_API_KEY`), else the connector protocol. Preferred whenever the app is running. See [`writing.md`](./writing.md).
+- **Cloud Web API v3** (`https://api.zotero.org`) — universal, and the fallback for writes; still required for sync, group-library writes, group libraries the desktop app does not hold, and personal-library writes with no desktop app.
 
 At startup Zoteus probes both and logs the result, e.g.
-`Capabilities: cloud=user 19552201, localApi=true`.
+`Capabilities: cloud=user 19552201, localApi=true, localGroups=2`
+(`localGroups` counts the group libraries the desktop app is serving).
 
 ### Local API prerequisite
 

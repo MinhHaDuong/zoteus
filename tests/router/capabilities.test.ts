@@ -43,4 +43,38 @@ describe('probeCapabilities', () => {
     expect(local.ping).not.toHaveBeenCalled();
     expect(caps.localApi).toBe(false);
   });
+
+  it('records the group libraries the desktop app is serving', async () => {
+    const cfg = loadConfig({ ZOTEUS_LOCAL: 'auto' } as any);
+    const local = {
+      ping: vi.fn(async () => true),
+      listLocalGroupIds: vi.fn(async () => [4321, 8765]),
+    };
+    const caps = await probeCapabilities(cfg, {
+      web: { hasKey: false } as any,
+      local: local as any,
+      logger,
+    });
+    expect(caps.localApi).toBe(true);
+    expect(caps.localGroupIds).toEqual([4321, 8765]);
+    expect(local.listLocalGroupIds).toHaveBeenCalledTimes(1);
+  });
+
+  it('degrades to no local groups when the group probe fails', async () => {
+    // A pre-Zotero-10 app has no /groups endpoint; that must not sink the whole probe.
+    const cfg = loadConfig({ ZOTEUS_LOCAL: 'auto' } as any);
+    const local = {
+      ping: vi.fn(async () => true),
+      listLocalGroupIds: vi.fn(async () => {
+        throw new Error('No endpoint found');
+      }),
+    };
+    const caps = await probeCapabilities(cfg, {
+      web: { hasKey: false } as any,
+      local: local as any,
+      logger,
+    });
+    expect(caps.localApi).toBe(true);
+    expect(caps.localGroupIds).toEqual([]);
+  });
 });

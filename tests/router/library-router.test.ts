@@ -11,6 +11,8 @@ function makeRouter(opts: {
   localApi: boolean;
   /** Groups this desktop app holds. Empty = pre-Zotero-10, or a group it does not have. */
   localGroupIds?: number[];
+  /** Build capabilities WITHOUT the field, the way an older caller's literal would. */
+  omitLocalGroupIds?: boolean;
 }) {
   const web = {
     listItems: vi.fn(async () => ({ data: [{ key: 'CLOUD' }], totalResults: 1, lastModifiedVersion: 1 })),
@@ -27,13 +29,11 @@ function makeRouter(opts: {
     fullTextSince: vi.fn(async () => ({ LOCALATT: 4 })),
   };
   const cfg = loadConfig({ ZOTEUS_LOCAL: opts.local } as any);
+  const capabilities: any = { cloud: cloudInfo, localApi: opts.localApi };
+  if (!opts.omitLocalGroupIds) capabilities.localGroupIds = opts.localGroupIds ?? [];
   const router = new LibraryRouter({
     config: cfg,
-    capabilities: {
-      cloud: cloudInfo as any,
-      localApi: opts.localApi,
-      localGroupIds: opts.localGroupIds ?? [],
-    },
+    capabilities,
     web: web as any,
     local: local as any,
   });
@@ -56,11 +56,43 @@ describe('LibraryRouter', () => {
     expect(web.listItems).toHaveBeenCalled();
   });
 
-  it('always uses the cloud for an explicit group library', async () => {
-    const { router, web, local } = makeRouter({ local: 'auto', localApi: true });
+  it('searches the cloud for a group this desktop does not hold', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true, localGroupIds: [] });
     await router.searchItems({ q: 'x', library: { type: 'group', id: 999 } });
     expect(web.listItems).toHaveBeenCalled();
     expect(local.listItems).not.toHaveBeenCalled();
+  });
+
+  it('searches the desktop for a group it does hold', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
+    const lib = { type: 'group' as const, id: 999 };
+    const r = await router.searchItems({ q: 'x', library: lib });
+    expect(r.data[0].key).toBe('LOCAL');
+    expect(local.listItems).toHaveBeenCalledWith({ q: 'x' }, lib);
+    expect(web.listItems).not.toHaveBeenCalled();
+  });
+
+  it('never confuses user 999 with the held group 999', async () => {
+    // localGroupIds holds bare numbers, so matching must be gated on the library TYPE:
+    // an id-only comparison would serve a foreign user library from this desktop.
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
+    await router.searchItems({ q: 'x', library: { type: 'user', id: 999 } });
+    expect(web.listItems).toHaveBeenCalledWith({ type: 'user', id: 999 }, { q: 'x' });
+    expect(local.listItems).not.toHaveBeenCalled();
+  });
+
+  it('routes a group to the cloud when capabilities carry no localGroupIds at all', async () => {
+    // Capabilities is a published interface: a caller built before this field existed must
+    // get cloud routing, not a crash on `undefined.includes`.
+    const { router, web, local } = makeRouter({
+      local: 'auto',
+      localApi: true,
+      omitLocalGroupIds: true,
+    });
+    const r = await router.searchItems({ q: 'x', library: { type: 'group', id: 999 } });
+    expect(r.data[0].key).toBe('CLOUD');
+    expect(local.listItems).not.toHaveBeenCalled();
+    expect(web.listItems).toHaveBeenCalled();
   });
 
   it('gets children from the local /children endpoint, not a parentItem-filtered list', async () => {

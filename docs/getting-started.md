@@ -9,7 +9,7 @@
 3. Claude Desktop opens and shows you what Zoteus can do. Click **Add** to accept.
 4. Restart Claude Desktop if it asks. That's it — skip to [Restart Claude Desktop and verify](#restart-claude-desktop-and-verify).
 
-> Want to sync, use group libraries, or work while Zotero is closed? Add a [Zotero API key](#what-is-the-zotero-api-key) in the extension's settings afterwards. Reading *and* changing your own library works without one while the desktop app is running.
+> Want to sync, change a group library, or work while Zotero is closed? Add a [Zotero API key](#what-is-the-zotero-api-key) in the extension's settings afterwards. Reading *and* changing your own library works without one while the desktop app is running, and on Zotero 10+ so does reading any group library the app holds.
 
 ## Option B — Manual setup (any MCP client, e.g. Claude Desktop)
 
@@ -65,7 +65,7 @@ Save the file, then [restart Claude Desktop](#restart-claude-desktop-and-verify)
 
 ## What is the Zotero API key?
 
-A Zotero API key is a password-like string that lets Zoteus talk to your Zotero account on the web. **It is optional whenever the Zotero desktop app is running** — Zoteus then reads *and* writes your own library through the app. You need a key for sync, group libraries, and changes made while the app is closed.
+A Zotero API key is a password-like string that lets Zoteus talk to your Zotero account on the web. **It is optional whenever the Zotero desktop app is running** — Zoteus then reads *and* writes your own library through the app. On Zotero 10+ the app also serves any **group library** it holds, so reading those needs no key either. You need a key for sync, for changing a group library, for reading a group the app does not hold, and for changes made while the app is closed.
 
 ### Creating a key (if you want one)
 
@@ -82,7 +82,7 @@ If you use the **Zotero 7 (or newer) desktop app**, Zoteus can work with your li
 2. Enable **"Allow other applications on this computer to communicate with Zotero"**.
 3. Keep Zotero running while you chat with Claude.
 
-This key-free mode covers searching (keyword *and* semantic, including the one-time index build), reading, bibliographies, and PDF text from your own library — and adding items, filing attachments, highlighting PDFs, and trashing items, which go straight into the running app. (The first such change may pop up a one-time Zotero dialog asking whether to allow Zoteus to make changes; choose **Always Allow**.) You'd add an API key only to **sync, work with group libraries, or make changes while Zotero is closed**.
+This key-free mode covers searching (keyword *and* semantic, including the one-time index build), reading, bibliographies, and PDF text from your own library — and adding items, filing attachments, highlighting PDFs, and trashing items, which go straight into the running app. (The first such change may pop up a one-time Zotero dialog asking whether to allow Zoteus to make changes; choose **Always Allow**.) On Zotero 10+ it also covers reading any **group library** the app holds. You'd add an API key only to **sync, change a group library, reach a group the app does not hold, or make changes while Zotero is closed**.
 
 ## Restart Claude Desktop and verify
 

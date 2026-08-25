@@ -54,7 +54,9 @@ export class LibraryRouter {
     // users/0 maps to the desktop's own personal library, whatever its cloud id.
     if (library.type === 'user') return library.id === def.id || library.id === 0;
     // A group only if this desktop holds it; otherwise the read belongs to the cloud.
-    return this.capabilities.localGroupIds.includes(library.id);
+    // Capabilities is a published interface: an older caller may hand us a literal with
+    // no localGroupIds at all, and a missing field must route to the cloud, not throw.
+    return (this.capabilities.localGroupIds ?? []).includes(library.id);
   }
 
   async searchItems(query: ItemQuery & ReadOpts = {}): Promise<ListResult> {

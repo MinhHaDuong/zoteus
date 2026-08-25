@@ -127,4 +127,123 @@ describe('LocalApiClient', () => {
     });
     expect(await makeLocal(fetchImpl).fullTextSince(0)).toEqual({ ATT01: 676, ATT02: 705 });
   });
+
+  it('reads a group library from /groups/<id>, never users/0', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/groups/4321/items');
+      expect(url).not.toContain('/users/0');
+      expect(url).toContain('limit=5');
+      return new Response(JSON.stringify([{ key: 'G1' }]), {
+        status: 200,
+        headers: { 'Total-Results': '1', 'Last-Modified-Version': '3' },
+      });
+    });
+    const r = await makeLocal(fetchImpl).listItems({ limit: 5 }, { type: 'group', id: 4321 });
+    expect(r.data).toEqual([{ key: 'G1' }]);
+  });
+
+  it('addresses every other group read under the same /groups/<id> prefix', async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(url);
+      const body = url.includes('/items/ATT01/fulltext') ? { content: 'group text' } : [];
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Total-Results': '0' } });
+    });
+    const c = makeLocal(fetchImpl);
+    const lib = { type: 'group' as const, id: 4321 };
+    await c.getItemChildren('ABCD1234', {}, lib);
+    const ft = await c.getFullText('ATT01', lib);
+    await c.fullTextSince(7, lib);
+    await c.listCollections({}, lib);
+    expect(ft.content).toBe('group text');
+    expect(seen).toEqual([
+      'http://127.0.0.1:23119/api/groups/4321/items/ABCD1234/children',
+      'http://127.0.0.1:23119/api/groups/4321/items/ATT01/fulltext',
+      'http://127.0.0.1:23119/api/groups/4321/fulltext?since=7',
+      'http://127.0.0.1:23119/api/groups/4321/collections',
+    ]);
+  });
+});
+
+describe('LocalApiClient.listLocalGroupIds', () => {
+  it('parses the flat group shape', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(url).toContain('/api/users/0/groups');
+      expect(url).toContain('limit=100');
+      return new Response(JSON.stringify([{ id: 4321 }, { id: 8765 }]), {
+        status: 200,
+        headers: { 'Total-Results': '2' },
+      });
+    });
+    const ids = await makeLocal(fetchImpl).listLocalGroupIds();
+    expect(ids).toEqual([4321, 8765]);
+    expect(ids.every((n) => typeof n === 'number')).toBe(true);
+  });
+
+  it('parses the data-wrapped group shape, whose ids would otherwise all be NaN', async () => {
+    // Zotero group JSON is commonly `{ data: { id } }`; reading only `g.id` there yields
+    // NaN for every group, so nothing is ever recognised as locally held.
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify([{ data: { id: 4321, name: 'Lab' } }, { data: { id: 8765 } }]), {
+          status: 200,
+          headers: { 'Total-Results': '2' },
+        }),
+    );
+    expect(await makeLocal(fetchImpl).listLocalGroupIds()).toEqual([4321, 8765]);
+  });
+
+  it('coerces ids to numbers and drops entries that carry none', async () => {
+    // The router compares against LibraryRef.id, a number, so '4321' must not stay a string.
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify([{ id: '4321' }, { data: { id: '8765' } }, { name: 'no id' }]), {
+          status: 200,
+          headers: { 'Total-Results': '3' },
+        }),
+    );
+    const ids = await makeLocal(fetchImpl).listLocalGroupIds();
+    expect(ids).toEqual([4321, 8765]);
+    expect(ids.every((n) => typeof n === 'number')).toBe(true);
+  });
+
+  it('returns [] when the app is unreachable, so group reads stay on the cloud', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    expect(await makeLocal(fetchImpl).listLocalGroupIds()).toEqual([]);
+  });
+
+  it('returns [] when the endpoint is absent (pre-Zotero-10)', async () => {
+    const fetchImpl = vi.fn(async () => new Response('No endpoint found', { status: 404 }));
+    expect(await makeLocal(fetchImpl).listLocalGroupIds()).toEqual([]);
+  });
+
+  it('pages past the first 100 groups instead of truncating', async () => {
+    const all = Array.from({ length: 150 }, (_, i) => ({ data: { id: 1000 + i } }));
+    const starts: number[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      const start = Number(new URL(url).searchParams.get('start'));
+      starts.push(start);
+      return new Response(JSON.stringify(all.slice(start, start + 100)), {
+        status: 200,
+        headers: { 'Total-Results': '150' },
+      });
+    });
+    const ids = await makeLocal(fetchImpl).listLocalGroupIds();
+    expect(starts).toEqual([0, 100]);
+    expect(ids).toHaveLength(150);
+    expect(ids[149]).toBe(1149);
+  });
+
+  it('keeps the pages it already read when a later one fails', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('start=100')) throw new Error('ECONNRESET');
+      return new Response(JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ id: i }))), {
+        status: 200,
+        headers: { 'Total-Results': '150' },
+      });
+    });
+    expect(await makeLocal(fetchImpl).listLocalGroupIds()).toHaveLength(100);
+  });
 });

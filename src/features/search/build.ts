@@ -93,11 +93,12 @@ export interface BuildFulltextOptions {
  * Whether a page came from the desktop app or the cloud never changes the identity of
  * what is indexed: item keys are the same in both APIs, and the index file is keyed by
  * the context (dataDir, plus the authenticated user in multi-tenant mode — see
- * `searchIndexPath`), never by the routed library id. So the local `users/0` addressing
- * cannot split the index from the one built against the real userID, and a build that
- * switched backends between runs stays coherent. Nothing here compares Zotero library
- * versions across backends either: `buildIncremental` always rebuilds from scratch and
- * reports `builtFromVersion` as the item count it fetched, so the local/cloud version
+ * `searchIndexPath`), never by the routed library id. So neither the local `users/0`
+ * addressing of the personal library nor a group served locally under its own id can
+ * split the index from the one built against the cloud, and a build that switched
+ * backends between runs stays coherent. Nothing here compares Zotero library versions
+ * across backends either: `buildIncremental` always rebuilds from scratch and reports
+ * `builtFromVersion` as the item count it fetched, so the local/cloud version
  * sequences (which differ — the desktop app has its own) are never mixed.
  */
 export function startIndexBuild(
@@ -111,8 +112,9 @@ export function startIndexBuild(
   const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
   const fetchPage = async (start: number) => {
     // Page through the router, not the Web API directly: a running desktop app serves the
-    // personal library key-free (users/0), so indexing needs no cloud key. The router still
-    // sends group libraries — and everything else when the app is closed — to the cloud.
+    // personal library key-free (users/0), and from Zotero 10 any group it holds too, so
+    // indexing needs no cloud key for either. The router sends the rest to the cloud: a
+    // group this desktop does not hold, and everything once the app is closed.
     // `lib` stays undefined for the default library so the router resolves it itself.
     const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true });
     return { items: page.data, totalResults: page.totalResults };

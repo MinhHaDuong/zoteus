@@ -163,12 +163,36 @@ export class LocalApiClient {
    * still go to the Web API. Returns [] when the endpoint is absent (pre-Zotero-10).
    */
   async listLocalGroupIds(): Promise<number[]> {
+    const ids: number[] = [];
+    // Both Zotero APIs page groups 100 at a time, so a user in more than 100 groups needs
+    // the same start/limit loop every other list read uses; without it the tail of the
+    // list is invisible here and those groups route to the cloud for no reason.
+    const limit = 100;
+    let start = 0;
     try {
-      const { json } = await this.getJson('/users/0/groups', this.buildQuery({ limit: 100 }));
-      if (!Array.isArray(json)) return [];
-      return json.map((g: any) => Number(g?.id)).filter((n: number) => Number.isFinite(n));
+      for (;;) {
+        const { json, headers } = await this.getJson(
+          '/users/0/groups',
+          this.buildQuery({ limit, start }),
+        );
+        if (!Array.isArray(json)) return ids;
+        for (const g of json as any[]) {
+          // Group JSON is often data-wrapped ({ data: { id } }); read both shapes, exactly
+          // as the zotero_groups parser does. Reading only `g.id` against the wrapped
+          // shape makes every id NaN, so no group is ever recognised as local.
+          const n = Number(g?.id ?? g?.data?.id);
+          if (Number.isFinite(n)) ids.push(n);
+        }
+        start += json.length;
+        // A MISSING total-results must fall back to the page length, not parse as 0
+        // (same trap as toListResult), which here simply stops after one page.
+        const total = numOrUndef(headers.get('total-results')) ?? json.length;
+        if (!json.length || start >= total) return ids;
+      }
     } catch {
-      return [];
+      // Whatever pages already came back are still true; only a first-page failure
+      // (endpoint absent, app down) yields [].
+      return ids;
     }
   }
 

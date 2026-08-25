@@ -13,7 +13,8 @@ Tool Registry      single source of truth (name, zod schema, annotations, handle
       │              → search_tools catalog (progressive disclosure)
       │
 LibraryRouter      startup capability probe → per-operation routing
-      │              reads  → local API when up, else cloud
+      │              reads  → local API when up (personal library, plus any group the
+      │                       desktop app holds, Zotero 10+), else cloud
       │              writes → desktop app for the personal library when up, else cloud
       │                       (group libraries and unsupported ops always cloud)
       │

@@ -26,7 +26,8 @@ function webClient(library: any[]) {
   };
 }
 
-/** Desktop local API mock: listItems(query) — no library argument, always users/0. */
+/** Desktop local API mock: listItems(query, lib). The router passes whichever library it
+ * resolved: a user lib is addressed users/0 on the wire, a group lib groups/<id>. */
 function localClient(library: any[]) {
   return {
     listItems: vi.fn(async (q: { limit?: number; start?: number }) => ({

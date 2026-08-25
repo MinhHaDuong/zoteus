@@ -38,11 +38,12 @@ can never time out the MCP client, even on very large libraries.
 
 **Local-first, key-free.** The build pages items through the library router, exactly like
 every other read: a running Zotero desktop app serves them from its **local API** (no
-cloud API key required), and the cloud **Web API** takes over when the app is closed — and
-always for group libraries, which the desktop app does not serve. Item keys are identical
-on both backends, so an index built against the desktop app stays valid when a later
-lookup goes to the cloud, and the index file is keyed by the Zoteus data dir (plus the
-authenticated user in multi-tenant mode), never by the library id the read happened to use.
+cloud API key required), for your personal library and, on Zotero 10+, for any group
+library the app holds. The cloud **Web API** takes over when the app is closed, and for a
+group library this desktop does not hold. Item keys are identical on both backends, so an
+index built against the desktop app stays valid when a later lookup goes to the cloud,
+and the index file is keyed by the Zoteus data dir (plus the authenticated user in
+multi-tenant mode), never by the library id the read happened to use.
 
 **Incremental, crash-safe persistence.** Partial progress is persisted atomically as the
 build runs (roughly every 200 items or 10s — write-temp-then-rename), so a timeout,

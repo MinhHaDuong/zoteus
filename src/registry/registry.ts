@@ -164,11 +164,19 @@ export function isLocalWritesUnavailable(err: unknown): boolean {
  * The local-API capability is probed at startup, but Zotero may be restarted (or
  * briefly unresponsive) during a long-lived server process. This re-pings once and
  * refreshes the flag so desktop write paths recover without a restart.
+ *
+ * The group list is re-probed with it: the startup probe skips it whenever the app was
+ * down, leaving `localGroupIds` frozen at []. A keyless local-only user who starts Zotero
+ * after the server would otherwise never reach a group the desktop holds, since the
+ * router keeps routing it to a cloud API that has no key.
  */
 export async function ensureLocalApi(ctx: ToolContext): Promise<boolean> {
   if (ctx.capabilities.localApi) return true;
   if (!ctx.local || ctx.config.local === 'off') return false;
   const up = await ctx.local.ping().catch(() => false);
-  if (up) ctx.capabilities.localApi = true;
+  if (up) {
+    ctx.capabilities.localApi = true;
+    ctx.capabilities.localGroupIds = await ctx.local.listLocalGroupIds().catch(() => []);
+  }
   return up;
 }
