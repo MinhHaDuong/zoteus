@@ -11,6 +11,8 @@
 
 > Want to sync, change a group library, or work while Zotero is closed? Add a [Zotero API key](#what-is-the-zotero-api-key) in the extension's settings afterwards. Reading *and* changing your own library works without one while the desktop app is running, and on Zotero 10+ so does reading any group library the app holds.
 
+> The same settings screen also tunes semantic search: whether PDF full text is indexed, how much of each document is indexed (*Full-text characters per item*, `0` for whole documents instead of the first 40000 characters), how many items a build crawls, and the embedding model, batch size and pause between embedding calls. Every field is optional: leave one empty to keep the default. See [Desktop extension settings](./configuration.md#desktop-extension-settings-mcpb).
+
 ## Option B — Manual setup (any MCP client, e.g. Claude Desktop)
 
 ### 1. Install Node.js (one time, ~2 minutes)

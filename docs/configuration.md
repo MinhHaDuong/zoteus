@@ -2,6 +2,8 @@
 
 Zoteus is configured via environment variables (see [`.env.example`](../.env.example)).
 
+A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, or a desktop-extension setting the user cleared, falls back to the default in the table below rather than failing to boot.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZOTERO_API_KEY` | — | Cloud auth (sync, group libraries, and writes when the desktop app is unavailable; optional otherwise). Create one at https://www.zotero.org/settings/keys |
@@ -27,6 +29,31 @@ Zoteus is configured via environment variables (see [`.env.example`](../.env.exa
 | `ZOTEUS_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` (stderr only — stdout carries the JSON-RPC stream). |
 | `ZOTEUS_UPDATE_CHECK` | `true` | Daily check of GitHub releases for a newer version; when one exists, `zotero_whoami` (and the stderr log) says so. Useful because manual installs such as the Claude desktop `.dxt` have no auto-update channel. The check is a single unauthenticated GET to the GitHub API, sends no user data, and caches the result for 24 h. Set `false` to disable. |
 | `ZOTEUS_DIST` | — | Distribution-channel marker. The packaged desktop-extension manifest sets `mcpb` (older bundles set `dxt`) so the update notice tells users to download and reinstall the new bundle. Not usually set by hand. |
+
+## Desktop extension settings (`.mcpb`)
+
+The Claude Desktop bundle has no `.env` file to read, so the installed extension's own
+settings screen (**Settings → Extensions → Zoteus**) is where these variables get set. Every
+field is optional and maps to one variable from the table above; leave a field **empty** to
+keep the server's default, and restart Claude Desktop after a change (the server reads its
+environment once, at startup).
+
+| Setting | Variable |
+|---|---|
+| Zotero API Key | `ZOTERO_API_KEY` |
+| Zotero local API | `ZOTEUS_LOCAL` |
+| Semantic-search embeddings | `ZOTEUS_EMBEDDINGS` |
+| Embedding model | `ZOTEUS_EMBEDDING_MODEL` |
+| Embedding batch size | `ZOTEUS_EMBED_BATCH_SIZE` |
+| Pause between embedding calls (ms) | `ZOTEUS_EMBED_BATCH_DELAY_MS` |
+| Index PDF full text | `ZOTEUS_INDEX_FULLTEXT` |
+| Full-text characters per item | `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` (set `0` for no cap, i.e. index whole documents) |
+| Max items per index build | `ZOTEUS_INDEX_MAX_ITEMS` |
+| Local embeddings path | `ZOTEUS_TRANSFORMERS_PATH` |
+
+Any variable *not* in that list is out of reach of the bundle: use a manual install
+(Option B in [`getting-started.md`](./getting-started.md)) or a self-hosted run, both of
+which take the full environment.
 
 ## Remote OAuth (claude.ai web connector)
 

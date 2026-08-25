@@ -88,52 +88,71 @@ const bool = (def: boolean) =>
 const optionalNonEmpty = () =>
   z.preprocess((v) => (v === '' ? undefined : v), z.string().min(1).optional());
 
+/**
+ * The counterpart for constrained values (numbers, enums, urls, emails): wraps a schema so
+ * a blank env value counts as unset. A desktop-extension (`.mcpb`) client substitutes each
+ * user_config field the user left empty as an empty-string env var, and a bare `KEY=` line
+ * in a .env file does the same. Without this, '' (or whitespace) reaches the inner schema:
+ * `z.coerce.number()` reads it as 0, which either fails a `.positive()` check and crashes
+ * boot or silently replaces a default with 0 (no full-text cap, no rate limit); an enum,
+ * url or email simply rejects it and crashes boot. Mapping blank input to `undefined` lets
+ * the wrapped schema's own `.default()`/`.optional()` apply instead. A value that is
+ * present but invalid still fails, as before, and where the value is genuinely required the
+ * cross-field checks below surface a clear error.
+ */
+const blankAsUnset = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), schema);
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   const schema = z.object({
     ZOTERO_API_KEY: optionalNonEmpty(),
     ZOTEUS_LOCAL_API_KEY: optionalNonEmpty(),
-    ZOTERO_LIBRARY_ID: z.coerce.number().int().positive().optional(),
-    ZOTERO_LIBRARY_TYPE: z.enum(['user', 'group']).default('user'),
-    ZOTEUS_LOCAL: z.enum(['auto', 'on', 'off']).default('auto'),
-    ZOTERO_LOCAL_PORT: z.coerce.number().int().positive().default(23119),
-    ZOTEUS_TRANSLATION_SERVER_URL: z.string().url().default('http://127.0.0.1:1969'),
-    ZOTEUS_EMBEDDINGS: z.enum(['local', 'openai', 'gemini', 'off']).default('local'),
+    ZOTERO_LIBRARY_ID: blankAsUnset(z.coerce.number().int().positive().optional()),
+    ZOTERO_LIBRARY_TYPE: blankAsUnset(z.enum(['user', 'group']).default('user')),
+    ZOTEUS_LOCAL: blankAsUnset(z.enum(['auto', 'on', 'off']).default('auto')),
+    ZOTERO_LOCAL_PORT: blankAsUnset(z.coerce.number().int().positive().default(23119)),
+    ZOTEUS_TRANSLATION_SERVER_URL: blankAsUnset(z.string().url().default('http://127.0.0.1:1969')),
+    ZOTEUS_EMBEDDINGS: blankAsUnset(z.enum(['local', 'openai', 'gemini', 'off']).default('local')),
     ZOTEUS_EMBEDDING_MODEL: optionalNonEmpty(),
-    ZOTEUS_EMBED_BATCH_SIZE: z.coerce.number().int().positive().optional(),
-    ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
+    ZOTEUS_EMBED_BATCH_SIZE: blankAsUnset(z.coerce.number().int().positive().optional()),
+    ZOTEUS_EMBED_BATCH_DELAY_MS: blankAsUnset(z.coerce.number().int().nonnegative().default(0)),
     ZOTEUS_TRANSFORMERS_PATH: z.string().optional(),
     ZOTEUS_INDEX_FULLTEXT: bool(false),
-    ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: z.coerce.number().int().nonnegative().default(DEFAULT_FULLTEXT_MAX_CHARS),
-    ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
-    ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
+    ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: blankAsUnset(
+      z.coerce.number().int().nonnegative().default(DEFAULT_FULLTEXT_MAX_CHARS),
+    ),
+    ZOTEUS_INDEX_MAX_ITEMS: blankAsUnset(
+      z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
+    ),
+    ZOTEUS_INDEX_BACKEND: blankAsUnset(z.enum(['auto', 'sqlite', 'memory']).default('auto')),
     ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
-    ZOTEUS_DATA_DIR: z.string().optional(),
-    ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
+    ZOTEUS_DATA_DIR: optionalNonEmpty(),
+    ZOTEUS_CONTACT_EMAIL: blankAsUnset(z.string().email().optional()),
     ZOTEUS_ALLOW_DELETE: bool(false),
     ZOTEUS_READ_ONLY: bool(false),
-    ZOTEUS_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
-    ZOTEUS_LOG_FORMAT: z.enum(['text', 'json']).default('text'),
+    ZOTEUS_LOG_LEVEL: blankAsUnset(z.enum(['debug', 'info', 'warn', 'error']).default('info')),
+    ZOTEUS_LOG_FORMAT: blankAsUnset(z.enum(['text', 'json']).default('text')),
     ZOTEUS_UPDATE_CHECK: bool(true),
     ZOTEUS_DIST: optionalNonEmpty(),
     ZOTEUS_ALLOW_INSECURE_HTTP: bool(false),
     ZOTEUS_METRICS_ENABLED: bool(false),
     ZOTEUS_READYZ_CHECK_ZOTERO: bool(true),
-    ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().nonnegative().default(60),
-    ZOTEUS_MCP_RATE_LIMIT_MAX: z.coerce.number().int().nonnegative().default(120),
+    ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC: blankAsUnset(z.coerce.number().int().nonnegative().default(60)),
+    ZOTEUS_MCP_RATE_LIMIT_MAX: blankAsUnset(z.coerce.number().int().nonnegative().default(120)),
     ZOTEUS_OAUTH_ENABLED: bool(false),
-    ZOTEUS_PUBLIC_URL: z.string().url().optional(),
+    ZOTEUS_PUBLIC_URL: blankAsUnset(z.string().url().optional()),
     ZOTEUS_OAUTH_PASSCODE: optionalNonEmpty(),
-    ZOTEUS_OAUTH_ACCESS_TTL: z.coerce.number().int().positive().default(3600),
-    ZOTEUS_OAUTH_REFRESH_TTL: z.coerce.number().int().positive().default(2592000),
+    ZOTEUS_OAUTH_ACCESS_TTL: blankAsUnset(z.coerce.number().int().positive().default(3600)),
+    ZOTEUS_OAUTH_REFRESH_TTL: blankAsUnset(z.coerce.number().int().positive().default(2592000)),
     ZOTEUS_ALLOWED_HOSTS: z.string().optional(),
-    ZOTEUS_OAUTH_MODE: z.enum(['passcode', 'zotero']).default('passcode'),
+    ZOTEUS_OAUTH_MODE: blankAsUnset(z.enum(['passcode', 'zotero']).default('passcode')),
     ZOTERO_OAUTH_CLIENT_KEY: optionalNonEmpty(),
     ZOTERO_OAUTH_CLIENT_SECRET: optionalNonEmpty(),
-    ZOTEUS_OAUTH_STORE: z.enum(['memory', 'file']).default('memory'),
+    ZOTEUS_OAUTH_STORE: blankAsUnset(z.enum(['memory', 'file']).default('memory')),
     ZOTEUS_OAUTH_TOKEN_SECRET: optionalNonEmpty(),
     ZOTEUS_CIMD_ENABLED: bool(false),
-    ZOTEUS_CIMD_CACHE_TTL_SEC: z.coerce.number().int().nonnegative().default(3600),
-    ZOTEUS_CIMD_MAX_BYTES: z.coerce.number().int().positive().default(16384),
+    ZOTEUS_CIMD_CACHE_TTL_SEC: blankAsUnset(z.coerce.number().int().nonnegative().default(3600)),
+    ZOTEUS_CIMD_MAX_BYTES: blankAsUnset(z.coerce.number().int().positive().default(16384)),
     ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES: z.string().default('https'),
     ZOTEUS_CIMD_ALLOWED_HOSTS: z.string().default(''),
   });

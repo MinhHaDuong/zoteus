@@ -28,8 +28,13 @@
         "ZOTERO_API_KEY": "${user_config.api_key}",
         "ZOTEUS_LOCAL": "${user_config.local}",
         "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}",
+        "ZOTEUS_EMBEDDING_MODEL": "${user_config.embedding_model}",
+        "ZOTEUS_EMBED_BATCH_SIZE": "${user_config.embed_batch_size}",
+        "ZOTEUS_EMBED_BATCH_DELAY_MS": "${user_config.embed_batch_delay_ms}",
         "ZOTEUS_TRANSFORMERS_PATH": "${user_config.transformers_path}",
         "ZOTEUS_INDEX_FULLTEXT": "${user_config.index_fulltext}",
+        "ZOTEUS_INDEX_FULLTEXT_MAX_CHARS": "${user_config.index_fulltext_max_chars}",
+        "ZOTEUS_INDEX_MAX_ITEMS": "${user_config.index_max_items}",
         "ZOTEUS_DIST": "mcpb"
       }
     }
@@ -56,11 +61,45 @@
       "default": "local",
       "required": false
     },
+    "embedding_model": {
+      "type": "string",
+      "title": "Embedding model",
+      "description": "Model used by the API provider selected above: text-embedding-3-small for openai, text-embedding-004 for gemini. Ignored by local embeddings. Vectors from two models are not comparable, so the index is dropped (with a notice) and has to be rebuilt after you change this. Leave empty to use the provider's own default.",
+      "required": false
+    },
+    "embed_batch_size": {
+      "type": "number",
+      "title": "Embedding batch size",
+      "description": "Passages per embedding call: one API request, or one local pipeline call. Default 32. Lower it when a provider rejects a whole batch (OpenAI answers 400 above 300K tokens per request, a ceiling full-text passages reach far sooner than metadata ones). Leave empty to keep the default.",
+      "min": 1,
+      "required": false
+    },
+    "embed_batch_delay_ms": {
+      "type": "number",
+      "title": "Pause between embedding calls (ms)",
+      "description": "Wait between embedding calls. Default 0, which only yields to the event loop. A positive value slows a large build down so it stays under a provider's tokens-per-minute limit. Leave empty to keep the default.",
+      "min": 0,
+      "required": false
+    },
     "index_fulltext": {
       "type": "boolean",
       "title": "Index PDF full text",
       "description": "Also index the body text Zotero extracted from your PDFs, so semantic search can match a claim buried inside a paper and not just its title and abstract. Off by default because it is expensive: roughly 9x the passages, index size and embedding time. You can also turn it on for a single build with zotero_index fulltext:true.",
       "default": false,
+      "required": false
+    },
+    "index_fulltext_max_chars": {
+      "type": "number",
+      "title": "Full-text characters per item",
+      "description": "How much of each item's extracted body text gets indexed when the setting above is on. The default, 40000 characters (roughly 13 pages of dense text), truncates long documents: only the beginning of a book or a long thesis is searchable. Set 0 for no cap and full coverage, at the cost of a bigger index and a longer build. Leave empty to keep the default.",
+      "min": 0,
+      "required": false
+    },
+    "index_max_items": {
+      "type": "number",
+      "title": "Max items per index build",
+      "description": "How many top-level items a single index build will crawl. Default 5000. Raise it for a library larger than that: a build that stops at the cap reports how many items it left unindexed, and semantic search repeats the warning. Leave empty to keep the default.",
+      "min": 1,
       "required": false
     },
     "transformers_path": {

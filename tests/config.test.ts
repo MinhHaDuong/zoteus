@@ -61,6 +61,77 @@ describe('loadConfig', () => {
     expect(cfg.apiKey).toBeUndefined();
   });
 
+  it('boots on an all-blank desktop (.mcpb) environment, keeping every default', () => {
+    // A .mcpb client substitutes each user_config field the user left empty as an
+    // empty-string env var, so blank must mean "use the default", never 0 or a crash.
+    const cfg = loadConfig({
+      ZOTERO_API_KEY: '',
+      ZOTEUS_LOCAL: '',
+      ZOTEUS_EMBEDDINGS: '',
+      ZOTEUS_EMBEDDING_MODEL: '',
+      ZOTEUS_EMBED_BATCH_SIZE: '',
+      ZOTEUS_EMBED_BATCH_DELAY_MS: '   ',
+      ZOTEUS_TRANSFORMERS_PATH: '',
+      ZOTEUS_INDEX_FULLTEXT: '',
+      ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '',
+      ZOTEUS_INDEX_MAX_ITEMS: '',
+      ZOTEUS_DIST: 'mcpb',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.apiKey).toBeUndefined();
+    expect(cfg.local).toBe('auto');
+    expect(cfg.embeddings).toBe('local');
+    expect(cfg.embeddingModel).toBeUndefined();
+    expect(cfg.embedBatchSize).toBeUndefined();
+    expect(cfg.embedBatchDelayMs).toBe(0);
+    expect(cfg.transformersPath).toBeUndefined();
+    expect(cfg.indexFulltext).toBe(false);
+    expect(cfg.indexFulltextMaxChars).toBe(40000); // not 0, which would mean "no cap"
+    expect(cfg.indexMaxItems).toBe(5000);
+  });
+
+  it('keeps every other default when its env var is blank', () => {
+    const cfg = loadConfig({
+      ZOTERO_LIBRARY_ID: '',
+      ZOTERO_LOCAL_PORT: '',
+      ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC: '',
+      ZOTEUS_MCP_RATE_LIMIT_MAX: '',
+      ZOTEUS_OAUTH_ACCESS_TTL: '',
+      ZOTEUS_OAUTH_REFRESH_TTL: '',
+      ZOTEUS_CIMD_CACHE_TTL_SEC: '',
+      ZOTEUS_CIMD_MAX_BYTES: '',
+      ZOTERO_LIBRARY_TYPE: '',
+      ZOTEUS_INDEX_BACKEND: '',
+      ZOTEUS_LOG_LEVEL: '',
+      ZOTEUS_LOG_FORMAT: '',
+      ZOTEUS_TRANSLATION_SERVER_URL: '',
+      ZOTEUS_CONTACT_EMAIL: '',
+      ZOTEUS_DATA_DIR: '',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.libraryId).toBeUndefined();
+    expect(cfg.localPort).toBe(23119);
+    expect(cfg.mcpRateLimit).toEqual({ windowMs: 60_000, max: 120 });
+    expect(cfg.oauth.accessTokenTtlSec).toBe(3600);
+    expect(cfg.oauth.refreshTokenTtlSec).toBe(2592000);
+    expect(cfg.cimd.cacheTtlSec).toBe(3600);
+    expect(cfg.cimd.maxBytes).toBe(16384);
+    expect(cfg.libraryType).toBe('user');
+    expect(cfg.indexBackend).toBe('auto');
+    expect(cfg.logLevel).toBe('info');
+    expect(cfg.logFormat).toBe('text');
+    expect(cfg.translationServerUrl).toBe('http://127.0.0.1:1969');
+    expect(cfg.contactEmail).toBeUndefined();
+    expect(cfg.dataDir).not.toBe(''); // blank must fall back to the OS data dir
+  });
+
+  it('still rejects a value that is set but invalid', () => {
+    expect(() =>
+      loadConfig({ ZOTEUS_INDEX_MAX_ITEMS: 'lots' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow();
+    expect(() =>
+      loadConfig({ ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '-1' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow();
+  });
+
   it('treats empty optional string secrets as unset (no min(1) parse crash)', () => {
     expect(() =>
       loadConfig({
