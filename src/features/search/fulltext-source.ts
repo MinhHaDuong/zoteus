@@ -46,8 +46,8 @@ function emptySource(unavailable?: string): FulltextSource {
  * attachment that HAS extracted text (one request), and paging `itemType=attachment` gives
  * each one its `parentItem`. Only the intersection is ever fetched, so the number of
  * full-text GETs equals the number of attachments that actually have text, the minimum
- * possible. Resolving it per item instead would cost an extra children request for all
- * 5000 items, most of them for nothing.
+ * possible. Resolving it per item instead would cost an extra children request for every
+ * item in the build, most of them for nothing.
  *
  * Never throws: a library whose full-text endpoints are unreachable (a cloud key without
  * file access, an offline desktop app) degrades to a metadata-only build with a reason

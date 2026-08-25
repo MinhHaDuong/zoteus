@@ -4,6 +4,7 @@ import { chunkText } from './chunker.js';
 import { tokenize } from './tokenize.js';
 import type { EmbeddingProvider } from './embeddings.js';
 import { Semaphore } from '../../lib/semaphore.js';
+import { progressLine } from './build.js';
 import type { Logger } from '../../lib/logger.js';
 
 /**
@@ -438,10 +439,7 @@ export class SearchIndex {
       itemsSinceLog = 0;
       lastLogAt = Date.now();
       const s = this.buildStatus();
-      const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
-      this.opts.logger?.info(
-        `index build: ${s.itemsFetched}/${total} items, ${s.passages} passages, ${s.vectors} vectors (embedder=${s.embedder})`,
-      );
+      this.opts.logger?.info(`index build: ${progressLine(s)}`);
       opts.onProgress?.(s);
     };
     const embedPending = async (force: boolean): Promise<void> => {
@@ -523,11 +521,7 @@ export class SearchIndex {
       await persistNow();
       this.buildState = 'done';
       const final = this.buildStatus();
-      const total = final.itemsTotal > 0 ? String(final.itemsTotal) : '?';
-      this.opts.logger?.info(
-        `index build ${token.cancelled ? 'stopped' : 'complete'}: ` +
-          `${final.itemsFetched}/${total} items, ${final.passages} passages, ${final.vectors} vectors (embedder=${final.embedder})`,
-      );
+      this.opts.logger?.info(`index build ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`);
       opts.onProgress?.(final);
       return final;
     } catch (e) {
@@ -618,11 +612,31 @@ export class SearchIndex {
     return hits;
   }
 
-  toJSON(): { chunks: ChunkRecord[]; vectors: ReturnType<VectorStore['toJSON']>; builtFromVersion: number } {
-    return { chunks: [...this.chunks.values()], vectors: this.vectors.toJSON(), builtFromVersion: this.builtFromVersion };
+  toJSON(): {
+    chunks: ChunkRecord[];
+    vectors: ReturnType<VectorStore['toJSON']>;
+    builtFromVersion: number;
+    itemsTotal: number;
+    itemsAvailable: number;
+  } {
+    return {
+      chunks: [...this.chunks.values()],
+      vectors: this.vectors.toJSON(),
+      builtFromVersion: this.builtFromVersion,
+      // Persisted so a truncated build outlives the process that ran it: a restart that
+      // dropped them reported total=0 available=0 and silently stopped warning.
+      itemsTotal: this.itemsTotal,
+      itemsAvailable: this.itemsAvailable,
+    };
   }
 
-  loadFromJSON(data: { chunks: ChunkRecord[]; vectors: any[]; builtFromVersion: number }): void {
+  loadFromJSON(data: {
+    chunks: ChunkRecord[];
+    vectors: any[];
+    builtFromVersion: number;
+    itemsTotal?: number;
+    itemsAvailable?: number;
+  }): void {
     this.reset();
     for (const rec of data.chunks ?? []) {
       this.chunks.set(rec.id, rec);
@@ -638,5 +652,9 @@ export class SearchIndex {
     this.fulltextEnabled = this.fulltextPassages > 0;
     this.vectors = VectorStore.fromJSON(data.vectors ?? []);
     this.builtFromVersion = data.builtFromVersion ?? 0;
+    // Absent in files written before these were persisted: 0/0 leaves every truncation
+    // check false, so an old index stays silent rather than inventing a shortfall.
+    this.itemsTotal = data.itemsTotal ?? 0;
+    this.itemsAvailable = data.itemsAvailable ?? 0;
   }
 }

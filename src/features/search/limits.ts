@@ -1,7 +1,8 @@
 /**
- * Index build limits, kept in their own module so `config.ts` can read the default
- * without importing `build.ts` — which pulls in the registry and would close an
- * import cycle back onto config.
+ * Index build limits, kept in their own module so `config.ts` can read the default without
+ * importing `build.ts` and, with it, the search feature's runtime dependencies (persistence,
+ * the full-text source, and whatever those grow into). Config stays a leaf that any module
+ * can import.
  */
 
 /**

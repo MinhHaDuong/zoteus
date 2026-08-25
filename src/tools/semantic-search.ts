@@ -1,7 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
-import { embedderNotice, fulltextNotice, progressLine, startIndexBuild } from '../features/search/build.js';
+import {
+  embedderNotice,
+  fulltextNotice,
+  progressLine,
+  startIndexBuild,
+  truncationNotice,
+} from '../features/search/build.js';
 
 const semanticSearch: ToolDefinition = {
   name: 'zotero_semantic_search',
@@ -103,7 +109,10 @@ const semanticSearch: ToolDefinition = {
         ? `Top ${hits.length} match(es) for "${args.q}" (${ctx.search.embedderName}).`
         : `No matches for "${args.q}".`) +
       (args.mode === 'keyword' ? '' : embedderNotice(after)) +
-      fulltextNotice(after);
+      fulltextNotice(after) +
+      // A search over a truncated index must say so here, not only in zotero_index status:
+      // this is where "no matches" would otherwise be read as "the library holds nothing".
+      truncationNotice(after);
     return ok(
       {
         hits,
