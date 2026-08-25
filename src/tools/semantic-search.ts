@@ -4,6 +4,7 @@ import { ok } from '../registry/registry.js';
 import {
   embedderNotice,
   fulltextNotice,
+  persistNotice,
   progressLine,
   staleVectorsNotice,
   startIndexBuild,
@@ -117,7 +118,9 @@ const semanticSearch: ToolDefinition = {
       fulltextNotice(after) +
       // A search over a truncated index must say so here, not only in zotero_index status:
       // this is where "no matches" would otherwise be read as "the library holds nothing".
-      truncationNotice(after);
+      truncationNotice(after) +
+      // Same for an index that never reached disk: these results exist only until restart.
+      persistNotice(after);
     return ok(
       {
         hits,
@@ -128,6 +131,7 @@ const semanticSearch: ToolDefinition = {
         ...(after.vectorsStaleReason ? { vectorsStaleReason: after.vectorsStaleReason } : {}),
         fulltextEnabled: after.fulltextEnabled,
         ...(after.fulltextReason ? { fulltextReason: after.fulltextReason } : {}),
+        ...(after.persistError ? { persistError: after.persistError } : {}),
       },
       summary,
     );

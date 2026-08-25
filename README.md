@@ -94,6 +94,7 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 | `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_INDEX_FULLTEXT` | `false` | Index PDF body text for semantic search (opt-in; costly) |
+| `ZOTEUS_INDEX_BACKEND` | `auto` | `auto\|sqlite\|memory` — where the search index lives. `auto` uses SQLite (FTS5) on Node 22.13+, which is what a large library needs |
 | `ZOTEUS_TRANSFORMERS_PATH` | — | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
 

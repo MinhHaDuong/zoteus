@@ -150,7 +150,8 @@ issued bearer token. No `ZOTERO_API_KEY` and no `ZOTEUS_OAUTH_PASSCODE` are need
   `ZOTEUS_OAUTH_TOKEN_SECRET`. Losing or rotating the secret invalidates the store (users
   simply re-authorize). The store file lives under `ZOTEUS_DATA_DIR` (git-ignored).
 - **Per-user index:** `zotero_index` builds a separate semantic index per user
-  (`search-index-<userID>.json`); tenants never share an index.
+  (`search-index-<userID>.sqlite`, or `.json` on the legacy backend); tenants never share
+  an index.
 - **Single instance:** the file store is local; run one instance (no shared-replica state).
 - **Read-only recommended:** keep `ZOTEUS_READ_ONLY=true` so the connector requests
   read-only Zotero permissions (`library_access=1&write_access=0&all_groups=read`).

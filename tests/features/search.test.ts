@@ -3,7 +3,7 @@ import { BM25Index } from '../../src/features/search/bm25.js';
 import { VectorStore } from '../../src/features/search/vector-store.js';
 import { chunkText, chunkWithOffsets } from '../../src/features/search/chunker.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex } from '../../src/features/search/index-manager.js';
 
 describe('BM25Index', () => {
   it('ranks the most relevant document first', () => {
@@ -47,7 +47,7 @@ const items = [
 
 describe('SearchIndex (hybrid with fake embedder)', () => {
   it('builds and returns item-cited hits', async () => {
-    const idx = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const idx = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider() });
     const status = await idx.build(items, { version: 3 });
     expect(status.items).toBe(3);
     expect(status.vectors).toBeGreaterThan(0);
@@ -58,7 +58,7 @@ describe('SearchIndex (hybrid with fake embedder)', () => {
   });
 
   it('works keyword-only when there is no embedder', async () => {
-    const idx = new SearchIndex({ embedder: null });
+    const idx = new MemorySearchIndex({ embedder: null });
     await idx.build(items);
     expect(idx.status().vectors).toBe(0);
     const hits = await idx.query('tomatoes', { limit: 3 });
@@ -66,9 +66,9 @@ describe('SearchIndex (hybrid with fake embedder)', () => {
   });
 
   it('persists and reloads', async () => {
-    const a = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const a = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider() });
     await a.build(items);
-    const b = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const b = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider() });
     b.loadFromJSON(a.toJSON());
     expect(b.status().items).toBe(3);
     const hits = await b.query('gardening', { limit: 1 });
@@ -117,11 +117,11 @@ describe('chunkWithOffsets', () => {
 
 describe('SearchIndex embedder passthrough', () => {
   it('exposes hasEmbedder and embed for ad-hoc ranking', async () => {
-    const withEmb = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const withEmb = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider() });
     expect(withEmb.hasEmbedder).toBe(true);
     const vecs = await withEmb.embed(['a', 'b']);
     expect(vecs).toHaveLength(2);
-    const none = new SearchIndex({ embedder: null });
+    const none = new MemorySearchIndex({ embedder: null });
     expect(none.hasEmbedder).toBe(false);
     expect(await none.embed(['a'])).toEqual([]);
   });
@@ -130,7 +130,7 @@ describe('SearchIndex embedder passthrough', () => {
 describe('snippet quality (W5)', () => {
   it('centres the snippet on the query and does not start mid-word', async () => {
     const longAbstract = 'padding '.repeat(80) + 'the Gauss Newton Hessian decomposition matters here ' + 'tail '.repeat(80);
-    const idx = new SearchIndex({ embedder: null });
+    const idx = new MemorySearchIndex({ embedder: null });
     await idx.build([{ key: 'Z', data: { itemType: 'journalArticle', title: 'Opt', abstractNote: longAbstract } }]);
     const hits = await idx.query('Hessian decomposition', { limit: 1 });
     expect(hits[0].snippet.toLowerCase()).toContain('hessian');

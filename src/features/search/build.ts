@@ -1,8 +1,7 @@
 import type { ToolContext } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
-import type { IndexBuildStatus } from './index-manager.js';
+import type { IndexBuildStatus } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
-import { saveIndex } from './persistence.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
 
 /**
@@ -81,9 +80,40 @@ export function truncationNotice(s: IndexBuildStatus): string {
   );
 }
 
+/**
+ * Sentence appended when the index could not be written to its store. Same reasoning as
+ * `embedderNotice`: a build whose artifact never reached disk still reports state:"done",
+ * and until #10 the only trace was a stderr warning, so the loss surfaced on the next
+ * startup as an empty index nobody had touched.
+ */
+export function persistNotice(s: IndexBuildStatus): string {
+  if (!s.persistError) return '';
+  return (
+    ` The index could NOT be saved (${s.persistError}), so everything indexed here is held in memory only and is` +
+    ' lost when the server restarts. On the JSON backend this is usually the size ceiling of a single' +
+    ' JSON.stringify (~512 MB): set ZOTEUS_INDEX_BACKEND=sqlite (Node 22.13+) to store the index in SQLite' +
+    ' instead. Otherwise check free disk space and write permission on ZOTEUS_DATA_DIR.'
+  );
+}
+
+/**
+ * Sentence appended when opening the store needed saying: a JSON index imported into
+ * SQLite, or one too large to import at all. Migration must never be something a user
+ * discovers by noticing their searches went quiet.
+ */
+export function storageNotice(s: IndexBuildStatus): string {
+  return s.storageNotice ? ` ${s.storageNotice}` : '';
+}
+
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
-  const notice = embedderNotice(s) + staleVectorsNotice(s) + fulltextNotice(s) + truncationNotice(s);
+  const notice =
+    embedderNotice(s) +
+    staleVectorsNotice(s) +
+    fulltextNotice(s) +
+    truncationNotice(s) +
+    persistNotice(s) +
+    storageNotice(s);
   switch (s.state) {
     case 'building':
       return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
@@ -114,7 +144,7 @@ export interface BuildFulltextOptions {
  * Throws if a build is already running.
  *
  * Whether a page came from the desktop app or the cloud never changes the identity of
- * what is indexed: item keys are the same in both APIs, and the index file is keyed by
+ * what is indexed: item keys are the same in both APIs, and the index store is keyed by
  * the context (dataDir, plus the authenticated user in multi-tenant mode — see
  * `searchIndexPath`), never by the routed library id. So neither the local `users/0`
  * addressing of the personal library nor a group served locally under its own id can
@@ -142,13 +172,6 @@ export function startIndexBuild(
     const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true });
     return { items: page.data, totalResults: page.totalResults };
   };
-  const persist = ctx.searchIndexPath
-    ? () =>
-        saveIndex(ctx.search, ctx.searchIndexPath).catch((e) =>
-          ctx.logger.warn(`Could not persist index: ${e instanceof Error ? e.message : String(e)}`),
-        )
-    : undefined;
-
   const wantFulltext = opts.fulltext ?? ctx.config.indexFulltext;
   const maxChars = opts.fulltextMaxChars ?? ctx.config.indexFulltextMaxChars;
   // The attachment map is resolved lazily, on the first item, because startIndexBuild is
@@ -165,16 +188,18 @@ export function startIndexBuild(
       }
     : undefined;
 
+  // The index persists itself (JSON file or SQLite commit), and a failure to do so is
+  // recorded on the build status rather than swallowed here: see persistNotice.
   const job = ctx.search.buildIncremental(fetchPage, {
     maxItems: cap,
-    persist,
     fulltextFor,
     // Passages per embedding request, and the pause between requests: the dials an API
     // provider's per-request token cap and per-minute rate limit are tuned against.
     embedBatchSize: ctx.config.embedBatchSize,
     embedBatchDelayMs: ctx.config.embedBatchDelayMs,
-    // A full-text index is far bigger, and persisting means re-serializing all of it. Save
-    // less often so the write does not dominate the build.
+    // A full-text index is far bigger, and on the JSON backend persisting means
+    // re-serializing all of it. Save less often so the write does not dominate the build.
+    // (On SQLite a persist is a commit, so this only costs a slightly longer transaction.)
     ...(wantFulltext ? { persistEveryItems: 500, persistEveryMs: 60_000 } : {}),
   });
   job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));

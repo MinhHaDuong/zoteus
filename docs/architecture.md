@@ -43,7 +43,7 @@ Feature modules    SchemaService · citation (translation-server, CSL, citeproc)
 | `src/resources/` | `zotero://` resources |
 | `src/prompts/` | 7 workflow prompts |
 | `src/features/citation` | translation-server client, CSL style resolver, citeproc engine |
-| `src/features/search` | tokenizer, BM25, vector store, embeddings, chunker, index manager |
+| `src/features/search` | tokenizer, BM25, vector store, embeddings, chunker, index manager, and the two index backends behind `SearchIndex` (JSON, SQLite/FTS5) |
 | `src/features/scholar` | OpenAlex + Crossref clients, scholar graph |
 | `src/features/resolve` | built-in DOI/arXiv import resolution (translation-server fallback), see `docs/resolver.md` |
 | `src/codex/` | generates the code-execution wrapper tree from the registry |

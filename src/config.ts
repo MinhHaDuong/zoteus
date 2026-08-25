@@ -27,6 +27,11 @@ export interface ZoteusConfig {
   indexFulltextMaxChars: number;
   /** Cap on items per index build. Raise it for libraries larger than the default. */
   indexMaxItems: number;
+  /**
+   * Where the search index is stored: `sqlite` (node:sqlite, Node 22.13+), `memory` (the
+   * legacy JSON file), or `auto` to take SQLite whenever the runtime provides it.
+   */
+  indexBackend: 'auto' | 'sqlite' | 'memory';
   scholarProviders: string[];
   dataDir: string;
   contactEmail?: string;
@@ -100,6 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     ZOTEUS_INDEX_FULLTEXT: bool(false),
     ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: z.coerce.number().int().nonnegative().default(DEFAULT_FULLTEXT_MAX_CHARS),
     ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
+    ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
     ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
     ZOTEUS_DATA_DIR: z.string().optional(),
     ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
@@ -184,6 +190,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
+    indexBackend: parsed.ZOTEUS_INDEX_BACKEND,
     scholarProviders: parsed.ZOTEUS_SCHOLAR_PROVIDERS.split(',')
       .map((s) => s.trim())
       .filter(Boolean),

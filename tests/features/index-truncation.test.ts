@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/index-manager.js';
 import { progressLine, startIndexBuild, statusSummary, truncationNotice } from '../../src/features/search/build.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from '../../src/features/search/limits.js';
 import indexTool from '../../src/tools/index-tool.js';
@@ -9,7 +9,7 @@ import { loadConfig } from '../../src/config.js';
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} } as any;
 
 function keywordIndex(): SearchIndex {
-  return new SearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
+  return new MemorySearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
 }
 
 /** A library of `total` items, served 100 at a time, like both Zotero APIs. */

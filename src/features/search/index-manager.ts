@@ -1,12 +1,50 @@
-import { BM25Index, type BM25Hit } from './bm25.js';
-import { VectorStore, type VectorHit } from './vector-store.js';
+import { BM25Index } from './bm25.js';
+import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { tokenize } from './tokenize.js';
-import { batchPause, embedderIdentity, type EmbeddingProvider } from './embeddings.js';
+import { batchPause, embedderIdentity } from './embeddings.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
 import { progressLine } from './build.js';
-import type { Logger } from '../../lib/logger.js';
+import { saveIndex } from './persistence.js';
+import type {
+  BuildOptions,
+  BuildState,
+  ChunkRecord,
+  IncrementalBuildOptions,
+  IndexBuildStatus,
+  IndexCounts,
+  IndexSnapshot,
+  PageFetcher,
+  QueryOptions,
+  RankedId,
+  SearchHit,
+  SearchIndex,
+  SearchIndexOptions,
+  SearchIndexStatus,
+  StorageBackend,
+} from './backend.js';
+
+// The contract and its types live in backend.ts (two implementations share them); they are
+// re-exported here because this module was their home and every caller still imports it.
+export type {
+  BuildOptions,
+  BuildState,
+  ChunkRecord,
+  IncrementalBuildOptions,
+  IndexBuildStatus,
+  IndexCounts,
+  IndexSnapshot,
+  PageFetcher,
+  PageResult,
+  QueryOptions,
+  RankedId,
+  SearchHit,
+  SearchIndex,
+  SearchIndexOptions,
+  SearchIndexStatus,
+  StorageBackend,
+} from './backend.js';
 
 /**
  * Passage size for attachment full text. Deliberately larger than the metadata chunk
@@ -15,133 +53,6 @@ import type { Logger } from '../../lib/logger.js';
  */
 export const FULLTEXT_CHUNK_SIZE = 1200;
 export const FULLTEXT_CHUNK_OVERLAP = 150;
-
-export interface SearchHit {
-  itemKey: string;
-  title: string;
-  snippet: string;
-  score: number;
-  /** Present when the snippet came from an attachment's body text, not its metadata. */
-  source?: 'fulltext';
-}
-
-export interface SearchIndexStatus {
-  documents: number;
-  vectors: number;
-  items: number;
-  /**
-   * The embedder that is actually producing vectors, NOT merely the one that was asked
-   * for. Reads "none (local requested; ...)" when the configured provider cannot run, so
-   * a 0-vector index explains itself instead of looking like an empty library (#7).
-   */
-  embedder: string;
-  /** The requested ZOTEUS_EMBEDDINGS value, whether or not it works. */
-  embedderConfigured: string;
-  /** Model the active embedder uses, when it names one (ZOTEUS_EMBEDDING_MODEL). */
-  embedderModel?: string;
-  /** True only while the configured provider is genuinely producing vectors. */
-  embedderActive: boolean;
-  /** Why `embedderConfigured` is not active, and what to do about it. */
-  embedderReason?: string;
-  /** Set when stored vectors were discarded because another embedder had produced them. */
-  vectorsStaleReason?: string;
-  /** True when this build was asked to index attachment full text (opt-in). */
-  fulltextEnabled: boolean;
-  /** Items whose attachment full text is in the index. */
-  fulltextItems: number;
-  /** Passages that came from attachment full text (a subset of `documents`). */
-  fulltextPassages: number;
-  /** Why full text is not being indexed although it was requested. */
-  fulltextReason?: string;
-  builtFromVersion: number;
-}
-
-/** Lifecycle of the asynchronous background index build. */
-export type BuildState = 'idle' | 'building' | 'done' | 'error';
-
-/**
- * Live build/status snapshot. Backward compatible with SearchIndexStatus (it keeps
- * documents/vectors/items/embedder/builtFromVersion) and adds build progress.
- */
-export interface IndexBuildStatus extends SearchIndexStatus {
-  state: BuildState;
-  /** Items pulled from the Zotero API so far. */
-  itemsFetched: number;
-  /** Total items expected (0 = not yet known). Capped by the build limit. */
-  itemsTotal: number;
-  /**
-   * Items the library actually holds, before the build limit is applied (0 = not yet
-   * known). Kept apart from `itemsTotal` so a truncated build stays legible: with only
-   * the capped figure, a build that stopped at the limit reports `5000/5000` and is
-   * indistinguishable from one that indexed the whole library.
-   */
-  itemsAvailable: number;
-  /** Passages indexed so far (alias of documents). */
-  passages: number;
-  /** Set when state === 'error'. */
-  lastError?: string;
-}
-
-/** One page of library items plus the library-wide total (for progress). */
-export interface PageResult {
-  items: any[];
-  totalResults: number;
-}
-
-/** Fetch a page of items starting at offset `start` (the Web API pages 100-at-a-time). */
-export type PageFetcher = (start: number) => Promise<PageResult>;
-
-export interface IncrementalBuildOptions {
-  /** Hard cap on items to index (defaults to no cap beyond the fetcher). */
-  maxItems?: number;
-  /** Embedding batch size (texts handed to the provider per call). */
-  embedBatchSize?: number;
-  /** Pause between embedding batches in ms; 0 only yields (see batchPause). */
-  embedBatchDelayMs?: number;
-  /** Persist partial progress every N items. */
-  persistEveryItems?: number;
-  /** Persist partial progress at least every N ms. */
-  persistEveryMs?: number;
-  /** Log/report progress every N items. */
-  progressEveryItems?: number;
-  /** Log/report progress at least every N ms. */
-  progressEveryMs?: number;
-  /** Atomically persist the current (partial) index; called periodically and at the end. */
-  persist?: () => Promise<void>;
-  /** Optional progress hook (e.g. MCP notifications) fired alongside the logger. */
-  onProgress?: (status: IndexBuildStatus) => void;
-  /**
-   * Optional supplier of an item's attachment full text. When present, that text is
-   * chunked into extra passages beside the metadata ones, so a search can match the body
-   * of a paper and not only its title and abstract. Opt-in: see ZOTEUS_INDEX_FULLTEXT.
-   */
-  fulltextFor?: (itemKey: string, item: any) => Promise<string | undefined>;
-  /** Concurrent full-text fetches while indexing one page of items (default 4). */
-  fulltextConcurrency?: number;
-}
-
-interface ChunkRecord {
-  id: string;
-  itemKey: string;
-  title: string;
-  text: string;
-  /** Absent for metadata passages, which keeps already-persisted index files loadable. */
-  source?: 'fulltext';
-}
-
-export interface BuildOptions {
-  version?: number;
-  extraText?: Map<string, string>;
-}
-
-export interface SearchIndexOptions {
-  embedder: EmbeddingProvider | null;
-  logger?: Logger;
-  /** What ZOTEUS_EMBEDDINGS asked for (defaults to the provider's own name, or 'off'). */
-  configured?: string;
-  /** Why the request produced no provider at all, known at construction time. */
-  unavailable?: string;
-}
 
 function itemText(d: any): string {
   const creators = (d.creators ?? []).map((c: any) => c.lastName ?? c.name).filter(Boolean).join(' ');
@@ -197,29 +108,30 @@ export function makeSnippet(text: string, query: string, max = 240): string {
   return snip;
 }
 
-/** Hybrid (BM25 + vector) search index over the library, persistable as JSON. */
-export class SearchIndex {
-  private bm25 = new BM25Index();
-  private vectors = new VectorStore();
-  private chunks = new Map<string, ChunkRecord>();
-  private items = new Set<string>();
-  /** Items with at least one full-text passage, and how many such passages exist. */
-  private fulltextItems = new Set<string>();
-  private fulltextPassages = 0;
+/**
+ * Everything a hybrid index does that is independent of where the passages are kept:
+ * chunking, the embedder lifecycle and its degradation reporting, the incremental build
+ * loop, fusion and snippets. A backend supplies only storage primitives (the abstract
+ * members below), so both implementations answer identically at the tool boundary and a
+ * behaviour fix cannot land in one and miss the other.
+ */
+export abstract class SearchIndexBase implements SearchIndex {
   /** Whether the running/last build was asked for full text, and why it may not deliver. */
-  private fulltextEnabled = false;
-  private fulltextUnavailable: string | undefined = undefined;
-  private builtFromVersion = 0;
+  protected fulltextEnabled = false;
+  protected fulltextUnavailable: string | undefined = undefined;
+  protected builtFromVersion = 0;
   /** Embedder identity that produced the vectors currently held (persisted with them). */
-  private vectorEmbedderId: string | undefined = undefined;
+  protected vectorEmbedderId: string | undefined = undefined;
   /** Set when a load discarded vectors another embedder had produced. */
-  private vectorsStale: string | undefined = undefined;
+  protected vectorsStale: string | undefined = undefined;
+  /** What opening the store had to do or refused to do (JSON migration; see #10). */
+  protected storeNotice: string | undefined = undefined;
 
   // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
   private buildState: BuildState = 'idle';
   private itemsFetched = 0;
-  private itemsTotal = 0;
-  private itemsAvailable = 0;
+  protected itemsTotal = 0;
+  protected itemsAvailable = 0;
   private lastBuildError: string | undefined = undefined;
   private cancelToken: { cancelled: boolean } | null = null;
   /**
@@ -228,8 +140,39 @@ export class SearchIndex {
    * stderr log line is invisible to a desktop-extension user, whose client discards it.
    */
   private embedderError: string | undefined = undefined;
+  /**
+   * Last failure to write the index out. Same reasoning as `embedderError`: a build that
+   * could not persist its artifact used to report state:"done" with only a stderr warning
+   * to show for it, so the loss was discovered on the next startup (#10).
+   */
+  private persistError: string | undefined = undefined;
 
-  constructor(private readonly opts: SearchIndexOptions) {}
+  constructor(protected readonly opts: SearchIndexOptions) {}
+
+  /** Which store backs this index. */
+  abstract readonly storage: StorageBackend;
+  /** Live sizes of the store. Must not walk the passages: status() is called per progress tick. */
+  protected abstract counts(): IndexCounts;
+  /** Drop every passage and vector. */
+  protected abstract clearStore(): void;
+  /** Register an indexed item. Called for every item, including ones with no text at all. */
+  protected abstract putItem(itemKey: string, title: string): void;
+  /** Store one passage (also updating item and full-text bookkeeping). */
+  protected abstract putPassage(rec: ChunkRecord): void;
+  /** Attach a vector to an already-stored passage. */
+  protected abstract putVector(id: string, vector: number[]): void;
+  /** Discard every stored vector, keeping the passages. */
+  protected abstract clearVectors(): void;
+  /** Width of the stored vectors (undefined when none are stored). Their embedder's fingerprint. */
+  protected abstract vectorDimension(): number | undefined;
+  /** Keyword candidates, best first. */
+  protected abstract keywordSearch(q: string, topK: number): RankedId[];
+  /** Vector candidates, best first. */
+  protected abstract vectorSearch(query: number[], topK: number): RankedId[];
+  /** One passage by id, for snippets and attribution. */
+  protected abstract passage(id: string): ChunkRecord | undefined;
+  abstract save(): Promise<void>;
+  abstract close(): Promise<void>;
 
   /** What ZOTEUS_EMBEDDINGS asked for. */
   get embedderConfigured(): string {
@@ -275,7 +218,7 @@ export class SearchIndex {
 
   /** True when the index actually holds vectors, i.e. semantic-only ranking can work. */
   get hasVectors(): boolean {
-    return this.vectors.size > 0;
+    return this.counts().vectors > 0;
   }
 
   /**
@@ -291,13 +234,28 @@ export class SearchIndex {
    * Drop vectors this embedder did not produce, and remember why. Ranking them would not
    * fail, it would return plausible nonsense, which is the whole reason to be strict here.
    */
-  private dropStaleVectors(cause: string): void {
+  protected dropStaleVectors(cause: string): void {
     this.vectorsStale =
       `${cause} They were discarded (vectors from different models are not comparable). Keyword search is ` +
       'unaffected: run zotero_index action:"build" to re-embed the library with the current model.';
-    this.vectors = new VectorStore();
+    this.clearVectors();
     this.vectorEmbedderId = undefined;
     this.opts.logger?.warn(this.vectorsStale);
+  }
+
+  /**
+   * Reconcile stored vectors with the active embedder after a load/open. Files (and
+   * databases) written before the identity was persisted carry none, and are kept: their
+   * provenance is unknown, not known-wrong. Nothing to reconcile without an active provider
+   * either, since a query that cannot be embedded never touches these vectors.
+   */
+  protected reconcileVectorProvenance(): void {
+    const current = this.embedderId;
+    if (current && this.vectorEmbedderId && this.vectorEmbedderId !== current && this.counts().vectors > 0) {
+      this.dropStaleVectors(
+        `The stored vectors were built with ${this.vectorEmbedderId}, but this server now embeds with ${current}.`,
+      );
+    }
   }
 
   /** Record the first provider failure so status, not just the log, can report it. */
@@ -324,6 +282,7 @@ export class SearchIndex {
       itemsAvailable: this.itemsAvailable,
     };
     if (this.buildState === 'error' && this.lastBuildError) s.lastError = this.lastBuildError;
+    if (this.persistError) s.persistError = this.persistError;
     return s;
   }
 
@@ -344,37 +303,35 @@ export class SearchIndex {
   }
 
   status(): SearchIndexStatus {
+    const c = this.counts();
     const s: SearchIndexStatus = {
-      documents: this.bm25.size,
-      vectors: this.vectors.size,
-      items: this.items.size,
+      documents: c.documents,
+      vectors: c.vectors,
+      items: c.items,
+      storage: this.storage,
       embedder: this.embedderName,
       embedderConfigured: this.embedderConfigured,
       embedderActive: this.embedderActive,
       fulltextEnabled: this.fulltextEnabled,
-      fulltextItems: this.fulltextItems.size,
-      fulltextPassages: this.fulltextPassages,
+      fulltextItems: c.fulltextItems,
+      fulltextPassages: c.fulltextPassages,
       builtFromVersion: this.builtFromVersion,
     };
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
     if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
     if (this.vectorsStale) s.vectorsStaleReason = this.vectorsStale;
+    if (this.storeNotice) s.storageNotice = this.storeNotice;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
     return s;
   }
 
   get isEmpty(): boolean {
-    return this.bm25.size === 0;
+    return this.counts().documents === 0;
   }
 
-  private reset(): void {
-    this.bm25 = new BM25Index();
-    this.vectors = new VectorStore();
-    this.chunks = new Map();
-    this.items = new Set();
-    this.fulltextItems = new Set();
-    this.fulltextPassages = 0;
+  protected reset(): void {
+    this.clearStore();
     // The vectors are gone, so their provenance and any staleness verdict go with them.
     this.vectorEmbedderId = undefined;
     this.vectorsStale = undefined;
@@ -396,22 +353,21 @@ export class SearchIndex {
       const d = item.data ?? item;
       const key = item.key ?? d.key;
       if (!key) continue;
-      this.items.add(key);
+      this.putItem(key, d.title ?? '(untitled)');
       const base = itemText(d);
       const extra = opts.extraText?.get(key);
       const text = extra ? `${base}. ${extra}` : base;
       for (const ch of chunkText(text)) {
         const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
         records.push(rec);
-        this.chunks.set(rec.id, rec);
-        this.bm25.addDoc(rec.id, rec.text);
+        this.putPassage(rec);
       }
     }
     if (this.opts.embedder && records.length) {
       try {
         const vecs = await this.opts.embedder.embed(records.map((r) => r.text));
         records.forEach((r, i) => {
-          if (vecs[i]) this.vectors.add(r.id, vecs[i]!);
+          if (vecs[i]) this.putVector(r.id, vecs[i]!);
         });
       } catch (e) {
         this.noteEmbedFailure(e);
@@ -435,6 +391,7 @@ export class SearchIndex {
     this.buildState = 'building';
     this.lastBuildError = undefined;
     this.embedderError = undefined;
+    this.persistError = undefined;
     // A rebuild is the retry for full text too: clear the previous run's verdict so a
     // library that has since been extracted in Zotero stops reporting the old reason.
     this.fulltextEnabled = Boolean(opts.fulltextFor);
@@ -455,6 +412,9 @@ export class SearchIndex {
     const progressEveryMs = opts.progressEveryMs ?? 10_000;
     const maxItems = opts.maxItems;
     const fulltextLimit = new Semaphore(Math.max(1, opts.fulltextConcurrency ?? 4));
+    // Without an explicit hook the index persists itself: the SQLite backend commits its
+    // open transaction here, so "persist" and "make the last N items durable" are one act.
+    const persist = opts.persist ?? (() => this.save());
 
     const pending: ChunkRecord[] = []; // passages awaiting embedding
     let start = 0;
@@ -466,11 +426,14 @@ export class SearchIndex {
     const persistNow = async (): Promise<void> => {
       itemsSincePersist = 0;
       lastPersistAt = Date.now();
-      if (!opts.persist) return;
       try {
-        await opts.persist();
+        await persist();
+        this.persistError = undefined;
       } catch (e) {
-        this.opts.logger?.warn(`Could not persist index: ${e instanceof Error ? e.message : String(e)}`);
+        // Recorded, not only logged: the status this build reports has to carry the fact
+        // that its artifact is memory-only, or "done" is a lie (#10).
+        this.persistError = e instanceof Error ? e.message : String(e);
+        this.opts.logger?.warn(`Could not persist index: ${this.persistError}`);
       }
     };
     const maybePersist = async (): Promise<void> => {
@@ -495,7 +458,7 @@ export class SearchIndex {
         try {
           const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text));
           batch.forEach((r, i) => {
-            if (vecs[i]) this.vectors.add(r.id, vecs[i]!);
+            if (vecs[i]) this.putVector(r.id, vecs[i]!);
           });
         } catch (e) {
           // hasEmbedder goes false from here, which both stops this loop and makes every
@@ -585,12 +548,11 @@ export class SearchIndex {
     const d = item.data ?? item;
     const key = item.key ?? d.key;
     if (!key) return;
-    this.items.add(key);
     const title = d.title ?? '(untitled)';
+    this.putItem(key, title);
     for (const ch of chunkText(itemText(d))) {
       const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title, text: ch.text };
-      this.chunks.set(rec.id, rec);
-      this.bm25.addDoc(rec.id, rec.text);
+      this.putPassage(rec);
       if (this.hasEmbedder) pending.push(rec);
     }
     if (fulltext) this.addFulltext(key, title, fulltext, pending);
@@ -602,7 +564,6 @@ export class SearchIndex {
    * its abstract. Ids are namespaced `#f<n>` so they can never collide with metadata ones.
    */
   private addFulltext(itemKey: string, title: string, text: string, pending: ChunkRecord[]): void {
-    let added = 0;
     for (const ch of chunkText(text, FULLTEXT_CHUNK_SIZE, FULLTEXT_CHUNK_OVERLAP)) {
       const rec: ChunkRecord = {
         id: `${itemKey}#f${ch.index}`,
@@ -611,28 +572,22 @@ export class SearchIndex {
         text: ch.text,
         source: 'fulltext',
       };
-      this.chunks.set(rec.id, rec);
-      this.bm25.addDoc(rec.id, rec.text);
+      this.putPassage(rec);
       if (this.hasEmbedder) pending.push(rec);
-      added++;
-    }
-    if (added) {
-      this.fulltextItems.add(itemKey);
-      this.fulltextPassages += added;
     }
   }
 
-  async query(q: string, opts: { limit?: number; mode?: 'auto' | 'keyword' | 'semantic' } = {}): Promise<SearchHit[]> {
+  async query(q: string, opts: QueryOptions = {}): Promise<SearchHit[]> {
     const limit = opts.limit ?? 10;
     const mode = opts.mode ?? 'auto';
     const pool = limit * 3;
 
-    const keyword: BM25Hit[] = mode === 'semantic' ? [] : this.bm25.search(q, pool);
-    let vector: VectorHit[] = [];
-    if (mode !== 'keyword' && this.opts.embedder && this.vectors.size) {
+    const keyword: RankedId[] = mode === 'semantic' ? [] : this.keywordSearch(q, pool);
+    let vector: RankedId[] = [];
+    if (mode !== 'keyword' && this.opts.embedder && this.counts().vectors) {
       try {
         const [qv] = await this.opts.embedder.embed([q]);
-        const dim = this.vectors.dimension;
+        const dim = this.vectorDimension();
         // Index files written before the embedder identity was persisted carry no
         // provenance, so a model switch under one shows up only here, as a query of a
         // different width. Cosine over mismatched widths still returns numbers.
@@ -641,7 +596,7 @@ export class SearchIndex {
             `The stored vectors have ${dim} dimensions, but ${this.embedderId ?? 'the current embedder'} produces ${qv.length}.`,
           );
         } else if (qv) {
-          vector = this.vectors.search(qv, pool);
+          vector = this.vectorSearch(qv, pool);
         }
       } catch (e) {
         this.noteEmbedFailure(e);
@@ -652,7 +607,7 @@ export class SearchIndex {
     const seen = new Set<string>();
     const hits: SearchHit[] = [];
     for (const { id, score } of fused) {
-      const rec = this.chunks.get(id);
+      const rec = this.passage(id);
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
       const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
@@ -664,15 +619,105 @@ export class SearchIndex {
     }
     return hits;
   }
+}
 
-  toJSON(): {
-    chunks: ChunkRecord[];
-    vectors: ReturnType<VectorStore['toJSON']>;
-    builtFromVersion: number;
-    itemsTotal: number;
-    itemsAvailable: number;
-    embedderId?: string;
-  } {
+export interface MemorySearchIndexOptions extends SearchIndexOptions {
+  /**
+   * JSON artifact save() writes. Without one the index is memory-only, which is what the
+   * tests and the fallback-with-no-data-dir case want.
+   */
+  path?: string;
+}
+
+/**
+ * The original backend: BM25 and the vectors in JS memory, persisted as one JSON file.
+ * Correct and fastest for small libraries, and the only backend on Node < 22.13, but it
+ * holds every passage and vector resident and serializes them through a single string:
+ * past roughly 250k passages the file can neither be written nor re-read (#10).
+ */
+export class MemorySearchIndex extends SearchIndexBase {
+  readonly storage = 'memory' as const;
+  private bm25 = new BM25Index();
+  private vectors = new VectorStore();
+  private chunks = new Map<string, ChunkRecord>();
+  private items = new Set<string>();
+  /** Items with at least one full-text passage, and how many such passages exist. */
+  private fulltextItems = new Set<string>();
+  private fulltextPassages = 0;
+  private readonly path: string | undefined;
+
+  constructor(opts: MemorySearchIndexOptions) {
+    super(opts);
+    this.path = opts.path;
+  }
+
+  protected counts(): IndexCounts {
+    return {
+      documents: this.bm25.size,
+      vectors: this.vectors.size,
+      items: this.items.size,
+      fulltextItems: this.fulltextItems.size,
+      fulltextPassages: this.fulltextPassages,
+    };
+  }
+
+  protected clearStore(): void {
+    this.bm25 = new BM25Index();
+    this.vectors = new VectorStore();
+    this.chunks = new Map();
+    this.items = new Set();
+    this.fulltextItems = new Set();
+    this.fulltextPassages = 0;
+  }
+
+  protected putItem(itemKey: string): void {
+    this.items.add(itemKey);
+  }
+
+  protected putPassage(rec: ChunkRecord): void {
+    this.chunks.set(rec.id, rec);
+    this.items.add(rec.itemKey);
+    this.bm25.addDoc(rec.id, rec.text);
+    if (rec.source === 'fulltext') {
+      this.fulltextItems.add(rec.itemKey);
+      this.fulltextPassages++;
+    }
+  }
+
+  protected putVector(id: string, vector: number[]): void {
+    this.vectors.add(id, vector);
+  }
+
+  protected clearVectors(): void {
+    this.vectors = new VectorStore();
+  }
+
+  protected vectorDimension(): number | undefined {
+    return this.vectors.dimension;
+  }
+
+  protected keywordSearch(q: string, topK: number): RankedId[] {
+    return this.bm25.search(q, topK);
+  }
+
+  protected vectorSearch(query: number[], topK: number): RankedId[] {
+    return this.vectors.search(query, topK);
+  }
+
+  protected passage(id: string): ChunkRecord | undefined {
+    return this.chunks.get(id);
+  }
+
+  /** Atomically rewrite the JSON artifact. A no-op when this index has no file. */
+  async save(): Promise<void> {
+    if (!this.path) return;
+    await saveIndex(this, this.path);
+  }
+
+  /** Nothing to release: the store is this object. */
+  async close(): Promise<void> {}
+
+  toJSON(): IndexSnapshot {
     return {
       chunks: [...this.chunks.values()],
       vectors: this.vectors.toJSON(),
@@ -687,24 +732,9 @@ export class SearchIndex {
     };
   }
 
-  loadFromJSON(data: {
-    chunks: ChunkRecord[];
-    vectors: any[];
-    builtFromVersion: number;
-    itemsTotal?: number;
-    itemsAvailable?: number;
-    embedderId?: string;
-  }): void {
+  loadFromJSON(data: IndexSnapshot): void {
     this.reset();
-    for (const rec of data.chunks ?? []) {
-      this.chunks.set(rec.id, rec);
-      this.items.add(rec.itemKey);
-      this.bm25.addDoc(rec.id, rec.text);
-      if (rec.source === 'fulltext') {
-        this.fulltextItems.add(rec.itemKey);
-        this.fulltextPassages++;
-      }
-    }
+    for (const rec of data.chunks ?? []) this.putPassage(rec);
     // A reloaded index reports what it HOLDS: an index carrying full-text passages counts
     // as full-text-enabled even before this process runs a build of its own.
     this.fulltextEnabled = this.fulltextPassages > 0;
@@ -713,16 +743,8 @@ export class SearchIndex {
     // Stored vectors are only comparable with queries embedded by the same model, so a
     // model switch invalidates them: drop them and say so rather than ranking a query
     // against a foreign vector space (cosine over mismatched dimensions still returns
-    // numbers, which is exactly what makes it dangerous). Files written before the
-    // identity was persisted carry none, and are kept: their provenance is unknown, not
-    // known-wrong. Nothing to reconcile without an active provider either, since a query
-    // that cannot be embedded never touches these vectors.
-    const current = this.embedderId;
-    if (current && this.vectorEmbedderId && this.vectorEmbedderId !== current && this.vectors.size) {
-      this.dropStaleVectors(
-        `The stored vectors were built with ${this.vectorEmbedderId}, but this server now embeds with ${current}.`,
-      );
-    }
+    // numbers, which is exactly what makes it dangerous).
+    this.reconcileVectorProvenance();
     this.builtFromVersion = data.builtFromVersion ?? 0;
     // Absent in files written before these were persisted: 0/0 leaves every truncation
     // check false, so an old index stays silent rather than inventing a shortfall.

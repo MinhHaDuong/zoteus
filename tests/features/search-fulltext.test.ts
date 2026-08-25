@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { SearchIndex, FULLTEXT_CHUNK_SIZE } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, FULLTEXT_CHUNK_SIZE, type SearchIndex } from '../../src/features/search/index-manager.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import { createFulltextSource, DEFAULT_FULLTEXT_MAX_CHARS } from '../../src/features/search/fulltext-source.js';
 import { startIndexBuild, statusSummary, PAGE_SIZE } from '../../src/features/search/build.js';
@@ -25,7 +25,7 @@ function pager(library: any[], pageSize = 100) {
 
 describe('SearchIndex full-text passages', () => {
   it('indexes attachment body text and attributes the hit to the parent item', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     const final = await search.buildIncremental(pager(makeLibrary(3)), {
       fulltextFor: async (key) => (key === 'K1' ? BODY : undefined),
     });
@@ -48,7 +48,7 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('chunks body text at the larger full-text size and embeds every passage', async () => {
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
     const long = 'sedimentary layering in the outcrop. '.repeat(300); // ~11k chars
     const final = await search.buildIncremental(pager(makeLibrary(1)), { fulltextFor: async () => long });
 
@@ -58,7 +58,7 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('reports metadata-only when full text was never requested', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     const final = await search.buildIncremental(pager(makeLibrary(2)));
     expect(final.fulltextEnabled).toBe(false);
     expect(final.fulltextItems).toBe(0);
@@ -66,7 +66,7 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('keeps building when one item\'s full text fails, and never asks past the item cap', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     const asked: string[] = [];
     const final = await search.buildIncremental(pager(makeLibrary(50), 10), {
       maxItems: 12,
@@ -86,10 +86,10 @@ describe('SearchIndex full-text passages', () => {
   });
 
   it('round-trips full-text passages through persistence', async () => {
-    const a = new SearchIndex({ embedder: null, logger: silentLogger });
+    const a = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     await a.buildIncremental(pager(makeLibrary(2)), { fulltextFor: async (k) => (k === 'K0' ? BODY : undefined) });
 
-    const b = new SearchIndex({ embedder: null, logger: silentLogger });
+    const b = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     b.loadFromJSON(JSON.parse(JSON.stringify(a.toJSON())));
 
     const status = b.status();
@@ -125,7 +125,7 @@ function makeCtx(opts: {
   const ctx: any = {
     config: loadConfig((opts.config ?? {}) as any),
     router: { fullTextSince, getFullText, searchItems, defaultLibrary: () => ({ type: 'user', id: 1 }) },
-    search: new SearchIndex({ embedder: null, logger: silentLogger }),
+    search: new MemorySearchIndex({ embedder: null, logger: silentLogger }),
     logger: silentLogger,
     searchIndexPath: '',
   };

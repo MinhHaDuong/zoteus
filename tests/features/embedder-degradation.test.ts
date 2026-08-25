@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/index-manager.js';
 import { statusSummary } from '../../src/features/search/build.js';
 import {
   createEmbeddingProvider,
@@ -24,7 +24,7 @@ const items = [
 
 /** An index built while the local runtime is missing: keyword docs, zero vectors. */
 function keywordOnlyIndex(): SearchIndex {
-  return new SearchIndex({
+  return new MemorySearchIndex({
     embedder: null,
     configured: 'local',
     unavailable: missingTransformersHint({ dist: 'mcpb' }),
@@ -109,7 +109,7 @@ describe('status reports the effective embedder, not the configured one', () => 
         throw new Error('onnxruntime binding missing');
       },
     };
-    const search = new SearchIndex({ embedder: broken, configured: 'local', logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: broken, configured: 'local', logger: silentLogger });
     await search.build(items);
 
     // The build still completes on keyword data, but it no longer claims to be embedding.
@@ -120,7 +120,7 @@ describe('status reports the effective embedder, not the configured one', () => 
   });
 
   it('says nothing extra when embeddings were switched off on purpose', async () => {
-    const search = new SearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
     await search.build(items);
     const status = search.buildStatus();
     expect(status.embedder).toBe('none (keyword-only)');
@@ -136,7 +136,7 @@ describe('status reports the effective embedder, not the configured one', () => 
         return texts.map(() => [1, 0, 0]);
       },
     };
-    const search = new SearchIndex({ embedder: flaky, configured: 'local', logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: flaky, configured: 'local', logger: silentLogger });
     await search.build(items);
     expect(search.embedderActive).toBe(false);
 

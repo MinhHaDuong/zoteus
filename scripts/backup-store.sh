@@ -10,9 +10,11 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p "$DEST"
 ARCHIVE="$DEST/zoteus-$STAMP.tar.gz"
 
+# Both index backends: the legacy JSON artifact and the SQLite database (with its -wal/-shm
+# sidecars, which a stopped service has already folded back in).
 tar -czf "$ARCHIVE" -C "$DATA_DIR" \
   oauth-store.json \
-  $(cd "$DATA_DIR" && ls search-index*.json 2>/dev/null || true)
+  $(cd "$DATA_DIR" && ls search-index*.json search-index*.sqlite* 2>/dev/null || true)
 
 echo "wrote $ARCHIVE"
 # Retain the 14 most recent.

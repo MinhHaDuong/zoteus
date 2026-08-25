@@ -13,9 +13,8 @@ import { SchemaService } from './schema/schema-service.js';
 import { join } from 'node:path';
 import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
-import { SearchIndex } from './features/search/index-manager.js';
+import { createSearchIndex } from './features/search/factory.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
-import { loadIndex, saveIndex } from './features/search/persistence.js';
 import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext, type ToolDefinition } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
@@ -87,22 +86,25 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   // desktop bundle that cannot carry @huggingface/transformers) is reported as inactive
   // from the first status call, rather than discovered as a silently empty vector set.
   const embedding = createEmbeddingProvider(config, logger);
-  const search = new SearchIndex({
-    embedder: embedding.provider,
-    configured: embedding.configured,
-    unavailable: embedding.unavailable,
-    logger,
-  });
-
   const searchIndexPath = join(
     config.dataDir,
     overrides.zoteroUserId !== undefined ? `search-index-${overrides.zoteroUserId}.json` : 'search-index.json',
   );
-  await loadIndex(search, searchIndexPath).catch(() => false);
+  // Opens the store (and, on the SQLite backend's first run, imports a legacy JSON index).
+  // ZOTEUS_INDEX_BACKEND=sqlite on a runtime without node:sqlite throws here, at startup.
+  const search = await createSearchIndex({
+    embedder: embedding.provider,
+    configured: embedding.configured,
+    unavailable: embedding.unavailable,
+    logger,
+    backend: config.indexBackend,
+    jsonPath: searchIndexPath,
+  });
   // Vectors from a previous embedding model are dropped on load; say so at startup too,
   // not only in tool output, because the remedy is a rebuild the user has to start.
   const stale = search.buildStatus().vectorsStaleReason;
   if (stale) logger.warn(stale);
+  logger.debug(`search index backend: ${search.storage} (${searchIndexPath})`);
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
   const ctx: ToolContext = {
@@ -217,10 +219,17 @@ export class ContextCache {
     return ctx;
   }
 
-  /** Persist every live context's search index (operator + per-user). Best-effort. */
+  /**
+   * Persist every live context's search index (operator + per-user) and release its store.
+   * Best-effort, and terminal: this runs from the shutdown handler, where closing is what
+   * checkpoints SQLite's write-ahead log instead of leaving it for the next startup.
+   */
   async flushIndexes(): Promise<void> {
     const ctxs = [this.operatorCtx, ...[...this.entries.values()].map((e) => e.ctx)];
-    await Promise.allSettled(ctxs.map((c) => saveIndex(c.search, c.searchIndexPath)));
+    await Promise.allSettled(ctxs.map(async (c) => {
+      await c.search.save();
+      await c.search.close();
+    }));
   }
 
   private evictIfNeeded(): void {

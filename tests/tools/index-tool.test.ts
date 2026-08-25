@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import indexTool from '../../src/tools/index-tool.js';
 import { LibraryRouter } from '../../src/router/library-router.js';
 import { loadConfig } from '../../src/config.js';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/index-manager.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 import type { EmbeddingProvider } from '../../src/features/search/embeddings.js';
 
@@ -91,7 +91,7 @@ async function pollStatus(ctx: any, attempts = 200): Promise<any> {
 describe('zotero_index async build', () => {
   it('returns immediately with state=building, then completes via poll-status', async () => {
     const library = makeLibrary(250);
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
     const ctx = makeCtx(search, library);
     const res = await indexTool.handler({ action: 'build' }, ctx);
     expect(res.structuredContent?.state).toBe('building');
@@ -110,7 +110,7 @@ describe('zotero_index async build', () => {
   it('does not start a second build while one is running (returns progress)', async () => {
     const library = makeLibrary(250);
     const gate = gatedEmbedder();
-    const search = new SearchIndex({ embedder: gate.provider, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: gate.provider, logger: silentLogger });
     const ctx = makeCtx(search, library);
     await indexTool.handler({ action: 'build' }, ctx);
     // Wait until the build pauses inside the first embed call.
@@ -129,7 +129,7 @@ describe('zotero_index async build', () => {
   it('stop cancels the running build and keeps partial data', async () => {
     const library = makeLibrary(250); // 3 pages of 100
     const gate = gatedEmbedder();
-    const search = new SearchIndex({ embedder: gate.provider, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: gate.provider, logger: silentLogger });
     const ctx = makeCtx(search, library);
     await indexTool.handler({ action: 'build' }, ctx);
     // Let it fetch the first page and pause on the first embed batch.
@@ -147,7 +147,7 @@ describe('zotero_index async build', () => {
   });
 
   it('stop is a no-op when nothing is building', async () => {
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     const ctx = makeCtx(search, []);
     const res = await indexTool.handler({ action: 'stop' }, ctx);
     expect(res.content[0].text).toMatch(/no build/i);
@@ -155,7 +155,7 @@ describe('zotero_index async build', () => {
 
   it('honours the limit input', async () => {
     const library = makeLibrary(50);
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
     const ctx = makeCtx(search, library);
     await indexTool.handler({ action: 'build', limit: 5 }, ctx);
     const final = await pollStatus(ctx);
@@ -179,7 +179,7 @@ describe('zotero_index async build', () => {
   });
 
   it('does not touch the full-text endpoints unless asked', async () => {
-    const ctx = makeCtx(new SearchIndex({ embedder: null, logger: silentLogger }), makeLibrary(3));
+    const ctx = makeCtx(new MemorySearchIndex({ embedder: null, logger: silentLogger }), makeLibrary(3));
     await indexTool.handler({ action: 'build' }, ctx);
     const final = await pollStatus(ctx);
     expect(ctx.web.fullTextSince).not.toHaveBeenCalled();
@@ -192,7 +192,7 @@ describe('zotero_index async build', () => {
       { key: 'ATT2', data: { key: 'ATT2', itemType: 'attachment', parentItem: 'K2' } },
     ];
     const text = { ATT1: 'diffusion schedules under a cosine noise budget. '.repeat(30) };
-    const search = new SearchIndex({ embedder: null, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     const ctx = makeCtx(search, makeLibrary(3), { attachments, text });
 
     const started = await indexTool.handler({ action: 'build', fulltext: true }, ctx);

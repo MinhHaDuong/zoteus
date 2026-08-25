@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/index-manager.js';
 import {
   ApiEmbeddingProvider,
   DEFAULT_API_MODELS,
@@ -215,7 +215,7 @@ describe('passages per embedding request', () => {
 
   it('caps the build at the batch size the build was given', async () => {
     const embedder = recordingEmbedder();
-    const search = new SearchIndex({ embedder, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder, logger: silentLogger });
     await search.buildIncremental(pager(makeLibrary(40), 20), { embedBatchSize: 4 });
 
     expect(embedder.batches.length).toBeGreaterThan(1);
@@ -224,7 +224,7 @@ describe('passages per embedding request', () => {
 
   it('keeps the historical batch size when nothing is configured', async () => {
     const embedder = recordingEmbedder();
-    const search = new SearchIndex({ embedder, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder, logger: silentLogger });
     await search.buildIncremental(pager(makeLibrary(100), 100));
 
     expect(Math.max(...embedder.batches.map((b) => b.length))).toBe(DEFAULT_EMBED_BATCH_SIZE);
@@ -232,7 +232,7 @@ describe('passages per embedding request', () => {
 
   it('takes ZOTEUS_EMBED_BATCH_SIZE through startIndexBuild', async () => {
     const embedder = recordingEmbedder();
-    const search = new SearchIndex({ embedder, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder, logger: silentLogger });
     startIndexBuild(ctxFor(search, makeLibrary(60), { ZOTEUS_EMBED_BATCH_SIZE: '5' }));
     await settle(search);
 
@@ -268,7 +268,7 @@ describe('the pause between embedding batches', () => {
   it('paces the build with ZOTEUS_EMBED_BATCH_DELAY_MS', async () => {
     const delays = recordDelays();
     const embedder = recordingEmbedder();
-    const search = new SearchIndex({ embedder, logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder, logger: silentLogger });
     startIndexBuild(
       ctxFor(search, makeLibrary(40), { ZOTEUS_EMBED_BATCH_SIZE: '4', ZOTEUS_EMBED_BATCH_DELAY_MS: '37' }),
     );
@@ -294,13 +294,13 @@ describe('vectors built with another model are not queried with this one', () =>
 
   /** An index built by `model`, serialized exactly as it would be persisted. */
   async function builtWith(model: string): Promise<any> {
-    const search = new SearchIndex({ embedder: recordingEmbedder('openai', model), configured: 'openai' });
+    const search = new MemorySearchIndex({ embedder: recordingEmbedder('openai', model), configured: 'openai' });
     await search.build(items);
     return JSON.parse(JSON.stringify(search.toJSON()));
   }
 
   function indexUsing(model: string): SearchIndex {
-    return new SearchIndex({
+    return new MemorySearchIndex({
       embedder: recordingEmbedder('openai', model),
       configured: 'openai',
       logger: silentLogger,
@@ -351,7 +351,7 @@ describe('vectors built with another model are not queried with this one', () =>
 
   it('stays silent with no active embedder, which never queries them anyway', async () => {
     const saved = await builtWith('text-embedding-3-small');
-    const search = new SearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
     search.loadFromJSON(saved);
 
     expect(search.buildStatus().vectors).toBe(saved.vectors.length);
@@ -379,7 +379,7 @@ describe('vectors built with another model are not queried with this one', () =>
       model: 'text-embedding-3-large',
       embed: async (texts) => texts.map(() => [1, 0, 0, 0, 0]),
     };
-    const search = new SearchIndex({ embedder: wider, configured: 'openai', logger: silentLogger });
+    const search = new MemorySearchIndex({ embedder: wider, configured: 'openai', logger: silentLogger });
     search.loadFromJSON(saved);
     expect(search.buildStatus().vectors).toBeGreaterThan(0); // provenance unknown so far
 

@@ -32,6 +32,11 @@ can never time out the MCP client, even on very large libraries.
   | `embedderActive` | `true` only while that provider is genuinely embedding |
   | `embedderReason` | present when it is not: why, and what to do about it |
   | `vectorsStaleReason` | present when stored vectors were dropped because another model had produced them (see [Tuning API embeddings](#tuning-api-embeddings)) |
+
+  Three more fields describe the store rather than the embedder: `storage` (`sqlite` or
+  `memory`, see [Storage backends](#storage-backends)), `storageNotice` (present when
+  opening it imported a JSON index, or refused to), and `persistError` (present when the
+  index could not be written).
 - `action: "stop"` — cooperatively cancel a running build. The build halts between
   pages/batches and the partial index is kept and stays searchable.
 - `limit` — optional max number of items to index. It lowers the configured cap for one
@@ -52,11 +57,14 @@ index built against the desktop app stays valid when a later lookup goes to the 
 and the index file is keyed by the Zoteus data dir (plus the authenticated user in
 multi-tenant mode), never by the library id the read happened to use.
 
-**Incremental, crash-safe persistence.** Partial progress is persisted atomically as the
-build runs (roughly every 200 items or 10s — write-temp-then-rename), so a timeout,
-crash, or `stop` can never corrupt `search-index.json`; the last complete snapshot is
+**Incremental, crash-safe persistence.** Partial progress is persisted as the build runs
+(roughly every 200 items or 10s), so a timeout, crash, or `stop` can never leave a corrupt
+index: the JSON backend writes to a temp file and renames over the target, the SQLite one
+commits a transaction (see [Storage backends](#storage-backends)). What was persisted is
 what loads on the next startup, and it is fully queryable (BM25 keyword search works on
-whatever was indexed).
+whatever was indexed). A build that could **not** be written says so: `persistError` is
+reported by `zotero_index action:"status"` and repeated in every `zotero_semantic_search`
+summary, because a build whose artifact never reached disk still reports `state: "done"`.
 
 ### `zotero_semantic_search` — search by meaning
 - `q` — natural-language query. `mode`: `auto` (hybrid, default), `keyword` (BM25), or `semantic` (vector).
@@ -112,12 +120,14 @@ the number of full-text requests equals the number of attachments that actually 
 **Cost.** This is the expensive option, which is why it is off by default. Measured on a
 212-item library with 151 extracted PDFs:
 
-| | passages | index file | build (keyword-only, desktop app) |
+| | passages | index file (JSON backend) | build (keyword-only, desktop app) |
 |---|---:|---:|---:|
 | metadata only | 687 | 0.4 MB | 0.2 s |
 | `fulltext: true` | 6246 | 7.9 MB | 4.0 s |
 
-Roughly **9× the passages**. Every one of them is also a vector to compute and store, so
+Roughly **9× the passages**, which is also how a mid-sized library reaches the JSON
+backend's ceiling: full text is the usual reason to be on the SQLite backend (see
+[Storage backends](#storage-backends)). Every one of them is also a vector to compute and store, so
 with `ZOTEUS_EMBEDDINGS=local` (CPU-bound) the embedding stage grows by the same factor and
 dominates the build. Ways to bound it:
 
@@ -132,6 +142,53 @@ Progress and outcome are reported by `zotero_index action:"status"`: `fulltextIt
 `fulltextPassages`, and `fulltextEnabled`. If full text was requested but produced nothing
 (no extracted attachments, or the endpoints were unreachable) the build still completes as
 a metadata index and `fulltextReason` says why, rather than looking complete.
+
+## Storage backends
+
+Where the index lives is set by **`ZOTEUS_INDEX_BACKEND`**:
+
+| Value | Behaviour |
+|---|---|
+| `auto` (default) | SQLite when the runtime provides `node:sqlite` (**Node 22.13+**), otherwise the JSON file, with one info line on startup saying so. |
+| `sqlite` | Require SQLite. On a Node without `node:sqlite` the server **fails to start** rather than quietly falling back to the backend with the ceiling. |
+| `memory` | The legacy in-memory index persisted as one JSON file. |
+
+**Why there are two.** The JSON backend keeps every passage and vector in JS memory and
+saves them with a single `JSON.stringify`. That string cannot exceed V8's maximum length
+(~512 MB), so past roughly 250k passages the index can no longer be saved, and a file
+anywhere near that size can no longer be *read* either: a 463 MB `search-index.json` needs
+about 5.4 GB of heap to parse and OOMs stock Node. Measured on the same 7540-item library
+(issue #10):
+
+| | build | resident memory | query | reload |
+|---|---:|---:|---:|---|
+| JSON (`memory`) | 337 s | 5370 MB | 370-500 ms | re-parses the whole file |
+| SQLite (`sqlite`) | 46.6 s | 162 MB | 1-76 ms | opens the file |
+
+The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 2`,
+ranked with `bm25()`) and vectors as per-passage `BLOB`s, so a keyword search reads only
+the rows it ranks and never materializes the library. Two consequences worth knowing:
+searches are **diacritics-insensitive** (`Bronte` finds `Brontë`, which the JSON
+tokenizer cannot do), and a semantic search still scans the vectors, one row at a time,
+so it is the semantic path that grows with the library.
+
+**Where the files are.** `<ZOTEUS_DATA_DIR>/search-index.sqlite` beside the older
+`search-index.json` (and `search-index-<userId>.*` per tenant in multi-tenant mode). SQLite
+also writes `-wal` and `-shm` sidecar files while the database is open; a clean shutdown
+folds them back in.
+
+**Migration is automatic and lossless.** The first time the SQLite backend opens a data dir
+that holds a `search-index.json` and no database, it imports the JSON index and leaves the
+file exactly where it was (a downgrade to an older Node still finds it). If the JSON file is
+larger than **200 MB** it is *not* parsed, because that parse is the failure mode described
+above: nothing is imported, the file is left alone, and `zotero_index action:"status"`
+reports the reason and asks for one `action:"build"`. Either way the outcome is in
+`storageNotice`, never silent.
+
+**One warning line on stderr.** Node 22 LTS prints
+`ExperimentalWarning: SQLite is an experimental feature and might change at any time` the
+first time the module loads. It comes from Node, not from Zoteus, and stdio clients are
+unaffected (the MCP stream is stdout).
 
 ## Embedding backends (privacy-first)
 
@@ -228,12 +285,17 @@ discard):
 After installing the runtime, run `zotero_index action:"build"` again: an index built
 without an embedder stays keyword-only until it is rebuilt.
 
-The index is stored at `<ZOTEUS_DATA_DIR>/search-index.json` and reloaded on startup.
+The index is stored under `<ZOTEUS_DATA_DIR>` and reopened on startup: see
+[Storage backends](#storage-backends) for which file that is.
 
 ## Large libraries
 
 A few things to know when indexing a big Zotero library:
 
+- **Run on Node 22.13+ so the index goes to SQLite.** It is the difference between a build
+  that fits in 162 MB of memory and one that needs 5.4 GB, and past roughly 250k passages
+  the JSON backend cannot save the index at all (see
+  [Storage backends](#storage-backends)).
 - **Local embeddings are CPU-bound.** With `ZOTEUS_EMBEDDINGS=local` the model runs on
   your CPU, so embedding thousands of passages takes real time. If you just want fast
   keyword search, set `ZOTEUS_EMBEDDINGS=off` for a quick keyword-only (BM25) index.

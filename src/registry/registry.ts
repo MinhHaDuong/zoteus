@@ -11,7 +11,7 @@ import type { ConnectorWriteClient } from '../api/connector-writes.js';
 import type { Logger } from '../lib/logger.js';
 import type { StyleResolver } from '../features/citation/styles.js';
 import type { TranslationServerClient } from '../features/citation/translation-server.js';
-import type { SearchIndex } from '../features/search/index-manager.js';
+import type { SearchIndex } from '../features/search/backend.js';
 import type { ScholarGraph } from '../features/scholar/graph.js';
 import type { RateLimitedFetcher } from '../api/http.js';
 import type { UpdateChecker } from '../lib/update-check.js';
@@ -35,7 +35,11 @@ export interface ToolContext {
   /** Shared rate-limited fetcher (used by built-in import resolution). */
   fetcher: RateLimitedFetcher;
   logger: Logger;
-  /** Absolute path to this context's semantic-search index file (per-user in multi-tenant mode). */
+  /**
+   * Absolute path to this context's legacy JSON search index (per-user in multi-tenant
+   * mode). The SQLite backend keeps its database beside it, under the same name; both are
+   * opened by createSearchIndex, so tools go through `search` rather than this path.
+   */
   searchIndexPath: string;
   /** Release update check (operator context only); zotero_whoami surfaces its result. */
   updates?: UpdateChecker;

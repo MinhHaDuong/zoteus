@@ -3,6 +3,9 @@ import pkceChallenge from 'pkce-challenge';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { Server } from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { startHttp } from '../../src/transports/http.js';
 import { buildOAuth } from '../../src/auth/router.js';
 import { buildServer, createServer, ContextCache } from '../../src/server.js';
@@ -141,6 +144,9 @@ describe('multi-tenant: two Zotero users resolve to different libraries', () => 
       ZOTEUS_READ_ONLY: 'true',
       // Keep the test hermetic: no release lookup, no cache write outside the sandbox.
       ZOTEUS_UPDATE_CHECK: 'false',
+      // Each resolved tenant opens its own index store, so keep those files out of the
+      // real data dir.
+      ZOTEUS_DATA_DIR: mkdtempSync(join(tmpdir(), 'zoteus-multitenant-')),
     } as unknown as NodeJS.ProcessEnv);
 
     const oauth = await buildOAuth(config);

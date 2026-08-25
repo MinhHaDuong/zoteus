@@ -5,7 +5,7 @@ import indexTool from '../../src/tools/index-tool.js';
 import semanticSearch from '../../src/tools/semantic-search.js';
 import { LibraryRouter } from '../../src/router/library-router.js';
 import { loadConfig } from '../../src/config.js';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/index-manager.js';
 import { FakeEmbeddingProvider } from '../../src/features/search/embeddings.js';
 
 const sampleItems = [
@@ -44,7 +44,7 @@ async function pollUntilSettled(ctx: any, attempts = 100): Promise<any> {
 
 describe('zotero_index', () => {
   it('builds the index from the library and reports status', async () => {
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const search = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider() });
     const ctx = makeCtx(search);
     const res = await indexTool.handler({ action: 'build' }, ctx);
     expect(ctx.web.listItems).toHaveBeenCalled();
@@ -58,7 +58,7 @@ describe('zotero_index', () => {
 
 describe('zotero_semantic_search', () => {
   it('auto-builds on first use: empty index starts a background build and says so', async () => {
-    const ctx = makeCtx(new SearchIndex({ embedder: null }));
+    const ctx = makeCtx(new MemorySearchIndex({ embedder: null }));
     const res = await semanticSearch.handler({ q: 'anything' }, ctx);
     expect(res.isError).toBe(true); // not a search result — actionable first-use guidance
     expect(res.structuredContent?.autoBuild).toBe(true);
@@ -72,7 +72,7 @@ describe('zotero_semantic_search', () => {
   });
 
   it('reports progress instead of double-building when a build is already running', async () => {
-    const ctx = makeCtx(new SearchIndex({ embedder: null }));
+    const ctx = makeCtx(new MemorySearchIndex({ embedder: null }));
     await indexTool.handler({ action: 'build' }, ctx); // start one first
     const res = await semanticSearch.handler({ q: 'anything' }, ctx);
     expect(res.isError).toBe(true);
@@ -81,7 +81,7 @@ describe('zotero_semantic_search', () => {
   });
 
   it('returns a plain actionable error (and no build) with auto_build:false', async () => {
-    const ctx = makeCtx(new SearchIndex({ embedder: null }));
+    const ctx = makeCtx(new MemorySearchIndex({ embedder: null }));
     const res = await semanticSearch.handler({ q: 'anything', auto_build: false }, ctx);
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/zotero_index/);
@@ -90,7 +90,7 @@ describe('zotero_semantic_search', () => {
   });
 
   it('returns ranked hits once built', async () => {
-    const search = new SearchIndex({ embedder: new FakeEmbeddingProvider() });
+    const search = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider() });
     await search.build(sampleItems);
     const res = await semanticSearch.handler({ q: 'deep learning', limit: 1 }, makeCtx(search));
     expect(res.isError).toBeUndefined();

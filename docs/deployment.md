@@ -23,8 +23,9 @@ claude.ai  ──HTTPS──►  Caddy (TLS terminator)  ──HTTP──►  Zo
   `deploy/Caddyfile` uses the default `reverse_proxy` which forwards `Host` verbatim.
 - **Persistent state.** Registered OAuth clients, tokens, and per-user Zotero keys
   are stored in `/data/oauth-store.json` (AES-256-GCM encrypted). Per-user semantic
-  search indexes live in `/data/search-index-<userId>.json`. Mount `/data` on a
-  persistent volume; the data survives container recreates.
+  search indexes live in `/data/search-index-<userId>.sqlite` (or `.json` on the legacy
+  backend, see [`semantic-search.md`](./semantic-search.md#storage-backends)). Mount
+  `/data` on a persistent volume; the data survives container recreates.
 
 ---
 
@@ -312,8 +313,9 @@ echo "0 3 * * * root ZOTEUS_DATA_DIR=/var/lib/docker/volumes/zoteus_zoteus-data/
   | sudo tee /etc/cron.d/zoteus-backup
 ```
 
-`scripts/backup-store.sh` archives `oauth-store.json` and all `search-index-*.json`
-files, retaining the 14 most recent snapshots.
+`scripts/backup-store.sh` archives `oauth-store.json` and every `search-index-*` file
+(both index backends), retaining the 14 most recent snapshots. Stop the service first: a
+SQLite index is copied consistently only when nothing is writing to it.
 
 **Critical:** store `ZOTEUS_OAUTH_TOKEN_SECRET` in a separate location (e.g. a
 password manager or a secrets manager). The backup archive is **useless without the

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { startIndexBuild, PAGE_SIZE } from '../../src/features/search/build.js';
-import { SearchIndex } from '../../src/features/search/index-manager.js';
+import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/index-manager.js';
 import { LibraryRouter } from '../../src/router/library-router.js';
 import { loadConfig } from '../../src/config.js';
 
@@ -56,7 +56,7 @@ function makeCtx(opts: {
     localGroupIds: opts.localGroupIds ?? [],
   };
   const router = new LibraryRouter({ config, capabilities, web: web as any, local: local as any });
-  const search = new SearchIndex({ embedder: null, logger: silentLogger });
+  const search = new MemorySearchIndex({ embedder: null, logger: silentLogger });
   // Empty path = no persistence: these tests care about routing, not the index file.
   const ctx: any = { config, capabilities, router, web, local, search, searchIndexPath: '', logger: silentLogger };
   return { ctx, web, local, search };

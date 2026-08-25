@@ -1,6 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildServer } from '../../src/server.js';
 import { loadConfig } from '../../src/config.js';
 import type { WebApiClient } from '../../src/api/web-client.js';
@@ -16,6 +19,8 @@ async function connect(overrides: Partial<ToolContext> = {}) {
     ZOTEUS_LOCAL: 'off',
     ZOTEUS_OAUTH_ENABLED: 'false',
     ZOTERO_API_KEY: 'FIXME-key',
+    // A real server opens (and creates) its index store: keep that out of the real data dir.
+    ZOTEUS_DATA_DIR: mkdtempSync(join(tmpdir(), 'zoteus-import-fallback-')),
   });
   const built = await buildServer(config);
   const ctx = built.ctx;
