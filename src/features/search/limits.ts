@@ -11,3 +11,12 @@
  * keeps its build time and index size unchanged.
  */
 export const DEFAULT_INDEX_MAX_ITEMS = 5000;
+
+/**
+ * Default passages per embedding call: one transformers pipeline call locally, one HTTP
+ * request through an API provider. `ZOTEUS_EMBED_BATCH_SIZE` overrides it, which matters
+ * for API providers: a request carrying more tokens than the provider accepts is rejected
+ * whole (OpenAI answers 400 above 300K tokens per request), and full-text passages reach
+ * that ceiling far sooner than metadata ones.
+ */
+export const DEFAULT_EMBED_BATCH_SIZE = 32;

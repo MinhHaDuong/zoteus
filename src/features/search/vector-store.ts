@@ -16,6 +16,11 @@ export class VectorStore {
     return this.entries.length;
   }
 
+  /** Width of the stored vectors (undefined when empty). Their embedder's fingerprint. */
+  get dimension(): number | undefined {
+    return this.entries[0]?.vector.length;
+  }
+
   add(id: string, vector: number[]): void {
     this.entries.push({ id, vector });
   }

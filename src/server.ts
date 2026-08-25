@@ -99,6 +99,10 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     overrides.zoteroUserId !== undefined ? `search-index-${overrides.zoteroUserId}.json` : 'search-index.json',
   );
   await loadIndex(search, searchIndexPath).catch(() => false);
+  // Vectors from a previous embedding model are dropped on load; say so at startup too,
+  // not only in tool output, because the remedy is a rebuild the user has to start.
+  const stale = search.buildStatus().vectorsStaleReason;
+  if (stale) logger.warn(stale);
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
   const ctx: ToolContext = {

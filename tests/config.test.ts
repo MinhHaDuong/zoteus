@@ -10,6 +10,10 @@ describe('loadConfig', () => {
     expect(cfg.localPort).toBe(23119);
     expect(cfg.translationServerUrl).toBe('http://127.0.0.1:1969');
     expect(cfg.embeddings).toBe('local');
+    // Unset: each provider keeps its own model, batch size and (absent) inter-batch pause.
+    expect(cfg.embeddingModel).toBeUndefined();
+    expect(cfg.embedBatchSize).toBeUndefined();
+    expect(cfg.embedBatchDelayMs).toBe(0);
     // Full-text indexing is opt-in: it multiplies build time and index size.
     expect(cfg.indexFulltext).toBe(false);
     expect(cfg.indexFulltextMaxChars).toBe(40000);
@@ -30,6 +34,9 @@ describe('loadConfig', () => {
       ZOTEUS_SCHOLAR_PROVIDERS: 'openalex,crossref',
       ZOTEUS_INDEX_FULLTEXT: 'true',
       ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '0',
+      ZOTEUS_EMBEDDING_MODEL: 'text-embedding-3-large',
+      ZOTEUS_EMBED_BATCH_SIZE: '16',
+      ZOTEUS_EMBED_BATCH_DELAY_MS: '500',
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.apiKey).toBe('abc');
     expect(cfg.libraryId).toBe(19552201);
@@ -40,6 +47,9 @@ describe('loadConfig', () => {
     expect(cfg.scholarProviders).toEqual(['openalex', 'crossref']);
     expect(cfg.indexFulltext).toBe(true);
     expect(cfg.indexFulltextMaxChars).toBe(0); // 0 = no per-item cap
+    expect(cfg.embeddingModel).toBe('text-embedding-3-large');
+    expect(cfg.embedBatchSize).toBe(16);
+    expect(cfg.embedBatchDelayMs).toBe(500);
   });
 
   it('throws on an invalid enum value', () => {

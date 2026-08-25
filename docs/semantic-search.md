@@ -28,8 +28,10 @@ can never time out the MCP client, even on very large libraries.
   | Field | Meaning |
   |---|---|
   | `embedderConfigured` | the `ZOTEUS_EMBEDDINGS` value that was asked for |
+  | `embedderModel` | the model it embeds with (`ZOTEUS_EMBEDDING_MODEL`), when it names one |
   | `embedderActive` | `true` only while that provider is genuinely embedding |
   | `embedderReason` | present when it is not: why, and what to do about it |
+  | `vectorsStaleReason` | present when stored vectors were dropped because another model had produced them (see [Tuning API embeddings](#tuning-api-embeddings)) |
 - `action: "stop"` — cooperatively cancel a running build. The build halts between
   pages/batches and the partial index is kept and stays searchable.
 - `limit` — optional max number of items to index. It lowers the configured cap for one
@@ -141,6 +143,43 @@ Set `ZOTEUS_EMBEDDINGS`:
 | `openai` / `gemini` | API embeddings (opt-in; requires `OPENAI_API_KEY` / `GEMINI_API_KEY`; data is sent to the provider). |
 | `off` | Keyword-only (BM25). |
 
+### Tuning API embeddings
+
+Three variables tune whichever provider is active, and all three default to today's
+behaviour:
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `ZOTEUS_EMBEDDING_MODEL` | provider default | The model the active **API** provider embeds with: `text-embedding-3-small` (openai) or `text-embedding-004` (gemini). |
+| `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call — one API request, or one local pipeline call. |
+| `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop; a positive value sleeps. |
+
+The last two are what a large build is tuned with. An embeddings request is rejected as a
+whole when it carries more tokens than the provider accepts (OpenAI answers `400` above
+300K tokens per request), and full-text passages, at 1200 characters each, reach that
+ceiling far sooner than metadata ones do: lower `ZOTEUS_EMBED_BATCH_SIZE` until a request
+fits. `ZOTEUS_EMBED_BATCH_DELAY_MS` bounds the request *rate* instead, which is how a build
+of tens of thousands of passages stays under a tokens-per-minute limit rather than being
+throttled by the provider.
+
+```bash
+ZOTEUS_EMBEDDINGS=openai
+ZOTEUS_EMBEDDING_MODEL=text-embedding-3-large
+ZOTEUS_EMBED_BATCH_SIZE=16
+ZOTEUS_EMBED_BATCH_DELAY_MS=200
+```
+
+**Changing the model means rebuilding the index.** Vectors from two models share neither
+dimension nor vector space, so comparing them produces scores that look plausible and mean
+nothing. Zoteus therefore stores the embedder identity (`openai:text-embedding-3-small`)
+alongside the vectors: when the index is loaded under a different one, the stored vectors are
+**discarded** and `zotero_index action:"status"` (plus every `zotero_semantic_search`
+summary) says so and names the remedy. Keyword search keeps working throughout; run
+`zotero_index action:"build"` once to re-embed the library with the new model. Index files
+written before the identity was recorded carry none and are kept as they are; a switch under
+one is caught at the first search instead, where the query vector turns out to be a different
+width from the stored ones.
+
 **`local` is opt-in by install** to keep the core package light:
 
 ```bash
@@ -210,8 +249,10 @@ A few things to know when indexing a big Zotero library:
 - **Don't block on the build call.** `build` returns immediately; poll
   `action: "status"` (every few seconds) until `state` is `done`. A partially built
   index is usable for keyword search the whole time, and progress survives crashes.
-- **Embeddings are batched** (32 passages per pipeline call) to keep local builds
-  efficient and interruptible.
+- **Embeddings are batched** (32 passages per pipeline call or API request) to keep builds
+  efficient and interruptible. `ZOTEUS_EMBED_BATCH_SIZE` and `ZOTEUS_EMBED_BATCH_DELAY_MS`
+  resize and pace those batches when an API provider's per-request or per-minute limits
+  need it (see [Tuning API embeddings](#tuning-api-embeddings)).
 - **Full text multiplies all of the above** by roughly the passage ratio above. On a large
   library, start with a `limit` or a smaller `fulltext_max_chars` before indexing
   everything.

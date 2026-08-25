@@ -3,14 +3,44 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
+import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 
 export interface EmbeddingProvider {
   readonly name: string;
+  /** Model producing the vectors; part of the index's embedder identity. */
+  readonly model?: string;
   embed(texts: string[]): Promise<number[][]>;
 }
 
 /** npm package that provides the on-device model runtime (optional, not bundled; see below). */
 export const TRANSFORMERS_MODULE = '@huggingface/transformers';
+
+/** Per-provider default models. ZOTEUS_EMBEDDING_MODEL overrides whichever one is active. */
+export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
+  openai: 'text-embedding-3-small',
+  gemini: 'text-embedding-004',
+};
+
+/**
+ * Identity of the vectors a provider produces. Two models never share a vector space (nor,
+ * usually, a dimension), so an index persists this and refuses to rank its stored vectors
+ * against queries embedded by a different one. See SearchIndex.loadFromJSON.
+ */
+export function embedderIdentity(p: { name: string; model?: string }): string {
+  return p.model ? `${p.name}:${p.model}` : p.name;
+}
+
+/**
+ * Pause between embedding batches. 0 (the default) only yields, so a long build stays
+ * interruptible and the event loop breathes; a positive value sleeps, which is how a build
+ * stays under an API provider's tokens-per-minute limit.
+ */
+export function batchPause(delayMs = 0): Promise<void> {
+  return new Promise((resolve) => {
+    if (delayMs > 0) setTimeout(resolve, delayMs);
+    else setImmediate(resolve);
+  });
+}
 
 const DIM = 64;
 
@@ -109,13 +139,20 @@ export function missingTransformersHint(config?: Pick<ZoteusConfig, 'dist'>): st
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'local';
   /** Texts handed to the transformers pipeline in a single call. */
-  static readonly BATCH_SIZE = 32;
+  static readonly BATCH_SIZE = DEFAULT_EMBED_BATCH_SIZE;
   private extractor: any;
   constructor(
-    private readonly model = 'Xenova/all-MiniLM-L6-v2',
+    readonly model = 'Xenova/all-MiniLM-L6-v2',
     /** Injectable extractor factory (tests); defaults to the transformers.js pipeline. */
     private readonly loadExtractor?: () => Promise<any>,
-    private readonly opts: { transformersPath?: string; dist?: string } = {},
+    private readonly opts: {
+      transformersPath?: string;
+      dist?: string;
+      /** Texts per pipeline call (defaults to BATCH_SIZE). */
+      batchSize?: number;
+      /** Pause between batches in ms (see batchPause). */
+      batchDelayMs?: number;
+    } = {},
   ) {}
 
   private async ensure(): Promise<any> {
@@ -154,9 +191,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   async embed(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
     const extractor = await this.ensure();
+    const size = Math.max(1, this.opts.batchSize ?? LocalEmbeddingProvider.BATCH_SIZE);
     const out: number[][] = [];
-    for (let i = 0; i < texts.length; i += LocalEmbeddingProvider.BATCH_SIZE) {
-      const batch = texts.slice(i, i + LocalEmbeddingProvider.BATCH_SIZE);
+    for (let i = 0; i < texts.length; i += size) {
+      const batch = texts.slice(i, i + size);
       const tensor = await extractor(batch, { pooling: 'mean', normalize: true });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
@@ -164,41 +202,65 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       for (let b = 0; b < batch.length; b++) {
         out.push(Array.from(data.slice(b * dim, (b + 1) * dim)));
       }
-      if (i + LocalEmbeddingProvider.BATCH_SIZE < texts.length) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
+      if (i + size < texts.length) await batchPause(this.opts.batchDelayMs);
     }
     return out;
   }
 }
 
+export interface ApiEmbeddingOptions {
+  /** Model to embed with; defaults to the provider's own (see DEFAULT_API_MODELS). */
+  model?: string;
+  /** Max texts per request. Unset sends them all in one request, as before. */
+  batchSize?: number;
+  /** Pause between requests in ms (see batchPause). */
+  batchDelayMs?: number;
+}
+
 /** OpenAI/Gemini embeddings (opt-in; data leaves the machine). */
 export class ApiEmbeddingProvider implements EmbeddingProvider {
   readonly name: string;
+  /** Bare model name: the `models/` prefix is Gemini wire format, not part of the identity. */
+  readonly model: string;
   constructor(
     private readonly kind: 'openai' | 'gemini',
     private readonly apiKey: string,
+    private readonly opts: ApiEmbeddingOptions = {},
   ) {
     this.name = kind;
+    this.model = (opts.model?.trim() || DEFAULT_API_MODELS[kind]).replace(/^models\//, '');
   }
+
   async embed(texts: string[]): Promise<number[][]> {
+    if (texts.length === 0) return [];
+    const size = Math.max(1, this.opts.batchSize ?? texts.length);
+    const out: number[][] = [];
+    for (let i = 0; i < texts.length; i += size) {
+      out.push(...(await this.embedBatch(texts.slice(i, i + size))));
+      if (i + size < texts.length) await batchPause(this.opts.batchDelayMs);
+    }
+    return out;
+  }
+
+  /** One request. Providers reject an oversized batch whole, hence the caller's batching. */
+  private async embedBatch(texts: string[]): Promise<number[][]> {
     if (this.kind === 'openai') {
       const res = await fetch('https://api.openai.com/v1/embeddings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: 'text-embedding-3-small', input: texts }),
+        body: JSON.stringify({ model: this.model, input: texts }),
       });
       if (!res.ok) throw new Error(`OpenAI embeddings failed (${res.status}).`);
       const json = (await res.json()) as any;
       return json.data.map((d: any) => d.embedding);
     }
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents?key=${this.apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:batchEmbedContents?key=${this.apiKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          requests: texts.map((t) => ({ model: 'models/text-embedding-004', content: { parts: [{ text: t }] } })),
+          requests: texts.map((t) => ({ model: `models/${this.model}`, content: { parts: [{ text: t }] } })),
         }),
       },
     );
@@ -227,6 +289,13 @@ export interface EmbedderSelection {
  * embed is known at startup, before a build silently produces an index with 0 vectors.
  */
 export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): EmbedderSelection {
+  // ZOTEUS_EMBEDDING_MODEL names the model of whichever API provider is active; the batch
+  // and delay dials apply to every provider that batches.
+  const api: ApiEmbeddingOptions = {
+    model: config.embeddingModel,
+    batchSize: config.embedBatchSize,
+    batchDelayMs: config.embedBatchDelayMs,
+  };
   switch (config.embeddings) {
     case 'off':
       return { provider: null, configured: 'off' };
@@ -238,7 +307,7 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         logger?.warn(`ZOTEUS_EMBEDDINGS=openai but OPENAI_API_KEY is unset; using keyword-only search.`);
         return { provider: null, configured: 'openai', unavailable };
       }
-      return { provider: new ApiEmbeddingProvider('openai', process.env.OPENAI_API_KEY), configured: 'openai' };
+      return { provider: new ApiEmbeddingProvider('openai', process.env.OPENAI_API_KEY, api), configured: 'openai' };
     case 'gemini':
       if (!process.env.GEMINI_API_KEY) {
         const unavailable =
@@ -247,7 +316,7 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         logger?.warn(`ZOTEUS_EMBEDDINGS=gemini but GEMINI_API_KEY is unset; using keyword-only search.`);
         return { provider: null, configured: 'gemini', unavailable };
       }
-      return { provider: new ApiEmbeddingProvider('gemini', process.env.GEMINI_API_KEY), configured: 'gemini' };
+      return { provider: new ApiEmbeddingProvider('gemini', process.env.GEMINI_API_KEY, api), configured: 'gemini' };
     case 'local':
     default:
       if (!resolveTransformers(config.transformersPath)) {
@@ -258,6 +327,8 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         provider: new LocalEmbeddingProvider(undefined, undefined, {
           transformersPath: config.transformersPath,
           dist: config.dist,
+          batchSize: config.embedBatchSize,
+          batchDelayMs: config.embedBatchDelayMs,
         }),
         configured: 'local',
       };

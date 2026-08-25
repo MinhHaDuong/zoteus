@@ -52,6 +52,16 @@ export function fulltextNotice(s: IndexBuildStatus): string {
 }
 
 /**
+ * Sentence appended when the vectors an earlier build persisted were produced by a different
+ * embedder than the one now configured, and were therefore dropped on load. Same reasoning as
+ * `embedderNotice`: without it, switching ZOTEUS_EMBEDDING_MODEL turns a healthy index into a
+ * keyword-only one with no explanation, and the fix (one rebuild) is not obvious.
+ */
+export function staleVectorsNotice(s: IndexBuildStatus): string {
+  return s.vectorsStaleReason ? ` ${s.vectorsStaleReason}` : '';
+}
+
+/**
  * Sentence appended when the build limit stopped the crawl short of the library. Same
  * reasoning as `embedderNotice` and `fulltextNotice`: without it a capped build reports
  * complete coverage, so a search that finds nothing in the unindexed remainder is
@@ -73,7 +83,7 @@ export function truncationNotice(s: IndexBuildStatus): string {
 
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
-  const notice = embedderNotice(s) + fulltextNotice(s) + truncationNotice(s);
+  const notice = embedderNotice(s) + staleVectorsNotice(s) + fulltextNotice(s) + truncationNotice(s);
   switch (s.state) {
     case 'building':
       return `Index build in progress — ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
@@ -159,6 +169,10 @@ export function startIndexBuild(
     maxItems: cap,
     persist,
     fulltextFor,
+    // Passages per embedding request, and the pause between requests: the dials an API
+    // provider's per-request token cap and per-minute rate limit are tuned against.
+    embedBatchSize: ctx.config.embedBatchSize,
+    embedBatchDelayMs: ctx.config.embedBatchDelayMs,
     // A full-text index is far bigger, and persisting means re-serializing all of it. Save
     // less often so the write does not dominate the build.
     ...(wantFulltext ? { persistEveryItems: 500, persistEveryMs: 60_000 } : {}),

@@ -2,7 +2,8 @@ import { BM25Index, type BM25Hit } from './bm25.js';
 import { VectorStore, type VectorHit } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { tokenize } from './tokenize.js';
-import type { EmbeddingProvider } from './embeddings.js';
+import { batchPause, embedderIdentity, type EmbeddingProvider } from './embeddings.js';
+import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
 import { progressLine } from './build.js';
 import type { Logger } from '../../lib/logger.js';
@@ -36,10 +37,14 @@ export interface SearchIndexStatus {
   embedder: string;
   /** The requested ZOTEUS_EMBEDDINGS value, whether or not it works. */
   embedderConfigured: string;
+  /** Model the active embedder uses, when it names one (ZOTEUS_EMBEDDING_MODEL). */
+  embedderModel?: string;
   /** True only while the configured provider is genuinely producing vectors. */
   embedderActive: boolean;
   /** Why `embedderConfigured` is not active, and what to do about it. */
   embedderReason?: string;
+  /** Set when stored vectors were discarded because another embedder had produced them. */
+  vectorsStaleReason?: string;
   /** True when this build was asked to index attachment full text (opt-in). */
   fulltextEnabled: boolean;
   /** Items whose attachment full text is in the index. */
@@ -91,6 +96,8 @@ export interface IncrementalBuildOptions {
   maxItems?: number;
   /** Embedding batch size (texts handed to the provider per call). */
   embedBatchSize?: number;
+  /** Pause between embedding batches in ms; 0 only yields (see batchPause). */
+  embedBatchDelayMs?: number;
   /** Persist partial progress every N items. */
   persistEveryItems?: number;
   /** Persist partial progress at least every N ms. */
@@ -203,6 +210,10 @@ export class SearchIndex {
   private fulltextEnabled = false;
   private fulltextUnavailable: string | undefined = undefined;
   private builtFromVersion = 0;
+  /** Embedder identity that produced the vectors currently held (persisted with them). */
+  private vectorEmbedderId: string | undefined = undefined;
+  /** Set when a load discarded vectors another embedder had produced. */
+  private vectorsStale: string | undefined = undefined;
 
   // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
   private buildState: BuildState = 'idle';
@@ -228,6 +239,15 @@ export class SearchIndex {
   /** True only while vectors are genuinely being produced. */
   get embedderActive(): boolean {
     return Boolean(this.opts.embedder) && !this.embedderError;
+  }
+
+  /**
+   * Identity of the vectors this index would produce now, or undefined with no provider.
+   * Stored alongside the vectors so a model switch cannot go unnoticed: vectors from two
+   * models differ in dimension and in space, so ranking one against the other is nonsense.
+   */
+  get embedderId(): string | undefined {
+    return this.opts.embedder ? embedderIdentity(this.opts.embedder) : undefined;
   }
 
   /** Why the configured embedder is not active (undefined when nothing is wrong). */
@@ -265,6 +285,19 @@ export class SearchIndex {
    */
   noteFulltextUnavailable(reason: string): void {
     this.fulltextUnavailable = reason;
+  }
+
+  /**
+   * Drop vectors this embedder did not produce, and remember why. Ranking them would not
+   * fail, it would return plausible nonsense, which is the whole reason to be strict here.
+   */
+  private dropStaleVectors(cause: string): void {
+    this.vectorsStale =
+      `${cause} They were discarded (vectors from different models are not comparable). Keyword search is ` +
+      'unaffected: run zotero_index action:"build" to re-embed the library with the current model.';
+    this.vectors = new VectorStore();
+    this.vectorEmbedderId = undefined;
+    this.opts.logger?.warn(this.vectorsStale);
   }
 
   /** Record the first provider failure so status, not just the log, can report it. */
@@ -325,6 +358,8 @@ export class SearchIndex {
     };
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
+    if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
+    if (this.vectorsStale) s.vectorsStaleReason = this.vectorsStale;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
     return s;
   }
@@ -340,6 +375,9 @@ export class SearchIndex {
     this.items = new Set();
     this.fulltextItems = new Set();
     this.fulltextPassages = 0;
+    // The vectors are gone, so their provenance and any staleness verdict go with them.
+    this.vectorEmbedderId = undefined;
+    this.vectorsStale = undefined;
   }
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
@@ -347,6 +385,8 @@ export class SearchIndex {
     // A rebuild is the retry: clear a previous runtime failure so a provider that has since
     // been fixed (model downloaded, package installed) reports healthy again.
     this.embedderError = undefined;
+    // Whatever this build embeds carries the current embedder's identity.
+    this.vectorEmbedderId = this.embedderId;
     // This path indexes metadata (plus any caller-supplied extraText), never attachment
     // full text, so it must not inherit a previous incremental build's verdict.
     this.fulltextEnabled = false;
@@ -405,8 +445,10 @@ export class SearchIndex {
     const token = { cancelled: false };
     this.cancelToken = token;
     this.reset();
+    this.vectorEmbedderId = this.embedderId;
 
-    const embedBatchSize = opts.embedBatchSize ?? 32;
+    const embedBatchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
+    const embedBatchDelayMs = opts.embedBatchDelayMs ?? 0;
     const persistEveryItems = opts.persistEveryItems ?? 200;
     const persistEveryMs = opts.persistEveryMs ?? 10_000;
     const progressEveryItems = opts.progressEveryItems ?? 500;
@@ -461,8 +503,9 @@ export class SearchIndex {
           this.noteEmbedFailure(e);
           pending.length = 0;
         }
-        // Yield so long embedding runs stay interruptible and the event loop breathes.
-        await new Promise((resolve) => setImmediate(resolve));
+        // Yield so long embedding runs stay interruptible and the event loop breathes; a
+        // configured delay additionally paces requests against a provider's rate limit.
+        await batchPause(embedBatchDelayMs);
       }
     };
 
@@ -589,7 +632,17 @@ export class SearchIndex {
     if (mode !== 'keyword' && this.opts.embedder && this.vectors.size) {
       try {
         const [qv] = await this.opts.embedder.embed([q]);
-        if (qv) vector = this.vectors.search(qv, pool);
+        const dim = this.vectors.dimension;
+        // Index files written before the embedder identity was persisted carry no
+        // provenance, so a model switch under one shows up only here, as a query of a
+        // different width. Cosine over mismatched widths still returns numbers.
+        if (qv && dim !== undefined && qv.length !== dim) {
+          this.dropStaleVectors(
+            `The stored vectors have ${dim} dimensions, but ${this.embedderId ?? 'the current embedder'} produces ${qv.length}.`,
+          );
+        } else if (qv) {
+          vector = this.vectors.search(qv, pool);
+        }
       } catch (e) {
         this.noteEmbedFailure(e);
       }
@@ -618,11 +671,15 @@ export class SearchIndex {
     builtFromVersion: number;
     itemsTotal: number;
     itemsAvailable: number;
+    embedderId?: string;
   } {
     return {
       chunks: [...this.chunks.values()],
       vectors: this.vectors.toJSON(),
       builtFromVersion: this.builtFromVersion,
+      // Provenance of the vectors, not of the passages: it is what lets the next load
+      // notice that ZOTEUS_EMBEDDING_MODEL (or ZOTEUS_EMBEDDINGS) changed under them.
+      embedderId: this.vectorEmbedderId,
       // Persisted so a truncated build outlives the process that ran it: a restart that
       // dropped them reported total=0 available=0 and silently stopped warning.
       itemsTotal: this.itemsTotal,
@@ -636,6 +693,7 @@ export class SearchIndex {
     builtFromVersion: number;
     itemsTotal?: number;
     itemsAvailable?: number;
+    embedderId?: string;
   }): void {
     this.reset();
     for (const rec of data.chunks ?? []) {
@@ -651,6 +709,20 @@ export class SearchIndex {
     // as full-text-enabled even before this process runs a build of its own.
     this.fulltextEnabled = this.fulltextPassages > 0;
     this.vectors = VectorStore.fromJSON(data.vectors ?? []);
+    this.vectorEmbedderId = data.embedderId;
+    // Stored vectors are only comparable with queries embedded by the same model, so a
+    // model switch invalidates them: drop them and say so rather than ranking a query
+    // against a foreign vector space (cosine over mismatched dimensions still returns
+    // numbers, which is exactly what makes it dangerous). Files written before the
+    // identity was persisted carry none, and are kept: their provenance is unknown, not
+    // known-wrong. Nothing to reconcile without an active provider either, since a query
+    // that cannot be embedded never touches these vectors.
+    const current = this.embedderId;
+    if (current && this.vectorEmbedderId && this.vectorEmbedderId !== current && this.vectors.size) {
+      this.dropStaleVectors(
+        `The stored vectors were built with ${this.vectorEmbedderId}, but this server now embeds with ${current}.`,
+      );
+    }
     this.builtFromVersion = data.builtFromVersion ?? 0;
     // Absent in files written before these were persisted: 0/0 leaves every truncation
     // check false, so an old index stays silent rather than inventing a shortfall.

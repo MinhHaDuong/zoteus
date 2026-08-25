@@ -5,6 +5,7 @@ import {
   embedderNotice,
   fulltextNotice,
   progressLine,
+  staleVectorsNotice,
   startIndexBuild,
   truncationNotice,
 } from '../features/search/build.js';
@@ -78,9 +79,13 @@ const semanticSearch: ToolDefinition = {
     // empty list, which reads exactly like "your library has nothing on this": the failure
     // mode reported in #7. Refuse instead, and name the cause.
     if (args.mode === 'semantic' && !ctx.search.hasVectors) {
-      const why = ctx.search.embedderActive
-        ? 'The index holds no vectors yet. Rebuild it with zotero_index action:"build" (an index built while the embedder was unavailable stays keyword-only until rebuilt).'
-        : `No vectors exist because the embedder is not active: ${ctx.search.embedderReason ?? 'unavailable'}`;
+      const why =
+        // A model switch is the one cause that names its own remedy, so it wins over the
+        // generic "no vectors yet" line.
+        status.vectorsStaleReason ??
+        (ctx.search.embedderActive
+          ? 'The index holds no vectors yet. Rebuild it with zotero_index action:"build" (an index built while the embedder was unavailable stays keyword-only until rebuilt).'
+          : `No vectors exist because the embedder is not active: ${ctx.search.embedderReason ?? 'unavailable'}`);
       return {
         content: [
           {
@@ -108,7 +113,7 @@ const semanticSearch: ToolDefinition = {
       (hits.length
         ? `Top ${hits.length} match(es) for "${args.q}" (${ctx.search.embedderName}).`
         : `No matches for "${args.q}".`) +
-      (args.mode === 'keyword' ? '' : embedderNotice(after)) +
+      (args.mode === 'keyword' ? '' : embedderNotice(after) + staleVectorsNotice(after)) +
       fulltextNotice(after) +
       // A search over a truncated index must say so here, not only in zotero_index status:
       // this is where "no matches" would otherwise be read as "the library holds nothing".
@@ -120,6 +125,7 @@ const semanticSearch: ToolDefinition = {
         embedderConfigured: after.embedderConfigured,
         embedderActive: after.embedderActive,
         ...(after.embedderReason ? { embedderReason: after.embedderReason } : {}),
+        ...(after.vectorsStaleReason ? { vectorsStaleReason: after.vectorsStaleReason } : {}),
         fulltextEnabled: after.fulltextEnabled,
         ...(after.fulltextReason ? { fulltextReason: after.fulltextReason } : {}),
       },
