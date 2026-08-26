@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-08-26
+
 ### Fixed
 - **The desktop extension no longer crashes on startup in recent Claude Desktop versions**
   (#18, thanks @StianOby). The shared Cowork/Code server pool expects `initialize` to be
