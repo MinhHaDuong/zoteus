@@ -16,42 +16,79 @@ export interface StdioOptions {
    * deadline: shutdown never fails, it only takes less time than it wanted.
    */
   flush?: () => Promise<void>;
+  /**
+   * Whether this process is ours to end. Defaults to the heuristic in `ownsSignals`;
+   * pass it explicitly in tests, where the signal handlers of other cases are already
+   * installed and the heuristic would read them as somebody else's.
+   */
+  ownsProcess?: boolean;
   /** Seams for tests; the defaults are the real stdin and a real exit. */
   stdin?: EofSource;
   exit?: (code: number) => void;
 }
 
 /**
- * Wire the end of a stdio session: say what ended it, checkpoint the index, exit.
+ * Whether the signals belong to us.
+ *
+ * A handler on SIGTERM suppresses node's default termination, so installing one commits
+ * us to ending the process ourselves. That is correct in a process we own and wrong in a
+ * process we are a guest in, and the listener count separates the two: a server spawned
+ * as its own subprocess has nobody else watching, while a host that runs us inside itself
+ * is nearly certain to be handling its own shutdown already. The remaining case, a host
+ * that embeds us and handles no signals, comes out the same either way, since the default
+ * behaviour we would be replacing is termination too.
+ */
+export function ownsSignals(): boolean {
+  return process.listenerCount('SIGTERM') === 0 && process.listenerCount('SIGINT') === 0;
+}
+
+/**
+ * Wire the end of a stdio session: say what ended it, checkpoint the index, stand down.
  *
  * A stdio server dies with its input stream, and it used to do so with nothing to show
  * for it. `StdioServerTransport.start()` subscribes to `data` and `error` on stdin and to
  * nothing else (there is no `end` listener anywhere in it), so when the host closes stdin
  * the transport is never closed, `onclose` never fires, no `close()` runs, and the process
  * simply runs out of work and exits 0 having written no line and flushed no file. That is
- * the whole of what #18 looks like from the outside: the host logs `Server transport
- * closed unexpectedly, this is likely due to the process exiting early`, and there is no
- * reason anywhere, so an ordinary shutdown reads as a crash. Reproduced against the
- * shipped 1.7.1 bundle: EOF on stdin 303ms in, process gone 23ms later, stderr empty.
+ * what #18 keeps arriving as: the host logs `Server transport closed unexpectedly, this is
+ * likely due to the process exiting early`, and there is no reason anywhere, so an
+ * ordinary shutdown reads as a crash.
  *
- * Exiting is right, since a closed stdin can carry no further request and staying alive
- * would only leak a process. What changes is that the exit is announced and, before it,
- * the index is written. Only the HTTP path installed shutdown handlers, so a stdio session
- * left SQLite's write-ahead log for whichever process opened the file next; closing the
- * handle is what checkpoints it. That matters most on exactly the host this was reported
- * from, where a shared pool starts a second Zoteus beside the first.
+ * Standing down is right. The stdio binding says a server SHOULD exit promptly once its
+ * standard input is closed, calls that the primary graceful-shutdown signal and the only
+ * portable one, and has the client escalate to SIGTERM and then SIGKILL when it does not.
+ * What changes here is that the exit is announced and, before it, the index is written:
+ * only the HTTP path installed shutdown handlers, so a stdio session left SQLite's
+ * write-ahead log for whichever process opened the file next.
+ *
+ * **How each ending ends, and why they differ.** 1.7.2 finished all three with
+ * `process.exit(0)`, which assumes the process is ours. On the evidence of #18 that is not
+ * safe to assume: the host reports `Using built-in Node.js for MCP server` and that its
+ * probe `requires the SDK's base StdioClientTransport`, both of which read like a runner
+ * that may not be a plain subprocess. Exiting somebody else's process is a worse bug than
+ * the one being fixed, so only the path that cannot end any other way still does it.
+ *
+ * - **stdin EOF, and a transport closed from inside the process.** No exit call. The flush
+ *   finishes, `server.close()` releases the transport (which pauses stdin, the last ref'd
+ *   handle), the loop drains and node exits 0 on its own. If some other work is still
+ *   holding the loop, the host's own escalation is the backstop the binding prescribes.
+ * - **SIGTERM and SIGINT.** These do exit, because installing the handler is what removed
+ *   the default termination: stopping there would hang the process until it was killed.
+ *   Guarded by `ownsSignals` so a host that already handles its own keeps them.
+ *
+ * Watching stdin needs no such guard. Once nothing exits, the worst an unrelated EOF can
+ * do is checkpoint an index that was already consistent and write one line saying so.
  *
  * Installed after `connect`, because `Protocol.connect()` assigns `transport.onclose`
- * itself. The server's own `onclose` is the hook that survives it, and it covers the
- * other direction: a transport closed from inside the process rather than by the host.
+ * itself. The server's own `onclose` is the hook that survives it.
  */
 export function installStdioShutdown(server: McpServer, opts: StdioOptions = {}): void {
   const startedAt = Date.now();
   const stdin = opts.stdin ?? process.stdin;
   let ending = false;
 
-  const finish = async (code: number): Promise<void> => {
-    // A timer holds the loop open across the flush: with stdin already at EOF there is
+  const finish = async (exitCode: number | undefined): Promise<void> => {
+    // A timer holds the loop open across the flush: with stdin already at EOF there may be
     // nothing else left alive to keep the process running long enough to finish it.
     const keepAlive = setInterval(() => {}, 1_000);
     try {
@@ -59,15 +96,18 @@ export function installStdioShutdown(server: McpServer, opts: StdioOptions = {})
     } catch (e) {
       opts.logger?.error(`Shutdown flush failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+    // Releases stdin, which is what lets the loop drain when nothing calls exit.
+    await server.close().catch(() => {});
     clearInterval(keepAlive);
-    (opts.exit ?? ((c: number) => process.exit(c)))(code);
+    if (exitCode !== undefined) (opts.exit ?? ((c: number) => process.exit(c)))(exitCode);
   };
 
-  const end = (reason: string, code = 0): void => {
+  /** `exitCode` undefined means stand down and let the loop drain. */
+  const end = (reason: string, exitCode?: number): void => {
     if (ending) return;
     ending = true;
     opts.logger?.info(`${reason} ${Date.now() - startedAt}ms after startup. Shutting down.`);
-    void finish(code);
+    void finish(exitCode);
   };
 
   // `close` follows `end` on a pipe, and arrives alone if the far side is torn down rather
@@ -75,8 +115,10 @@ export function installStdioShutdown(server: McpServer, opts: StdioOptions = {})
   stdin.once('end', () => end('The host closed the stdio connection (EOF on stdin)'));
   stdin.once('close', () => end('The host closed the stdio connection (stdin closed)'));
   server.server.onclose = () => end('The stdio transport closed');
-  process.on('SIGTERM', () => end('Received SIGTERM'));
-  process.on('SIGINT', () => end('Received SIGINT'));
+  if (opts.ownsProcess ?? ownsSignals()) {
+    process.on('SIGTERM', () => end('Received SIGTERM', 0));
+    process.on('SIGINT', () => end('Received SIGINT', 0));
+  }
 }
 
 export async function startStdio(server: McpServer, opts: StdioOptions = {}): Promise<void> {

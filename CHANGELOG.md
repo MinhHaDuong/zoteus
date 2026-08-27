@@ -6,6 +6,19 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **The stdio shutdown no longer ends the process it is running in** (#18). 1.7.2 finished
+  every ending with `process.exit(0)`, which assumes the server owns its process. The host
+  in #18 reports `Using built-in Node.js for MCP server` and a probe that `requires the
+  SDK's base StdioClientTransport`, neither of which is obviously a plain subprocess, and
+  exiting somebody else's process is a worse fault than the one being fixed. Now only the
+  signal handlers exit, because installing them is what removes node's default
+  termination, and they are installed only when nothing else is already handling those
+  signals. On stdin EOF and on a transport closed from inside the process, Zoteus flushes
+  the index, releases the transport and lets the loop drain, which exits 0 on its own in a
+  process it does own. The stdio binding's own escalation (close stdin, wait, SIGTERM,
+  SIGKILL) remains the backstop.
+
 ## [1.7.2] - 2026-08-27
 
 ### Fixed
