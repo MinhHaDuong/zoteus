@@ -1,8 +1,3 @@
-const STOPWORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were',
-  'be', 'by', 'as', 'at', 'that', 'this', 'it', 'from', 'we', 'our', 'their', 'its', 'these', 'those',
-]);
-
 /**
  * Combining marks sitting on a **Latin** base, which is the only place
  * `unicode61 remove_diacritics 2` removes them: measured, Greek tonos and Cyrillic breve
@@ -140,15 +135,23 @@ function shield(chars: string, base: number): { hide: (s: string) => string; sho
 const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
 
 /**
- * Fold, split on non-alphanumerics, drop stopwords and 1-char tokens.
+ * Fold, split on non-alphanumerics, drop 1-char tokens.
  *
  * The token class is `\p{L}\p{N}`, not `[a-z0-9]`, and that half earns its place on its
  * own: it keeps `théorie`, `Θεωρία`, `теория` and `日本語` single tokens instead of
  * fragments, and it would have prevented this defect even without the fold — a whole token
  * misses cleanly, a fragment matches a high-frequency English string.
+ *
+ * There is deliberately no stoplist. The one that used to sit here held 29 English words,
+ * which penalized exactly one language: "the" was dropped while "le", "der" and "và"
+ * passed, and the FTS5 document side (unicode61) has no stoplist at all, so the index held
+ * the very tokens the query side was throwing away. bm25 already down-weights ubiquitous
+ * terms, which is the honest version of what a stoplist approximates; what the list added
+ * was queries that could not say what they mean — "to be or not to be" tokenized to
+ * nothing. Existing indexes need no rebuild: terms are OR-ed, so queries keep matching
+ * through their content words, and the JSON backend re-derives its postings from raw
+ * passage text on every load anyway.
  */
 export function tokenize(text: string): string[] {
-  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-    (t) => t.length > 1 && !STOPWORDS.has(t),
-  );
+  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1);
 }

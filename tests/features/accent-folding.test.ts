@@ -187,8 +187,19 @@ describe('tokenize', () => {
     expect(tokenize('日本語の研究')).toEqual(['日本語の研究']);
   });
 
-  it('still drops stopwords and one-character tokens', () => {
-    expect(tokenize('the a of neural x networks')).toEqual(['neural', 'networks']);
+  it('keeps function words — no language loses its own, English included', () => {
+    // The 29-word English stoplist penalized exactly one language: "the" was dropped
+    // while "le", "der" and "và" sailed through, and the FTS5 document side (unicode61)
+    // never had a stoplist at all, so the index held the very tokens the query side was
+    // quietly throwing away. bm25 already down-weights ubiquitous terms; what a stoplist
+    // adds on top is queries that cannot say what they mean — "to be or not to be"
+    // tokenized to nothing at all.
+    expect(tokenize('the a of neural x networks')).toEqual(['the', 'of', 'neural', 'networks']);
+    expect(tokenize('to be or not to be')).toEqual(['to', 'be', 'or', 'not', 'to', 'be']);
+  });
+
+  it('still drops one-character tokens', () => {
+    expect(tokenize('a x neural networks')).toEqual(['neural', 'networks']);
   });
 });
 

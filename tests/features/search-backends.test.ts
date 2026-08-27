@@ -343,12 +343,18 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
     await sqlite.close();
   });
 
-  sqliteIt('tokenizes the query exactly like the JSON backend, stopwords included', async () => {
+  sqliteIt('tokenizes the query exactly like the JSON backend, function words included', async () => {
     const { memory, sqlite } = await both();
-    // "of"/"the" are dropped by tokenize.ts, so a query made only of them matches nothing
-    // on either backend rather than erroring or returning everything.
-    expect(await sqlite.query('of the', { mode: 'keyword' })).toEqual([]);
-    expect(await memory.query('of the', { mode: 'keyword' })).toEqual([]);
+    // Function words are real tokens now: the document side always indexed them, and the
+    // query side no longer throws them away. A query made only of them matches what
+    // contains them, ranked by bm25, identically on both backends.
+    const s = await sqlite.query('for and', { mode: 'keyword' });
+    const m = await memory.query('for and', { mode: 'keyword' });
+    expect(s.length).toBeGreaterThan(0);
+    expect(s.map((h) => h.itemKey).sort()).toEqual(m.map((h) => h.itemKey).sort());
+    // A query of words the corpus simply does not contain still matches nothing.
+    expect(await sqlite.query('zyzzyva qwertyuiop', { mode: 'keyword' })).toEqual([]);
+    expect(await memory.query('zyzzyva qwertyuiop', { mode: 'keyword' })).toEqual([]);
     // Punctuation is not FTS5 syntax here: every term is quoted before it is OR-ed.
     const hits = await sqlite.query('"gardening" OR (tomatoes*)', { limit: 3, mode: 'keyword' });
     expect(hits[0]!.itemKey).toBe('B');
