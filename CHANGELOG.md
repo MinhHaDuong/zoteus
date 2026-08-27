@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-08-27
+
 ### Fixed
 - **A setting left empty in the desktop pane no longer stops the server from starting**
   (#18, thanks @StianOby). A `.mcpb` host substitutes every environment entry its manifest
