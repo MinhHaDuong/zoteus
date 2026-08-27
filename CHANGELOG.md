@@ -7,6 +7,21 @@ All notable changes to Zoteus are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **A setting left empty in the desktop pane no longer stops the server from starting**
+  (#18, thanks @StianOby). A `.mcpb` host substitutes every environment entry its manifest
+  declares, including the ones whose settings field the user never filled in. Where that
+  field also carries no `default` in the manifest, Claude Desktop 1.37937 substitutes
+  nothing at all and passes the reference through verbatim, so the server is handed the
+  literal text `${user_config.embed_batch_size}`. Blank has meant "use the default" since
+  1.7.0, the release that added these four numeric fields; an unresolved reference did not,
+  so `z.coerce.number()` read `NaN` and `loadConfig` threw a `ZodError` about a second into
+  startup, before the logger exists. That is a `FATAL` line and a dead process, which the
+  host reports as a failed version negotiation: the negotiation was fine, there was simply
+  nothing left alive to negotiate with. Every one of those four fields is empty on a fresh
+  install, so 1.7.0, 1.7.1 and 1.7.2 could not start as a desktop extension on this host
+  version unless all four were filled in by hand. Read out of `/proc/<pid>/environ` of the
+  running extension rather than inferred; an unresolved reference, a blank string,
+  `undefined` and `null` now all mean the setting's own default applies.
 - **The stdio shutdown no longer ends the process it is running in** (#18). 1.7.2 finished
   every ending with `process.exit(0)`, which assumes the server owns its process. The host
   in #18 reports `Using built-in Node.js for MCP server` and a probe that `requires the
@@ -18,6 +33,27 @@ All notable changes to Zoteus are documented here. The format is based on
   the index, releases the transport and lets the loop drain, which exits 0 on its own in a
   process it does own. The stdio binding's own escalation (close stdin, wait, SIGTERM,
   SIGKILL) remains the backstop.
+
+### Changed
+- **No single setting can stop the server from starting** (#18). Configuration used to be
+  all-or-nothing: any value a schema rejected, whether a host marker nobody anticipated or
+  a typo, threw out of `loadConfig` before there was a logger to explain it. A rejected
+  value is now reported by name on stderr and replaced by what its absence would have
+  given, so `ZOTEUS_INDEX_MAX_ITEMS=lots` starts the server on 5000 items and says why,
+  rather than taking down `zotero_get_item`, bibliographies and citations, none of which
+  reads that setting. It is #20's reasoning (a damaged index stopped being fatal) applied
+  to configuration, and it is what keeps the next unanticipated substitution a warning
+  instead of another silent startup crash. The settings that have no safe default, the
+  OAuth credentials, are unchanged: they are checked after parsing, where the failure can
+  name what is missing.
+
+### Documentation
+- **Where a desktop install's logs actually are** (#18). Recent Claude Desktop versions run
+  a bundled extension in an Electron `UtilityProcess`, so `mcp-server-Zoteus — Zotero MCP.log`
+  carries only what the host says about the server, and every `[zoteus]` line, including the
+  crash above, goes to `main.log` prefixed `[UtilityProcess stderr]`. Three rounds of #18
+  were spent reading a file that could not have held the answer. Troubleshooting now says
+  which file, and adds the `ZodError` symptom.
 
 ## [1.7.2] - 2026-08-27
 

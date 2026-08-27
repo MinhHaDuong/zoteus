@@ -113,14 +113,20 @@ describe('embedding knobs are runtime parameters', () => {
     expect(loadConfig({ ZOTEUS_EMBEDDING_MODEL: '' } as any).embeddingModel).toBeUndefined();
   });
 
-  it('rejects a batch size that could never produce a request', () => {
-    expect(() => loadConfig({ ZOTEUS_EMBED_BATCH_SIZE: '0' } as any)).toThrow();
-    expect(() => loadConfig({ ZOTEUS_EMBED_BATCH_SIZE: '-4' } as any)).toThrow();
-    expect(() => loadConfig({ ZOTEUS_EMBED_BATCH_SIZE: 'lots' } as any)).toThrow();
+  it('refuses a batch size that could never produce a request, without refusing to boot', () => {
+    // Never the configured value, and never a dead server either (#18): the knob is
+    // reported and left unset, which is the provider's own batch size.
+    for (const bad of ['0', '-4', 'lots']) {
+      const cfg = loadConfig({ ZOTEUS_EMBED_BATCH_SIZE: bad } as any);
+      expect(cfg.embedBatchSize).toBeUndefined();
+      expect(cfg.warnings).toEqual([`ZOTEUS_EMBED_BATCH_SIZE="${bad}" is not usable, ignoring it`]);
+    }
   });
 
-  it('rejects a negative delay but accepts 0', () => {
-    expect(() => loadConfig({ ZOTEUS_EMBED_BATCH_DELAY_MS: '-1' } as any)).toThrow();
+  it('refuses a negative delay but accepts 0', () => {
+    const cfg = loadConfig({ ZOTEUS_EMBED_BATCH_DELAY_MS: '-1' } as any);
+    expect(cfg.embedBatchDelayMs).toBe(0);
+    expect(cfg.warnings).toEqual(['ZOTEUS_EMBED_BATCH_DELAY_MS="-1" is not usable, using 0']);
     expect(loadConfig({ ZOTEUS_EMBED_BATCH_DELAY_MS: '0' } as any).embedBatchDelayMs).toBe(0);
   });
 });

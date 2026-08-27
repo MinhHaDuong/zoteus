@@ -478,7 +478,11 @@ describe('ZOTEUS_INDEX_BACKEND', () => {
     expect(loadConfig({} as any).indexBackend).toBe('auto');
     expect(loadConfig({ ZOTEUS_INDEX_BACKEND: 'sqlite' } as any).indexBackend).toBe('sqlite');
     expect(loadConfig({ ZOTEUS_INDEX_BACKEND: 'memory' } as any).indexBackend).toBe('memory');
-    expect(() => loadConfig({ ZOTEUS_INDEX_BACKEND: 'postgres' } as any)).toThrow();
+    // An unknown store is named and dropped, not fatal (#18); auto is what it would
+    // have been without the variable.
+    const unknown = loadConfig({ ZOTEUS_INDEX_BACKEND: 'postgres' } as any);
+    expect(unknown.indexBackend).toBe('auto');
+    expect(unknown.warnings).toEqual(['ZOTEUS_INDEX_BACKEND="postgres" is not usable, using "auto"']);
   });
 
   it('memory keeps the JSON artifact, and auto takes SQLite where the runtime has it', async () => {

@@ -139,8 +139,13 @@ describe('the item cap is a runtime parameter', () => {
     expect(loadConfig({ ZOTEUS_INDEX_MAX_ITEMS: '20000' }).indexMaxItems).toBe(20000);
   });
 
-  it('rejects a non-positive value rather than building an empty index', () => {
-    expect(() => loadConfig({ ZOTEUS_INDEX_MAX_ITEMS: '0' })).toThrow();
+  it('refuses a non-positive value rather than building an empty index', () => {
+    // The cap it would have had, not 0, and not a server that will not start (#18).
+    const cfg = loadConfig({ ZOTEUS_INDEX_MAX_ITEMS: '0' });
+    expect(cfg.indexMaxItems).toBe(DEFAULT_INDEX_MAX_ITEMS);
+    expect(cfg.warnings).toEqual([
+      `ZOTEUS_INDEX_MAX_ITEMS="0" is not usable, using ${DEFAULT_INDEX_MAX_ITEMS}`,
+    ]);
   });
 });
 

@@ -52,8 +52,10 @@ describe('loadConfig', () => {
     expect(cfg.embedBatchDelayMs).toBe(500);
   });
 
-  it('throws on an invalid enum value', () => {
-    expect(() => loadConfig({ ZOTEUS_LOCAL: 'maybe' } as unknown as NodeJS.ProcessEnv)).toThrow();
+  it('falls back on an invalid enum value, and says which', () => {
+    const cfg = loadConfig({ ZOTEUS_LOCAL: 'maybe' } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.local).toBe('auto');
+    expect(cfg.warnings).toEqual(['ZOTEUS_LOCAL="maybe" is not usable, using "auto"']);
   });
 
   it('treats an empty ZOTERO_API_KEY as unset rather than crashing boot', () => {
@@ -87,6 +89,7 @@ describe('loadConfig', () => {
     expect(cfg.indexFulltext).toBe(false);
     expect(cfg.indexFulltextMaxChars).toBe(40000); // not 0, which would mean "no cap"
     expect(cfg.indexMaxItems).toBe(5000);
+    expect(cfg.warnings).toEqual([]);
   });
 
   it('keeps every other default when its env var is blank', () => {
@@ -123,13 +126,81 @@ describe('loadConfig', () => {
     expect(cfg.dataDir).not.toBe(''); // blank must fall back to the OS data dir
   });
 
-  it('still rejects a value that is set but invalid', () => {
+  it('boots on the environment a desktop host really passes for empty fields', () => {
+    // The crash in #18, copied from /proc/<pid>/environ of the running extension on Claude
+    // Desktop 1.37937. A user_config field with no manifest default that the user left
+    // empty is not substituted at all: the reference is passed through verbatim. The four
+    // numeric ones reached z.coerce.number() as NaN and threw a ZodError out of loadConfig,
+    // before the logger exists, so the process died at ~1s having logged nothing.
+    const cfg = loadConfig({
+      ZOTERO_API_KEY: 'abc',
+      ZOTEUS_LOCAL: 'auto',
+      ZOTEUS_EMBEDDINGS: 'local',
+      ZOTEUS_EMBEDDING_MODEL: '${user_config.embedding_model}',
+      ZOTEUS_EMBED_BATCH_SIZE: '${user_config.embed_batch_size}',
+      ZOTEUS_EMBED_BATCH_DELAY_MS: '${user_config.embed_batch_delay_ms}',
+      ZOTEUS_TRANSFORMERS_PATH: '${user_config.transformers_path}',
+      ZOTEUS_INDEX_FULLTEXT: 'false',
+      ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '${user_config.index_fulltext_max_chars}',
+      ZOTEUS_INDEX_MAX_ITEMS: '${user_config.index_max_items}',
+      ZOTEUS_DIST: 'mcpb',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.apiKey).toBe('abc');
+    expect(cfg.embeddingModel).toBeUndefined();
+    expect(cfg.embedBatchSize).toBeUndefined();
+    expect(cfg.embedBatchDelayMs).toBe(0);
+    expect(cfg.transformersPath).toBeUndefined();
+    expect(cfg.indexFulltextMaxChars).toBe(40000);
+    expect(cfg.indexMaxItems).toBe(5000);
+    // The host is saying it has no value, so this is the normal path, not a warning.
+    expect(cfg.warnings).toEqual([]);
+  });
+
+  it('survives a host that stringifies an absent value instead', () => {
+    // Not observed in #18, where the reference came through unresolved, but it is what a
+    // host doing String(undefined) would send and it costs nothing to accept.
+    for (const marker of ['undefined', 'null', 'NaN']) {
+      const cfg = loadConfig({
+        ZOTEUS_INDEX_MAX_ITEMS: marker,
+        ZOTEUS_EMBEDDING_MODEL: marker,
+      } as unknown as NodeJS.ProcessEnv);
+      expect(cfg.indexMaxItems).toBe(5000);
+      expect(cfg.embeddingModel).toBeUndefined();
+      expect(cfg.warnings).toEqual([]);
+    }
+  });
+
+  it('reports a value that is set but invalid, instead of refusing to start', () => {
+    // A tuning knob is never worth a dead server (#18), so a bad one is named on stderr
+    // and replaced by the default it would have had if it were absent.
+    const cfg = loadConfig({
+      ZOTEUS_INDEX_MAX_ITEMS: 'lots',
+      ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '-1',
+      ZOTERO_LIBRARY_ID: 'mine',
+      ZOTEUS_CONTACT_EMAIL: 'not-an-address',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.indexMaxItems).toBe(5000);
+    expect(cfg.indexFulltextMaxChars).toBe(40000);
+    expect(cfg.libraryId).toBeUndefined();
+    expect(cfg.contactEmail).toBeUndefined();
+    expect(cfg.warnings).toEqual([
+      'ZOTERO_LIBRARY_ID="mine" is not usable, ignoring it',
+      'ZOTEUS_INDEX_FULLTEXT_MAX_CHARS="-1" is not usable, using 40000',
+      'ZOTEUS_INDEX_MAX_ITEMS="lots" is not usable, using 5000',
+      'ZOTEUS_CONTACT_EMAIL="not-an-address" is not usable, ignoring it',
+    ]);
+  });
+
+  it('still refuses to start when a setting that has no default is missing', () => {
+    // Tolerance stops at the values there is no safe answer for: a public URL the schema
+    // rejected is gone by the time the cross-field checks run, and they say so.
     expect(() =>
-      loadConfig({ ZOTEUS_INDEX_MAX_ITEMS: 'lots' } as unknown as NodeJS.ProcessEnv),
-    ).toThrow();
-    expect(() =>
-      loadConfig({ ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '-1' } as unknown as NodeJS.ProcessEnv),
-    ).toThrow();
+      loadConfig({
+        ZOTEUS_OAUTH_ENABLED: 'true',
+        ZOTEUS_PUBLIC_URL: 'zoteus.example.com',
+        ZOTEUS_OAUTH_PASSCODE: 'a-long-enough-passcode',
+      } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTEUS_PUBLIC_URL is required/);
   });
 
   it('treats empty optional string secrets as unset (no min(1) parse crash)', () => {

@@ -26,6 +26,9 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
   const logger = createLogger(config.logLevel, config.logFormat);
+  // Held by loadConfig rather than printed there: it runs before this logger exists, and a
+  // setting it could not use must not be the reason the server never starts (#18).
+  for (const warning of config.warnings) logger.warn(`Configuration: ${warning}`);
 
   const httpFlag = flag('http');
   if (httpFlag !== undefined) {
