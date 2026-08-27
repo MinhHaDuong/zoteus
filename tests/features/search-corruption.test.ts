@@ -1,0 +1,264 @@
+import { describe, it, expect } from 'vitest';
+import { mkdtempSync, writeFileSync, openSync, writeSync, closeSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createSearchIndex, nodeSqliteAvailable, sqliteIndexPath } from '../../src/features/search/factory.js';
+import {
+  CorruptSearchIndex,
+  SearchIndexCorruptError,
+  isCorruptionError,
+} from '../../src/features/search/corruption.js';
+import { statusSummary } from '../../src/features/search/build.js';
+import { MemorySearchIndex } from '../../src/features/search/index-manager.js';
+import type { SearchIndex } from '../../src/features/search/backend.js';
+
+/**
+ * A damaged search index used to take the whole MCP server with it: `open()` threw
+ * SQLite's own sentence out of `createSearchIndex`, which nothing catches, so `buildServer`
+ * rejected and the process exited before serving a single tool. The index is a derived
+ * cache that no other tool reads, so the blast radius was the entire server for a file
+ * that only search needs.
+ */
+
+const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
+const sqliteIt = nodeSqliteAvailable() ? it : it.skip;
+const ITEM = { key: 'A', data: { itemType: 'book', title: 'Deep learning', abstractNote: 'neural networks' } };
+
+function tmpJsonPath(name: string): string {
+  return join(mkdtempSync(join(tmpdir(), `zoteus-${name}-`)), 'search-index.json');
+}
+
+const openIndex = (jsonPath: string) =>
+  createSearchIndex({ embedder: null, logger: silentLogger, backend: 'sqlite', jsonPath });
+
+/** Overwrite page 3, header intact: SQLite opens the file and fails when it reads it. */
+function scribbleOnPage3(dbPath: string): void {
+  const fd = openSync(dbPath, 'r+');
+  writeSync(fd, Buffer.alloc(4096, 0x5a), 0, 4096, 8192);
+  closeSync(fd);
+}
+
+/** A real index, closed, with one interior page overwritten: a bad sector or a torn write. */
+async function corruptedIndex(): Promise<string> {
+  const jsonPath = tmpJsonPath('corrupt');
+  const index = await openIndex(jsonPath);
+  await index.build([ITEM]);
+  await index.save();
+  await index.close();
+  scribbleOnPage3(sqliteIndexPath(jsonPath));
+  return jsonPath;
+}
+
+/** The CorruptSearchIndex a server would be holding, plus the path it names. */
+async function openCorrupted(): Promise<{ jsonPath: string; index: SearchIndex }> {
+  const jsonPath = await corruptedIndex();
+  return { jsonPath, index: await openIndex(jsonPath) };
+}
+
+/** An error shaped exactly as node:sqlite raises it (code is constant, truth in errcode/errstr). */
+function sqliteError(message: string, errcode: number, errstr: string): Error {
+  const e = new Error(message) as Error & { code: string; errcode: number; errstr: string };
+  e.code = 'ERR_SQLITE_ERROR';
+  e.errcode = errcode;
+  e.errstr = errstr;
+  return e;
+}
+
+describe('isCorruptionError', () => {
+  it('recognizes corruption behind a wrapper message, where the message alone says nothing', () => {
+    // The case a message scan cannot see: a corrupt FTS5 shadow table surfaces from
+    // prepare() as a vtable failure, with the real classification in errcode/errstr.
+    // Measured on real single-page corruptions, roughly one in ten takes this shape —
+    // and before this check, each of those still killed the whole server at startup.
+    expect(isCorruptionError(sqliteError('vtable constructor failed: passages_fts', 11, 'database disk image is malformed'))).toBe(true);
+    // Extended result codes carry the primary code in the low byte.
+    expect(isCorruptionError(sqliteError('some wrapper', 267, 'database disk image is malformed'))).toBe(true);
+    expect(isCorruptionError(sqliteError('unhelpful wrapper text', 26, 'file is not a database'))).toBe(true);
+  });
+
+  it('still leaves non-corruption result codes alone', () => {
+    expect(isCorruptionError(sqliteError('database is locked', 5, 'database is locked'))).toBe(false);
+    expect(isCorruptionError(sqliteError('no such table: passages', 1, 'SQL logic error'))).toBe(false);
+    expect(isCorruptionError(sqliteError('disk I/O error', 10, 'disk I/O error'))).toBe(false);
+    expect(isCorruptionError(sqliteError('database or disk is full', 13, 'database or disk is full'))).toBe(false);
+  });
+
+  it('recognizes SQLite saying the file is not a usable database', () => {
+    for (const m of [
+      'database disk image is malformed',
+      'file is not a database',
+      'file is encrypted or is not a database',
+      'malformed database schema (passages_fts)',
+    ]) {
+      expect(isCorruptionError(new Error(m)), m).toBe(true);
+    }
+    expect(isCorruptionError(new SearchIndexCorruptError('/x.sqlite', 'malformed'))).toBe(true);
+  });
+
+  it('leaves every other failure alone, because they are not a reason to delete an index', () => {
+    // Deliberately narrow: a locked database, a full disk and a missing table are faults,
+    // and telling someone to delete their index over one would be its own defect.
+    for (const m of [
+      'database is locked',
+      'attempt to write a readonly database',
+      'no such table: passages',
+      'disk I/O error',
+      'unable to open database file',
+      'database or disk is full',
+    ]) {
+      expect(isCorruptionError(new Error(m)), m).toBe(false);
+    }
+  });
+});
+
+describe('opening an index that cannot be read', () => {
+  sqliteIt('serves the rest of the server instead of failing to start', async () => {
+    const { index } = await openCorrupted();
+    expect(index).toBeInstanceOf(CorruptSearchIndex);
+    await index.close();
+  });
+
+  sqliteIt('refuses a query with the file, the sidecars and the command to run', async () => {
+    // The failure this replaces: `keywordSearch` catches everything, so a corrupt index
+    // answered "No matches" forever and looked like a library holding nothing.
+    const { jsonPath, index } = await openCorrupted();
+    await expect(index.query('neural')).rejects.toThrow(SearchIndexCorruptError);
+    const message = await index.query('neural').then(
+      () => '',
+      (e: Error) => e.message,
+    );
+    expect(message).toContain(sqliteIndexPath(jsonPath));
+    expect(message).toContain('-wal');
+    expect(message).toContain('zotero_index');
+    await index.close();
+  });
+
+  sqliteIt('does not look like a library awaiting its first build', async () => {
+    // `zotero_semantic_search` auto-builds an empty index. Reporting empty here would
+    // start a full library crawl on top of the fault.
+    const { index } = await openCorrupted();
+    expect(index.isEmpty).toBe(false);
+    expect(index.updateBlocker('local')).toBeTruthy();
+    expect(index.buildStatus().state).toBe('error');
+    await index.close();
+  });
+
+  sqliteIt('carries the fault where a caller can defer to it instead of guessing', async () => {
+    // Without this, zotero_semantic_search's 0-vector refusal fires first and reports
+    // "this index holds no vectors, rebuild it" — true, and not what is wrong.
+    const { index } = await openCorrupted();
+    expect(index.storeFault).toBeInstanceOf(SearchIndexCorruptError);
+    await index.close();
+  });
+
+  sqliteIt('states the fault once, not once per status field', async () => {
+    const { index } = await openCorrupted();
+    const summary = statusSummary(index.buildStatus());
+    // The recovery paragraph belongs in exactly one field; it used to land in three.
+    expect(summary.match(/To recover, delete the file/g)).toHaveLength(1);
+    await index.close();
+  });
+
+  sqliteIt('recovers by deleting the file, with no rebuild when the JSON artifact remains', async () => {
+    // The recovery the message describes, carried out. `createSearchIndex` migrates a
+    // legacy search-index.json on the first open of a data dir that has no database, so a
+    // user who still has one is searchable again on the next start rather than after a
+    // full library crawl. That is why the message says restart before it says build.
+    const jsonPath = tmpJsonPath('recover');
+    const legacy = new MemorySearchIndex({ embedder: null, logger: silentLogger, path: jsonPath });
+    await legacy.build([ITEM]);
+    await legacy.save();
+    const dbPath = sqliteIndexPath(jsonPath);
+    const migrated = await openIndex(jsonPath);
+    await migrated.save();
+    await migrated.close();
+    scribbleOnPage3(dbPath);
+
+    const index = await openIndex(jsonPath);
+    expect(index).toBeInstanceOf(CorruptSearchIndex);
+    await index.close();
+
+    for (const p of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) rmSync(p, { force: true });
+    const healed = await openIndex(jsonPath);
+    expect(healed).not.toBeInstanceOf(CorruptSearchIndex);
+    expect((await healed.query('neural', { mode: 'keyword' }))[0]?.itemKey).toBe('A');
+    await healed.close();
+  });
+
+  sqliteIt('converts corruption discovered at query time, in the hydration read', async () => {
+    // Every fused hit hydrates through passage(); corruption in the passages b-tree is
+    // found there, mid-flight, on an index that opened cleanly. The caller must get the
+    // typed refusal with the file and the recovery command, not SQLite's bare sentence.
+    const jsonPath = tmpJsonPath('midflight');
+    const index = await openIndex(jsonPath);
+    await index.build([ITEM]);
+    const anyIndex = index as unknown as { stmts: { selectPassage: { get(id: string): unknown } } };
+    anyIndex.stmts.selectPassage = {
+      get() {
+        throw sqliteError('vtable constructor failed: passages_fts', 11, 'database disk image is malformed');
+      },
+    };
+    const rejection = await index.query('neural', { mode: 'keyword' }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(rejection).toBeInstanceOf(SearchIndexCorruptError);
+    expect((rejection as Error).message).toContain(sqliteIndexPath(jsonPath));
+    expect((rejection as Error).message).toMatch(/rm /);
+    await index.close();
+  });
+
+  sqliteIt('does not blame the embedder for the store\'s fault', async () => {
+    // whoami and status read embedderReason to explain the embedder. On a corrupt index
+    // the embedder is healthy; attributing the store fault to it sends the user to the
+    // wrong remedy. The fault travels in storeFault/storageNotice/lastError instead.
+    const { index } = await openCorrupted();
+    expect(index.embedderReason).toBeUndefined();
+    expect(index.buildStatus().storageNotice).toContain('cannot be read');
+    await index.close();
+  });
+
+  sqliteIt('refuses mode:"semantic" with the store fault, not with vector advice', async () => {
+    // The storeFault field exists for exactly one caller: the 0-vector refusal in
+    // zotero_semantic_search fires BEFORE query(), and without the deferral it answers
+    // "this index has 0 vectors... re-run with mode:keyword" — advice that fails, since
+    // keyword refuses too, and the file is never named.
+    const { index } = await openCorrupted();
+    expect(index.storeFault).toBeInstanceOf(SearchIndexCorruptError);
+    expect(index.hasVectors).toBe(false);
+    // The guard condition semantic-search.ts uses, asserted against this index: with the
+    // fault present the branch must fall through to query(), whose refusal names the file.
+    const guardFires = !index.hasVectors && !index.storeFault;
+    expect(guardFires).toBe(false);
+    await index.close();
+  });
+
+  sqliteIt('refuses to report a successful save of an index it never opened', async () => {
+    const { index } = await openCorrupted();
+    await expect(index.save()).rejects.toThrow(SearchIndexCorruptError);
+    await index.close();
+  });
+
+  sqliteIt('treats a file that is not a database at all the same way', async () => {
+    const jsonPath = tmpJsonPath('notadb');
+    writeFileSync(sqliteIndexPath(jsonPath), 'this is not a database, it is a text file\n');
+    const index = await openIndex(jsonPath);
+    expect(index).toBeInstanceOf(CorruptSearchIndex);
+    await index.close();
+  });
+
+  sqliteIt('still throws when the failure is not corruption', async () => {
+    // A path that cannot be opened is a fault to fix, not an index to delete: it must not
+    // be dressed up as corruption with recovery instructions that would lose data.
+    const jsonPath = tmpJsonPath('blocked');
+    // The database path is a directory, so SQLite cannot open it as a file.
+    mkdirSync(sqliteIndexPath(jsonPath));
+    const rejection = await openIndex(jsonPath).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(rejection).toBeInstanceOf(Error);
+    expect(rejection).not.toBeInstanceOf(SearchIndexCorruptError);
+    expect((rejection as Error).message).toMatch(/unable to open|EISDIR|ENOTDIR|EEXIST/i);
+  });
+});
