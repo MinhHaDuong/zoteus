@@ -12,7 +12,8 @@ export interface ShutdownTasks {
   timeoutMs?: number;
 }
 
-const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T | void> =>
+/** Resolve when `p` does, or when `ms` elapses, whichever comes first. */
+export const withDeadline = <T>(p: Promise<T>, ms: number): Promise<T | void> =>
   Promise.race([p, new Promise<void>((resolve) => setTimeout(resolve, ms).unref?.())]);
 
 /** Stop accepting new connections → drain sessions → flush state, all under one deadline. */

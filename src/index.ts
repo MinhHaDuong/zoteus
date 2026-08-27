@@ -8,6 +8,7 @@ import { createLogger } from './lib/logger.js';
 import { createMetrics } from './lib/metrics.js';
 import { makeReadiness, storeCheck, zoteroPingCheck } from './lib/health.js';
 import { installShutdownHandlers } from './lib/lifecycle.js';
+import type { ToolContext } from './registry/registry.js';
 import type { Server } from 'node:http';
 import { createRequire } from 'node:module';
 
@@ -19,6 +20,8 @@ function flag(name: string): string | undefined {
 }
 
 const VERSION: string = createRequire(import.meta.url)('../package.json').version;
+
+const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -78,15 +81,32 @@ async function main(): Promise<void> {
     // server down (#18). Tool calls await the build, so none of them sees a half-built
     // context; only the handshake stops waiting on it.
     const { server, context } = createDeferredServer(config);
-    await startStdio(server);
+    // Held for the shutdown flush, and only once the build has succeeded: a session that
+    // ends before then has nothing of its own to write, and must not start a build on its
+    // way out.
+    let built: ToolContext | undefined;
+    await startStdio(server, {
+      logger,
+      flush: async () => {
+        if (!built) return;
+        // save() can refuse (an index whose store never opened); close() is what
+        // checkpoints the write-ahead log, so it runs either way.
+        await built.search.save().catch((e) => logger.debug(`Index save on shutdown: ${message(e)}`));
+        await built.search.close().catch((e) => logger.debug(`Index close on shutdown: ${message(e)}`));
+      },
+    });
     logger.info('Zoteus MCP server started on stdio.');
     const notice = toolSelectionNotice(config);
     if (notice) logger.info(notice);
     // Warmed now rather than on the first tool call. A failure is reported and left for
     // that call to retry, instead of taking the process down with it.
-    void context().catch((err) => {
-      logger.error(`Startup failed (the next tool call retries): ${err instanceof Error ? err.message : String(err)}`);
-    });
+    void context()
+      .then((ctx) => {
+        built = ctx;
+      })
+      .catch((err) => {
+        logger.error(`Startup failed (the next tool call retries): ${message(err)}`);
+      });
   }
 }
 
