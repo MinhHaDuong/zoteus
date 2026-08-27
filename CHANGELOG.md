@@ -6,6 +6,36 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-08-27
+
+### Fixed
+- **Accented queries reach the passages they name** (#19, thanks @MinhHaDuong). The FTS5
+  document side is folded by SQLite (`unicode61 remove_diacritics 2`), but the query side
+  matched `[a-z0-9]+` over lowercased text, so `théorie` reached the index as `"th" OR
+  "orie"`: two tokens it does not hold. Because terms are OR-ed, that is not an empty
+  answer but a confident wrong one, retrieving whatever OCR'd full text happens to contain
+  those fragments. One normalizer now sits in front of the tokenizer both sides share, so
+  the symmetry is structural. It reproduces `remove_diacritics 2` and nothing more:
+  folding harder would break Norwegian, Polish and Vietnamese the same way. Tokens are
+  `\p{L}\p{N}` now, so `Θεωρία`, `теория` and `日本語` stay whole. No reindex needed.
+- **A damaged search index no longer stops the server from starting** (#20, thanks
+  @MinhHaDuong). One bad page in a derived cache file threw SQLite's own sentence out of
+  `open()`, which nothing caught, so `initialize` went unanswered and item lookups,
+  bibliographies and citations went down with it: none of which reads the search index.
+  A corrupt store is now detected by result code as well as message, the handle is
+  released, and search alone refuses, naming the file, its sidecars and the way back.
+  Every other tool keeps working. Repairing it automatically is deliberately not in this
+  release (#21).
+- **The end of a stdio session is no longer silent** (#18). A stdio server dies with its
+  input stream, and the MCP SDK's transport does not watch for that: it subscribes to
+  `data` and `error` on stdin and nothing else, so EOF closed no transport, fired no
+  `onclose`, and the process ran out of work and exited 0 having written nothing. Hosts
+  report that as `Server transport closed unexpectedly ... process exiting early`, which
+  is indistinguishable from a crash. Zoteus now names what ended the session on stderr
+  before it goes, and uses the moment for a flush stdio never had: only the HTTP path
+  installed shutdown handlers, so a stdio session left SQLite's write-ahead log for
+  whichever process opened the file next.
+
 ## [1.7.1] - 2026-08-26
 
 ### Fixed
