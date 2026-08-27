@@ -6,6 +6,8 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-27
+
 ### Added
 - **A build indexes every item's metadata before it crawls any attachment full text**
   (#23, thanks @MinhHaDuong). A build used to walk the library once, indexing each item's
