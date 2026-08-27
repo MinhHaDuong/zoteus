@@ -58,6 +58,16 @@ export type {
 export const FULLTEXT_CHUNK_SIZE = 1200;
 export const FULLTEXT_CHUNK_OVERLAP = 150;
 
+/** One sentence for the status fields that have room only to say the index is unusable. */
+export const UNREADABLE_STORE = 'the search index cannot be read';
+
+/**
+ * How many items the full-text pass fetches text for before it embeds, logs and may save.
+ * Matches the item page size the metadata pass works in, so both passes report progress at
+ * the same granularity and one commit covers a comparable amount of work.
+ */
+const PAGE_GROUP = 100;
+
 function itemText(d: any): string {
   const creators = (d.creators ?? []).map((c: any) => c.lastName ?? c.name).filter(Boolean).join(' ');
   const tags = (d.tags ?? []).map((t: any) => t.tag).filter(Boolean).join(' ');
@@ -159,9 +169,45 @@ export abstract class SearchIndexBase implements SearchIndex {
   /** What opening the store had to do or refused to do (JSON migration; see #10). */
   protected storeNotice: string | undefined = undefined;
 
-  /** No fault: an index that could not be opened at all is a different class (see backend.ts). */
+  /**
+   * The reason this index's store cannot be used, once something has found one.
+   *
+   * A fault is never cleared in place, and that is what makes refusing on it safe rather
+   * than a deadlock: it is cleared by replacing the whole index object (see
+   * `reopenSearchIndex` on the tool context). So `build()` may refuse on a faulted index
+   * without trapping the user, because the repair happens above the index, not inside it.
+   */
+  protected fault: Error | undefined = undefined;
+
   get storeFault(): Error | undefined {
-    return undefined;
+    return this.fault;
+  }
+
+  /**
+   * Record that the store is unusable. First fault wins: once the diagnosis is made, a
+   * later symptom of the same damage must not overwrite it with something less useful.
+   */
+  protected noteStoreFault(e: Error): void {
+    if (this.fault) return;
+    this.fault = e;
+    // The channel the store already uses to explain what opening it did or refused to do,
+    // so this reaches status().storageNotice the same way a refused JSON migration does.
+    this.storeNotice = e.message;
+    this.opts.logger?.error(e.message);
+  }
+
+  /** Refuse rather than answer from a store that is known to be unreadable. */
+  protected refuseIfFaulted(): void {
+    if (this.fault) throw this.fault;
+  }
+
+  /**
+   * Mark this index unusable from outside the class. The factory needs it: whether the
+   * JSON artifact could be read is decided there, after construction, and there is no
+   * other legitimate writer.
+   */
+  markStoreFault(e: Error): void {
+    this.noteStoreFault(e);
   }
 
   // Asynchronous build lifecycle (see buildIncremental / requestStop / buildStatus).
@@ -171,6 +217,10 @@ export abstract class SearchIndexBase implements SearchIndex {
   private itemsRemoved = 0;
   protected itemsTotal = 0;
   protected itemsAvailable = 0;
+  /** Which pass of a build is running; see IndexBuildStatus.phase (#23). */
+  private phase: 'metadata' | 'fulltext' = 'metadata';
+  private fulltextItemsScanned = 0;
+  private fulltextItemsTotal = 0;
   private lastBuildError: string | undefined = undefined;
   private cancelToken: { cancelled: boolean } | null = null;
   /**
@@ -344,7 +394,14 @@ export abstract class SearchIndexBase implements SearchIndex {
       itemsRemoved: this.itemsRemoved,
       itemsTotal: this.itemsTotal,
       itemsAvailable: this.itemsAvailable,
+      phase: this.phase,
+      fulltextItemsScanned: this.fulltextItemsScanned,
+      fulltextItemsTotal: this.fulltextItemsTotal,
     };
+    if (this.fault) {
+      s.state = 'error';
+      s.lastError = UNREADABLE_STORE;
+    }
     if (this.buildState === 'error' && this.lastBuildError) s.lastError = this.lastBuildError;
     if (this.persistError) s.persistError = this.persistError;
     if (this.updateNotice) s.updateNotice = this.updateNotice;
@@ -394,6 +451,10 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   get isEmpty(): boolean {
+    // Never "empty" while faulted: an empty index invites a helpful automatic first build
+    // (zotero_semantic_search's auto_build does exactly that), and building into a store
+    // that cannot be read is not help.
+    if (this.fault) return false;
     return this.counts().documents === 0;
   }
 
@@ -409,6 +470,7 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
+    this.refuseIfFaulted();
     this.reset();
     // A rebuild is the retry: clear a previous runtime failure so a provider that has since
     // been fixed (model downloaded, package installed) reports healthy again.
@@ -458,6 +520,7 @@ export abstract class SearchIndexBase implements SearchIndex {
    * off without awaiting (fire-and-forget) and poll `buildStatus()`.
    */
   async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
+    this.refuseIfFaulted();
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
     this.buildState = 'building';
     this.operation = 'build';
@@ -472,6 +535,9 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.itemsRemoved = 0;
     this.itemsTotal = 0;
     this.itemsAvailable = 0;
+    this.phase = 'metadata';
+    this.fulltextItemsScanned = 0;
+    this.fulltextItemsTotal = 0;
     // Carried from the caller, e.g. the reason an update fell back to this rebuild, so it
     // must survive the reset below rather than being cleared with the rest of the state.
     this.updateNotice = opts.note;
@@ -484,6 +550,11 @@ export abstract class SearchIndexBase implements SearchIndex {
     const embedBatchDelayMs = opts.embedBatchDelayMs ?? 0;
     const persistEveryItems = opts.persistEveryItems ?? 200;
     const persistEveryMs = opts.persistEveryMs ?? 10_000;
+    // The full-text pass writes far bulkier rows than the metadata pass, and on the JSON
+    // backend a persist re-serializes the whole index, so it saves on its own slower
+    // cadence. Keeping the two apart is what lets the metadata pass stay durable early.
+    const persistEveryItemsFt = opts.persistEveryItemsFulltext ?? persistEveryItems;
+    const persistEveryMsFt = opts.persistEveryMsFulltext ?? persistEveryMs;
     const progressEveryItems = opts.progressEveryItems ?? 500;
     const progressEveryMs = opts.progressEveryMs ?? 10_000;
     const maxItems = opts.maxItems;
@@ -493,6 +564,17 @@ export abstract class SearchIndexBase implements SearchIndex {
     const persist = opts.persist ?? (() => this.save());
 
     const pending: ChunkRecord[] = []; // passages awaiting embedding
+    /**
+     * Items to come back to in the full-text pass, in crawl order. Only allocated when
+     * full text was asked for, and holds a key and a title rather than the item, so it
+     * costs a couple of hundred bytes per item and is bounded by `maxItems` rather than by
+     * the library. Re-crawling the library instead would be free of this, but items added
+     * or removed between the passes shift the pagination under it, so the second crawl
+     * would fetch text for items this index does not hold and miss ones it does.
+     */
+    const worklist: Array<{ key: string; title: string }> | undefined = opts.fulltextFor ? [] : undefined;
+    /** Set when the full-text pass could not read anything at all; see where it is used. */
+    let fulltextPassFailed = false;
     let start = 0;
     let crawlVersion = 0;
     let itemsSincePersist = 0;
@@ -514,15 +596,20 @@ export abstract class SearchIndexBase implements SearchIndex {
       }
     };
     const maybePersist = async (): Promise<void> => {
-      if (itemsSincePersist >= persistEveryItems || Date.now() - lastPersistAt >= persistEveryMs) await persistNow();
+      const everyItems = this.phase === 'fulltext' ? persistEveryItemsFt : persistEveryItems;
+      const everyMs = this.phase === 'fulltext' ? persistEveryMsFt : persistEveryMs;
+      if (itemsSincePersist >= everyItems || Date.now() - lastPersistAt >= everyMs) await persistNow();
     };
-    const maybeLog = (): void => {
-      if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
+    const forceLog = (): void => {
       itemsSinceLog = 0;
       lastLogAt = Date.now();
       const s = this.buildStatus();
       this.opts.logger?.info(`index build: ${progressLine(s)}`);
       opts.onProgress?.(s);
+    };
+    const maybeLog = (): void => {
+      if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
+      forceLog();
     };
     const embedPending = (force: boolean): Promise<void> =>
       this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, force);
@@ -541,13 +628,15 @@ export abstract class SearchIndexBase implements SearchIndex {
           this.itemsAvailable = page.totalResults;
           this.itemsTotal = maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
         }
-        // Only the items that still fit under the cap are worth fetching full text for.
+        // Only the items that still fit under the cap are worth indexing at all.
         const room = maxItems === undefined ? pageItems.length : Math.max(0, maxItems - this.itemsFetched);
         const batch = pageItems.slice(0, room);
-        const texts = await this.fulltextForPage(batch, opts, token, fulltextLimit);
         for (let i = 0; i < batch.length; i++) {
           if (token.cancelled) break;
-          this.addOneItem(batch[i], pending, texts?.[i]);
+          const entry = this.addMetadata(batch[i], pending);
+          // Recorded now, crawled in the second pass. Truncating here rather than there is
+          // what keeps the item cap honest without re-checking it against a moving count.
+          if (entry && worklist) worklist.push(entry);
           this.itemsFetched++;
           itemsSincePersist++;
           itemsSinceLog++;
@@ -558,11 +647,85 @@ export abstract class SearchIndexBase implements SearchIndex {
         await maybePersist();
         if (start >= page.totalResults) break;
       }
+
+      // The boundary between the two passes. Everything the library holds is now indexed on
+      // its own text, so the drain and the save are forced rather than left to the cadence:
+      // this is the moment the whole change exists to create, and a metadata pass whose last
+      // partial embedding batch or last few hundred rows never left memory has not really
+      // reached it. Without the forced drain those passages stay vector-less for the length
+      // of the full-text crawl and semantic search silently misses them; without the forced
+      // save nothing survives a restart, and a second process sharing the data dir sees
+      // nothing at all.
       if (!token.cancelled) await embedPending(true);
+      await persistNow();
+
+      if (worklist && !token.cancelled) {
+        // Flipped BEFORE the attachment crawl, not after it. Listing a library's attachments
+        // is itself a paged crawl that can take a while on a large library, and reporting the
+        // metadata phase throughout it would tell a caller that pass was still running when
+        // in fact it had finished and the library was already searchable. Forced through the
+        // logger too, so the change shows up on the very next status poll rather than
+        // whenever the progress cadence next comes round.
+        this.phase = 'fulltext';
+        this.fulltextItemsTotal = worklist.length;
+        forceLog();
+        // Items whose attachments Zotero has no extracted text for are dropped here rather
+        // than awaited one by one: on a library where a minority of items have PDFs that is
+        // most of the worklist, and each would otherwise cost a round trip to learn nothing.
+        const servable = await opts.fulltextKeys?.().catch(() => undefined);
+        const todo = servable ? worklist.filter((e) => servable.has(e.key)) : worklist;
+        this.fulltextItemsTotal = todo.length;
+        for (let i = 0; i < todo.length && !token.cancelled; i += PAGE_GROUP) {
+          const group = todo.slice(i, i + PAGE_GROUP);
+          const texts = await this.fulltextForKeys(group, opts, token, fulltextLimit);
+          for (let j = 0; j < group.length; j++) {
+            if (token.cancelled) break;
+            const text = texts?.[j];
+            if (text) this.addFulltext(group[j]!.key, group[j]!.title, text, pending);
+            this.fulltextItemsScanned++;
+            itemsSincePersist++;
+            itemsSinceLog++;
+          }
+          await embedPending(false);
+          maybeLog();
+          await maybePersist();
+        }
+        if (!token.cancelled) await embedPending(true);
+
+        // Every full-text read failure is caught per item, so that one unreadable PDF
+        // cannot abort a build. The consequence is that this pass ALWAYS reaches its end,
+        // including when the desktop app it was reading from quit halfway through and every
+        // remaining read failed. Left there, the build would report `done`, stamp itself
+        // complete, and be silently missing most of its body text for good: the items it
+        // never read are unchanged in Zotero, so no `?since=` delta will ever revisit them.
+        const failures = opts.fulltextFailures?.() ?? 0;
+        if (failures > 0 && !token.cancelled) {
+          fulltextPassFailed = failures >= todo.length;
+          this.fulltextUnavailable =
+            `The body text of ${failures} of ${todo.length} item(s) could not be read (the Zotero app or the ` +
+            'Web API stopped answering during the full-text pass), so those items are indexed from metadata only.' +
+            (fulltextPassFailed
+              ? ' No version stamp was recorded, so the next zotero_index action:"update" rebuilds rather than' +
+                ' treating this index as current.'
+              : ' Re-run zotero_index action:"build" with fulltext:true to fill them in.');
+          this.opts.logger?.warn(this.fulltextUnavailable);
+        }
+      }
+
       this.builtFromVersion = this.itemsFetched;
       // A cancelled crawl covers an unknown prefix of the library, so it gets no stamp: an
       // update against one would treat every item it never reached as unchanged forever.
-      if (!token.cancelled && crawlVersion) {
+      //
+      // This has to stay AFTER the full-text pass, and that is the one thing the two-pass
+      // split must not get wrong. A stamp asserts that the index is complete in every
+      // dimension the build was asked for, as of version V. Stamping after the metadata
+      // pass would make a build interrupted partway through a days-long full-text crawl
+      // indistinguishable from a finished one: the next action:"update" would find a valid
+      // stamp, a matching backend and a matching embedder, run a `?since=V` delta, and see
+      // nothing — the items whose attachments were never crawled are unchanged in Zotero,
+      // so they appear in no delta, ever. Their body text would be missing permanently and
+      // nothing would say so, because `fulltextEnabled` is true and `fulltextReason` unset.
+      if (!token.cancelled && crawlVersion && !fulltextPassFailed) {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.versionBackend;
       }
@@ -591,6 +754,7 @@ export abstract class SearchIndexBase implements SearchIndex {
    * index that looks fresh and is not.
    */
   updateBlocker(backend: VersionBackend): string | undefined {
+    if (this.fault) return UNREADABLE_STORE;
     if (!this.supportsDelete) {
       return `the ${this.storage} index cannot remove rows, so deleted items could never leave it`;
     }
@@ -624,10 +788,16 @@ export abstract class SearchIndexBase implements SearchIndex {
    * stamp in place, so the same delta is simply retried next time.
    */
   async updateIncremental(opts: IncrementalUpdateOptions): Promise<IndexBuildStatus> {
+    this.refuseIfFaulted();
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
     const fromVersion = this.libraryVersion;
     this.buildState = 'building';
     this.operation = 'update';
+    // An update has no two-pass structure, and nothing resets `phase` when a build ends, so
+    // without this an update after any fulltext:true build reports the pass it is not in.
+    this.phase = 'metadata';
+    this.fulltextItemsScanned = 0;
+    this.fulltextItemsTotal = 0;
     this.lastBuildError = undefined;
     this.embedderError = undefined;
     this.persistError = undefined;
@@ -819,6 +989,37 @@ export abstract class SearchIndexBase implements SearchIndex {
     );
   }
 
+  /**
+   * The same fetch as `fulltextForPage`, over the key/title pairs a build's metadata pass
+   * recorded rather than over raw items. The full item is deliberately not kept: nothing
+   * that supplies full text has ever used it (the supplier keys off the item key alone),
+   * and holding a library's worth of item bodies to re-read one field would be the one
+   * genuinely large allocation the two-pass split introduced.
+   */
+  private async fulltextForKeys(
+    batch: Array<{ key: string; title: string }>,
+    opts: IncrementalBuildOptions,
+    token: { cancelled: boolean },
+    limit: Semaphore,
+  ): Promise<Array<string | undefined> | undefined> {
+    if (!opts.fulltextFor || token.cancelled) return undefined;
+    return Promise.all(
+      batch.map((entry) =>
+        limit.run(async () => {
+          if (token.cancelled) return undefined;
+          try {
+            return await opts.fulltextFor!(entry.key);
+          } catch (e) {
+            this.opts.logger?.debug(
+              `full text for ${entry.key} skipped: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            return undefined;
+          }
+        }),
+      ),
+    );
+  }
+
   /** Embed and store queued passages in batches; `force` drains a partial last batch. */
   private async embedPending(
     pending: ChunkRecord[],
@@ -853,9 +1054,21 @@ export abstract class SearchIndexBase implements SearchIndex {
 
   /** Chunk a single library item into the keyword index and queue passages for embedding. */
   private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string): void {
+    const entry = this.addMetadata(item, pending);
+    if (entry && fulltext) this.addFulltext(entry.key, entry.title, fulltext, pending);
+  }
+
+  /**
+   * Index one item's own text (title, abstract, creators, tags) and nothing else.
+   *
+   * Returns the key and title it used, which is what a build's full-text pass needs to
+   * come back to this item later without holding on to the raw item: the pair is a couple
+   * of hundred bytes where the item is a few kilobytes (#23).
+   */
+  private addMetadata(item: any, pending: ChunkRecord[]): { key: string; title: string } | undefined {
     const d = item.data ?? item;
     const key = item.key ?? d.key;
-    if (!key) return;
+    if (!key) return undefined;
     const title = d.title ?? '(untitled)';
     this.putItem(key, title);
     for (const ch of chunkText(itemText(d))) {
@@ -863,7 +1076,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       this.putPassage(rec);
       if (this.hasEmbedder) pending.push(rec);
     }
-    if (fulltext) this.addFulltext(key, title, fulltext, pending);
+    return { key, title };
   }
 
   /**
@@ -886,6 +1099,10 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   async query(q: string, opts: QueryOptions = {}): Promise<SearchHit[]> {
+    // An unreadable store must refuse rather than answer nothing: a query that returns no
+    // hits forever is indistinguishable from a library that holds nothing on the subject,
+    // which is a silent wrong answer in place of a loud right one (#20, #21).
+    this.refuseIfFaulted();
     const limit = opts.limit ?? 10;
     const mode = opts.mode ?? 'auto';
     const pool = limit * 3;
@@ -1047,6 +1264,12 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   /** Atomically rewrite the JSON artifact. A no-op when this index has no file. */
   async save(): Promise<void> {
+    // Refusing here is not tidiness, it is the difference between a bad read and lost
+    // data. `loadFromJSON` resets before it parses, so an artifact that failed to load
+    // leaves this object holding nothing — and the shutdown flush would then write that
+    // nothing straight over the user's file, destroying the very index the fault was
+    // reporting on. Faulted means: touch the artifact only to replace it deliberately.
+    this.refuseIfFaulted();
     if (!this.path) return;
     await saveIndex(this, this.path);
   }

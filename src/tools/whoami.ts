@@ -9,6 +9,10 @@ const whoami: ToolDefinition = {
   inputSchema: {},
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (_args, ctx) => {
+    // The diagnostic tool answers from a probe taken now, not from one cached behind a
+    // TTL: this is the tool someone calls precisely because they have just started Zotero
+    // and want to know whether the server can see it (#22).
+    await ctx.localStatus?.ensure({ force: true });
     const cloud = ctx.router.whoami();
     const lib = ctx.router.defaultLibrary();
     const update = ctx.updates?.available ?? null;
@@ -19,6 +23,11 @@ const whoami: ToolDefinition = {
       displayName: cloud?.displayName,
       access: cloud?.access ?? null,
       localApi: ctx.capabilities.localApi,
+      // So a `false` is visibly a live answer rather than possibly a stale one. Whether
+      // this server watches for the desktop app at all is part of the answer: in hosted
+      // mode it never does, and there `localApi: false` is a setting, not a diagnosis.
+      localApiChecked: ctx.localStatus?.enabled ? new Date(ctx.localStatus.lastCheckedAt()).toISOString() : null,
+      localApiWatched: ctx.localStatus?.enabled ?? (ctx.config?.local !== 'off' && Boolean(ctx.local)),
       defaultLibrary: lib,
       // Search health belongs in the "call this first" tool: a semantic embedder that was
       // configured but never ran is invisible everywhere else a user would think to look.
@@ -30,9 +39,16 @@ const whoami: ToolDefinition = {
       },
       update,
     };
+    // Naming the remedy beside the symptom: an unavailable local API is nearly always the
+    // one Zotero setting, and the answer is re-checked on every call now, so there is no
+    // longer any reason to tell someone to restart their MCP host.
+    const localHint =
+      ctx.localStatus?.enabled && !ctx.capabilities.localApi
+        ? ` Zotero's local API is not answering on port ${ctx.config?.localPort ?? 23119} — start Zotero and enable Settings → Advanced → "Allow other applications on this computer to communicate with Zotero". The server re-checks by itself; no restart is needed.`
+        : '';
     let summary = cloud
-      ? `Signed in as ${cloud.username} (userID ${cloud.userID}). Local API: ${ctx.capabilities.localApi ? 'available' : 'unavailable'}.`
-      : `No cloud API key configured — running in local-only read mode (local API ${ctx.capabilities.localApi ? 'available' : 'unavailable'}).`;
+      ? `Signed in as ${cloud.username} (userID ${cloud.userID}). Local API: ${ctx.capabilities.localApi ? 'available' : 'unavailable'}.${localHint}`
+      : `No cloud API key configured — running in local-only read mode (local API ${ctx.capabilities.localApi ? 'available' : 'unavailable'}).${localHint}`;
     if (!ctx.search.embedderActive && ctx.search.embedderConfigured !== 'off') {
       summary += ` Semantic search is degraded to keyword-only (embeddings=${ctx.search.embedderConfigured} requested but not active): ${ctx.search.embedderReason}`;
     }

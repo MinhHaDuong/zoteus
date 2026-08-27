@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { CorruptSearchIndex, SearchIndexCorruptError } from './corruption.js';
+import { CorruptSearchIndex, SearchIndexCorruptError, SearchIndexUnreadableError } from './corruption.js';
 import { MemorySearchIndex } from './index-manager.js';
 import { loadIndex } from './persistence.js';
 import type { SearchIndex, SearchIndexOptions } from './backend.js';
@@ -84,6 +84,18 @@ export async function createSearchIndex(opts: CreateSearchIndexOptions): Promise
     );
   }
   const index = new MemorySearchIndex({ ...indexOpts, ...(jsonPath ? { path: jsonPath } : {}) });
-  if (jsonPath) await loadIndex(index, jsonPath).catch(() => false);
+  if (jsonPath) {
+    try {
+      await loadIndex(index, jsonPath);
+    } catch (e) {
+      // Same contract as the SQLite branch above: an artifact that cannot be read must not
+      // take the server down, and must not quietly become an empty index either. The fault
+      // makes every read and every write refuse and say why, and `zotero_index
+      // action:"build"` is what clears it, by replacing the file (#21).
+      const fault = e instanceof SearchIndexUnreadableError ? e : new SearchIndexUnreadableError(jsonPath, e);
+      index.markStoreFault(fault);
+      opts.logger?.error(fault.message);
+    }
+  }
   return index;
 }

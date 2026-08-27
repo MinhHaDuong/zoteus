@@ -245,10 +245,14 @@ The ones worth knowing about:
 
 - **Zotero API Key.** Covered [above](#do-you-need-a-zotero-api-key).
 - **Zotero local API.** Whether to talk to the Zotero app on your computer. Leave it on
-  `auto`, which uses the app when it is running.
+  `auto`, which uses the app when it is running. Start order does not matter: if Zotero was
+  closed when Claude started, Zoteus notices it appear and starts using it, no restart
+  needed. Ask `zotero_whoami` if you want to check.
 - **Index PDF full text.** Off by default. Turn it on and search by meaning also looks inside
   the body of your PDFs, so a claim that never made it into an abstract is still findable.
-  The cost is time and disk space: roughly nine times as much text to work through.
+  The cost is time and disk space: roughly nine times as much text to work through. Your
+  library does not have to wait for it: everything is searchable on titles, abstracts and
+  tags as soon as that first, quick pass is done, and the PDF bodies fill in behind it.
 - **Full-text characters per item.** How much of each document is read when the setting above
   is on. The default, 40000 characters, is about thirteen dense pages, so only the beginning
   of a book or a thesis is covered. Enter `0` for no limit.
@@ -275,7 +279,7 @@ are in [Desktop extension settings](./configuration.md#desktop-extension-setting
 | Claude cannot read your library and you have no API key | Check that the Zotero app is open, and that **Settings, Advanced, "Allow other applications on this computer to communicate with Zotero"** is ticked. See [step 3](#step-3-let-claude-see-the-zotero-app-on-your-computer). |
 | `Server transport closed unexpectedly ... process exiting early` in Claude's log | This is a normal shutdown, not a crash. Zoteus stops when Claude closes the connection it listens on. Since version 1.7.2 it says so before it goes: look for `The host closed the stdio connection ...`. Read that in `main.log`, not in `mcp-server-Zoteus*.log`, for the reason in the next row. If the line is there, something on Claude's side ended the session. If it is not, the program died another way, so please [open an issue](https://github.com/oscardvs/zoteus/issues) and include the lines around it. |
 | Nothing from Zoteus in `mcp-server-Zoteus — Zotero MCP.log` | Recent versions of the Claude app run a bundled extension inside the app's own process (an Electron `UtilityProcess`) rather than as a separate program, and that log file only carries what Claude itself says about the extension. Everything Zoteus says, every line beginning `[zoteus]`, goes to **`main.log`** in the same folder, marked `[UtilityProcess stderr]`. A log folder with no `[zoteus]` line in it is normal. A crash is visible only in `main.log`. |
-| `[zoteus] FATAL ZodError ... Expected number, received nan` on version 1.7.2 or earlier | A numeric field left empty in the Zoteus settings pane was not filled in by the Claude app at all. Zoteus received the literal text `${user_config.embed_batch_size}`, which is not a number, read it as `NaN`, and stopped before it could log anything else. All four numeric fields are empty on a fresh install, so this affects versions 1.7.0, 1.7.1 and 1.7.2 on Claude Desktop 1.37937. Fixed in **1.7.3**: install 1.7.3 or newer from the [releases page](https://github.com/oscardvs/zoteus/releases/latest). While the newest file there is still 1.7.2, work around it by typing a number into each of the four numeric fields: `32`, `0`, `40000` and `5000`. |
+| `[zoteus] FATAL ZodError ... Expected number, received nan` on version 1.7.2 or earlier | A numeric field left empty in the Zoteus settings pane was not filled in by the Claude app at all. Zoteus received the literal text `${user_config.embed_batch_size}`, which is not a number, read it as `NaN`, and stopped before it could log anything else. All four numeric fields are empty on a fresh install, so this affects versions 1.7.0, 1.7.1 and 1.7.2 on Claude Desktop 1.37937. Fixed in **1.7.3**: install 1.7.3 or newer from the [releases page](https://github.com/oscardvs/zoteus/releases/latest). On an older bundle, work around it by typing a number into each of the four numeric fields: `32`, `0`, `40000` and `5000`. |
 
 ### Where the logs are
 

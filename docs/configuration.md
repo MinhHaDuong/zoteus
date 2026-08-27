@@ -116,6 +116,13 @@ Zoteus uses both Zotero backends and chooses per request:
 
 At startup Zoteus probes both and logs the result, e.g.
 `Capabilities: cloud=user 19552201, localApi=true, localGroups=2`
+
+That line is the answer at startup, not the answer for the life of the process. Zoteus
+re-checks the desktop local API in the background as tools are called, so starting Zotero
+*after* your MCP host no longer leaves it invisible until you restart the host, and a Zotero
+you quit is noticed too. `zotero_whoami` always probes afresh and reports `localApi` plus
+`localApiChecked`, so a `false` there is a live answer. Where no desktop app can apply — a
+hosted server, or `ZOTEUS_LOCAL=off` — nothing is probed at all.
 (`localGroups` counts the group libraries the desktop app is serving).
 
 ### Local API prerequisite

@@ -8,12 +8,14 @@ import { LocalApiClient } from './api/local-client.js';
 import { LocalWriteClient } from './api/local-writes.js';
 import { ConnectorWriteClient } from './api/connector-writes.js';
 import { probeCapabilities } from './router/capabilities.js';
+import { LocalApiStatus } from './router/local-status.js';
 import { LibraryRouter } from './router/library-router.js';
 import { SchemaService } from './schema/schema-service.js';
 import { join } from 'node:path';
 import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
 import { createSearchIndex } from './features/search/factory.js';
+import type { SearchIndex } from './features/search/backend.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
 import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext, type ToolContextSource, type ToolDefinition } from './registry/registry.js';
@@ -59,12 +61,23 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   const local = !perUser && config.local !== 'off' ? new LocalApiClient({ port: config.localPort, fetcher }) : undefined;
 
   const capabilities = await probeCapabilities(config, { web, local, logger });
+  // The startup probe is the first answer, not the only one: Zotero may be launched after
+  // this server, and used to stay invisible for the life of the process when it was (#18,
+  // #22). This keeps `capabilities` live, re-asking lazily on the way in to a tool call.
+  const localStatus = new LocalApiStatus({ config, client: local, capabilities, logger });
   const router = new LibraryRouter({ config, capabilities, web, local });
   // Zotero 10+ accepts local-API writes behind a user-granted key. Only the operator
   // context (never per-user tenants) talks to the desktop app. The client is created
   // eagerly but authorizes lazily, on first write.
+  //
+  // Deliberately NOT gated on the startup probe. Gating it there made a desktop app that
+  // started after this server permanently unwritable: `ensureLocalApi` would flip the
+  // capability to true and every write path would still fall through to the cloud, because
+  // the client object it needed had never been constructed (#22). Constructing it costs a
+  // base URL and no I/O, and every call site still gates the write itself on the live
+  // capability, so nothing here can reach a Zotero that is not running.
   const localWrites =
-    !perUser && capabilities.localApi
+    !perUser && config.local !== 'off'
       ? new LocalWriteClient({
           port: config.localPort,
           fetcher,
@@ -76,7 +89,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   // The connector protocol works on all recent Zotero versions while the app runs,
   // including Zotero 9 and earlier, whose local API is read-only (no grant dialog).
   const connectorWrites =
-    !perUser && capabilities.localApi
+    !perUser && config.local !== 'off'
       ? new ConnectorWriteClient({ port: config.localPort, fetcher, logger })
       : undefined;
   const schema = new SchemaService({ web });
@@ -90,22 +103,56 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     config.dataDir,
     overrides.zoteroUserId !== undefined ? `search-index-${overrides.zoteroUserId}.json` : 'search-index.json',
   );
-  // Opens the store (and, on the SQLite backend's first run, imports a legacy JSON index).
-  // ZOTEUS_INDEX_BACKEND=sqlite on a runtime without node:sqlite throws here, at startup.
-  const search = await createSearchIndex({
+  // Hoisted rather than passed inline, because a repair has to be able to build the same
+  // index again later and the embedder triple is not reachable from the context (#21).
+  const searchIndexOpts = {
     embedder: embedding.provider,
     configured: embedding.configured,
     unavailable: embedding.unavailable,
     logger,
     backend: config.indexBackend,
     jsonPath: searchIndexPath,
-  });
+  };
+  // Opens the store (and, on the SQLite backend's first run, imports a legacy JSON index).
+  // ZOTEUS_INDEX_BACKEND=sqlite on a runtime without node:sqlite throws here, at startup.
+  const search = await createSearchIndex(searchIndexOpts);
   // Vectors from a previous embedding model are dropped on load; say so at startup too,
   // not only in tool output, because the remedy is a rebuild the user has to start.
   const stale = search.buildStatus().vectorsStaleReason;
   if (stale) logger.warn(stale);
   logger.debug(`search index backend: ${search.storage} (${searchIndexPath})`);
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
+
+  /**
+   * Replace the held search index with a freshly opened one.
+   *
+   * Three properties, each load-bearing:
+   *  - single-flight, so two concurrent repairs cannot both open the same database (they
+   *    interleave across awaits on one event loop, and the second would orphan the first);
+   *  - the old handle is released before the new one is opened, because a repair deletes
+   *    files and on Windows an open handle refuses the unlink — a server holding them would
+   *    block the recovery it is prescribing;
+   *  - `ctx.search` is only ever assigned an index that opened successfully, so a failed
+   *    reopen leaves the faulted one in place rather than leaving the field undefined.
+   */
+  let reopening: Promise<SearchIndex> | undefined;
+  const reopenSearchIndex = (): Promise<SearchIndex> =>
+    (reopening ??= (async () => {
+      // A running build holds the instance rather than reading the field, so swapping under
+      // it would leave the build writing into an index nothing can reach.
+      if (ctx.search.isBuilding) {
+        throw new Error(
+          'The search index cannot be reopened while a build is running. Stop it first with zotero_index action:"stop".',
+        );
+      }
+      await ctx.search.close().catch((e) => logger.debug(`Releasing the old search index: ${e instanceof Error ? e.message : String(e)}`));
+      const fresh = await createSearchIndex(searchIndexOpts);
+      ctx.search = fresh;
+      logger.info(`Search index reopened (${fresh.storage}, ${searchIndexPath}).`);
+      return fresh;
+    })().finally(() => {
+      reopening = undefined;
+    }));
 
   const ctx: ToolContext = {
     config,
@@ -123,6 +170,8 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     fetcher,
     logger,
     searchIndexPath,
+    localStatus,
+    reopenSearchIndex,
   };
   // Manual installs (notably the .dxt) have no auto-update channel; check GitHub
   // releases once a day and let zotero_whoami surface a newer version. Operator
@@ -276,8 +325,16 @@ export class ContextCache {
   async flushIndexes(): Promise<void> {
     const ctxs = [this.operatorCtx, ...[...this.entries.values()].map((e) => e.ctx)];
     await Promise.allSettled(ctxs.map(async (c) => {
-      await c.search.save();
-      await c.search.close();
+      // Two independent attempts. `save()` refuses on a store that could not be read, and
+      // close() is what checkpoints the write-ahead log and releases the file handle — so
+      // chaining them would let one faulted index leak a handle and an uncheckpointed WAL
+      // on every shutdown, silently, since allSettled swallows the rejection.
+      await c.search.save().catch((e) => {
+        c.logger.debug(`Flushing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`);
+      });
+      await c.search.close().catch((e) => {
+        c.logger.debug(`Closing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`);
+      });
     }));
   }
 

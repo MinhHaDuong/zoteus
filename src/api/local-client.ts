@@ -4,6 +4,14 @@ import type { ItemQuery, LibraryRef, ListResult, VersionsResult } from './web-cl
 export interface LocalApiClientOptions {
   port?: number;
   fetcher?: RateLimitedFetcher;
+  /**
+   * Fetcher used only by `probe`. Separate from the one every real read goes through
+   * because they want opposite things: reads share a four-slot semaphore so a crawl
+   * cannot flood Zotero, while a liveness probe must answer now or not at all. Behind
+   * the shared fetcher a probe issued during an index build queues behind the build's
+   * own pages and times out on a Zotero that is answering perfectly well.
+   */
+  probeFetcher?: RateLimitedFetcher;
 }
 
 /**
@@ -42,10 +50,12 @@ export class LocalApiClient {
   static readonly LOCAL_USER_ID = 0;
   private readonly base: string;
   private readonly fetcher: RateLimitedFetcher;
+  private readonly probeFetcher: RateLimitedFetcher;
 
   constructor(opts: LocalApiClientOptions = {}) {
     this.base = `http://127.0.0.1:${opts.port ?? 23119}/api`;
     this.fetcher = opts.fetcher ?? new RateLimitedFetcher();
+    this.probeFetcher = opts.probeFetcher ?? new RateLimitedFetcher({ maxConcurrency: 2 });
   }
 
   private headers(): Record<string, string> {
@@ -92,6 +102,34 @@ export class LocalApiClient {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Liveness check with its own time budget and its own fetcher, for the repeated probing
+   * `LocalApiStatus` does. Distinguishes the two ways a desktop app can be absent, because
+   * they deserve different retry rates: a refused connection is instant and cheap to repeat,
+   * whereas a firewall that DROPs the packet costs the whole budget every time.
+   *
+   * `up` is the only thing callers act on; `timedOut` only tunes how soon to ask again.
+   */
+  async probe(timeoutMs: number): Promise<{ up: boolean; timedOut: boolean }> {
+    const started = Date.now();
+    try {
+      const res = await this.probeFetcher.fetch(
+        `${this.base}/users/0/items?limit=1`,
+        { method: 'GET', headers: this.headers() },
+        { maxRetries: 0, deadlineMs: timeoutMs },
+      );
+      // Any answer at all proves something is listening and speaking HTTP on the port,
+      // which is what the capability means. A non-2xx from Zotero itself (an unsupported
+      // query, say) is not the app being absent.
+      return { up: res.ok, timedOut: false };
+    } catch {
+      // The fetcher turns its own abort into a timeout error, but a DROPped packet can
+      // also surface as a socket error at the same moment the budget runs out, so the
+      // elapsed time is the reliable signal rather than the error's identity.
+      return { up: false, timedOut: Date.now() - started >= timeoutMs - 50 };
     }
   }
 

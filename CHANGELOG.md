@@ -6,6 +6,83 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **A build indexes every item's metadata before it crawls any attachment full text**
+  (#23, thanks @MinhHaDuong). A build used to walk the library once, indexing each item's
+  own text and then fetching its attachment bodies before moving on to the next. So on a
+  large library with `fulltext:true` nothing was searchable until the body crawl had
+  finished, and that crawl can run for hours or days. The build now runs in two passes:
+  titles, abstracts, creators and tags for the whole library first, then bodies. The gap
+  between them is the point — the library is fully searchable on its metadata for the
+  entire length of the body crawl. `action:"status"` reports which pass is running as
+  `phase`, and the second pass's progress as `fulltextItemsScanned` of
+  `fulltextItemsTotal`. The version stamp an `action:"update"` diffs against is still
+  written only when *both* passes have finished: stamping after the first would make a
+  build interrupted mid-crawl look complete, and the items whose attachments were never
+  read are unchanged in Zotero, so they would appear in no delta, ever. Items with no
+  extractable attachment are skipped outright rather than asked about one at a time, and
+  the metadata pass keeps the fast save cadence that full text used to slow down.
+
+### Fixed
+- **`zotero_index action:"build"` now repairs an index that cannot be read** (#21, thanks
+  @MinhHaDuong). 1.7.2 gave a damaged index the right floor: refuse, keep the rest of the
+  server working, and name the files to delete. That is not the right ceiling. The people
+  most likely to meet a damaged index are `.mcpb` desktop installs, and
+  `rm ~/.../search-index.sqlite{,-wal,-shm}` is not a recovery path for someone who has no
+  shell open and no reason to want one. An explicit build is consent — the caller has asked
+  for the expensive thing and knows it — so that call, and only that call, now deletes the
+  unreadable file and its write-ahead sidecars and opens a fresh index in their place before
+  rebuilding. Nothing repairs the index at startup or inside a query: a server that silently
+  takes ten minutes to start is worse than one that explains why it will not search.
+  `action:"update"` refuses and points at `build`, since a delta needs the index it cannot
+  read. The refusal text leads with the tool call and keeps `rm` as the fallback for the
+  case the files cannot be deleted. Deletion rather than truncation remains deliberate: the
+  version stamp lives inside the same database, and a repair that dropped the passages and
+  kept the stamp would leave an empty index reporting itself as up to date.
+- **Four more ways a broken index could read as an empty library** (#21). The catch in the
+  SQLite backend's keyword search was written for one condition — SQLite rejecting the
+  match string it had just built — and implemented as swallow-everything, so `disk I/O
+  error`, `no such table: passages`, a locked database and an interrupted statement all
+  came back as no matches rather than as a fault. It is now narrowed to genuine query
+  rejections, which are the only errors a search should absorb; everything else says what
+  went wrong. Damage discovered mid-query is also recorded rather than merely thrown, so
+  the refusal sticks and the next call does not go straight back to the same broken file.
+- **A `search-index.json` that cannot be parsed no longer loads as an empty index, or gets
+  overwritten** (#21). A truncated artifact was swallowed into a silent empty index that
+  reported itself healthy — and because loading resets the index before it parses, the next
+  clean shutdown wrote that emptiness straight back over the file, destroying the index the
+  failure was about. The JSON backend now refuses to read or write a store it could not
+  load, leaves the file exactly as it found it, and is repaired by the same
+  `action:"build"`. A file that is simply not there is still a first run, not a fault.
+- **Starting Zotero after your MCP host no longer leaves it invisible until you restart**
+  (#22, thanks @StianOby). Whether Zotero's local API was reachable was probed once at
+  startup and frozen for the life of the process, so `zotero_whoami` reported
+  `localApi: false` forever whenever the desktop app had not been up at that exact moment
+  — a result that depended on launch order and nothing else, curable only by quitting and
+  relaunching the host. The answer is now kept live: it is re-checked lazily as tools are
+  called, cached with a short TTL, backed off toward one check a minute on a machine where
+  nothing ever answers, and shared between concurrent calls, so it costs nothing where no
+  desktop app can apply and no round trip per call where one does. A Zotero that quits mid-
+  session is noticed too. `zotero_whoami` always probes afresh, reports when it last
+  checked, and names the Zotero setting to turn on when the answer is no.
+- **Desktop writes recover with it** (#22). The local-API and connector write clients were
+  built only when the *startup* probe had succeeded, so on a server that started before
+  Zotero they stayed undefined for the process lifetime: the re-probe could flip the
+  capability to true and every write still fell through to the cloud, because the client it
+  needed had never been constructed. Both are now created whenever the local API is
+  configured at all. They authorize lazily and every call site still checks the live
+  capability first, so nothing can reach a Zotero that is not running.
+- **The startup probe is bounded** (#22). Each of its three attempts inherited the shared
+  fetcher's 25-second budget, so a firewall that drops packets on 127.0.0.1:23119 rather
+  than refusing them could spend over a minute deciding the answer was no. It now gets two
+  seconds per attempt.
+
+### Changed
+- An index build holds the local-API answer still for its duration. The routing decision is
+  re-read for every page, so a desktop app appearing or vanishing mid-build would splice
+  pages from two APIs into one index and stamp it with a single library version — and the
+  desktop app and the cloud number their versions independently.
+
 ## [1.7.3] - 2026-08-27
 
 ### Fixed

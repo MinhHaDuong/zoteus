@@ -1,5 +1,6 @@
 import type { ToolContext } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
+import type { VersionBackend } from './backend.js';
 
 /**
  * Default cap on indexed full-text characters per item (~13 pages of dense text, so a
@@ -27,13 +28,35 @@ export interface FulltextSource {
   attachments: number;
   /** Items those attachments belong to. */
   items: number;
+  /**
+   * The item keys this source can actually serve text for. Lets a build's full-text pass
+   * skip everything else outright instead of asking item by item and being told no: it is
+   * already resident in the map behind `textFor`, and is bounded by the attachments that
+   * have extracted text, not by the size of the library.
+   */
+  itemKeys: Set<string>;
   /** Set when full text cannot be indexed at all; the build then stays metadata-only. */
   unavailable?: string;
+  /**
+   * Attachments whose text could not be READ, as opposed to items that simply have none.
+   *
+   * One unreadable PDF must not abort a build, so those failures are caught and skipped —
+   * but they must still be countable. A desktop app that quits partway through a full-text
+   * crawl makes every remaining read fail, and without this the build would finish, report
+   * `done`, and stamp itself complete with most of the body text silently missing.
+   */
+  readFailures(): number;
 }
 
 /** An inert source, for "full text requested but not obtainable". */
 function emptySource(unavailable?: string): FulltextSource {
-  const src: FulltextSource = { textFor: async () => undefined, attachments: 0, items: 0 };
+  const src: FulltextSource = {
+    textFor: async () => undefined,
+    attachments: 0,
+    items: 0,
+    itemKeys: new Set(),
+    readFailures: () => 0,
+  };
   if (unavailable) src.unavailable = unavailable;
   return src;
 }
@@ -56,13 +79,16 @@ function emptySource(unavailable?: string): FulltextSource {
 export async function createFulltextSource(
   ctx: ToolContext,
   library: LibraryRef | undefined,
-  opts: { maxChars?: number } = {},
+  opts: { maxChars?: number; backend?: VersionBackend } = {},
 ): Promise<FulltextSource> {
   const maxChars = opts.maxChars ?? DEFAULT_FULLTEXT_MAX_CHARS;
+  // The build that asked for this source has already routed itself; body text has to come
+  // from the same API as the metadata it hangs off, and must not switch under it.
+  const backend = opts.backend;
 
   let withText: Record<string, number>;
   try {
-    withText = (await ctx.router.fullTextSince(0, { library })) ?? {};
+    withText = (await ctx.router.fullTextSince(0, { library, backend })) ?? {};
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     return emptySource(
@@ -86,6 +112,7 @@ export async function createFulltextSource(
     for (let page = 0; page < MAX_ATTACHMENT_PAGES && mapped < total; page++) {
       const res = await ctx.router.searchItems({
         library,
+        backend,
         itemType: 'attachment',
         limit: ATTACHMENT_PAGE_SIZE,
         start,
@@ -125,7 +152,7 @@ export async function createFulltextSource(
       if (maxChars > 0 && used >= maxChars) break;
       let content = '';
       try {
-        const ft = await ctx.router.getFullText(key, { library });
+        const ft = await ctx.router.getFullText(key, { library, backend });
         content = typeof ft?.content === 'string' ? ft.content : '';
       } catch (e) {
         // One unreadable attachment must not abort the build: skip it, and say so once.
@@ -145,5 +172,11 @@ export async function createFulltextSource(
     return parts.length ? parts.join('\n\n') : undefined;
   };
 
-  return { textFor, attachments: mapped, items: byItem.size };
+  return {
+    textFor,
+    attachments: mapped,
+    items: byItem.size,
+    itemKeys: new Set(byItem.keys()),
+    readFailures: () => failures,
+  };
 }

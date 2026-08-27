@@ -34,11 +34,21 @@ const MAX_VERSION_PAGES = 200;
  * different senses of "/".
  */
 export function progressLine(s: IndexBuildStatus): string {
-  const fulltext = s.fulltextEnabled ? `, full text of ${s.fulltextItems} items (${s.fulltextPassages} passages)` : '';
+  // Suppressed while a build is still on its metadata pass: full text is not being
+  // collected yet, and "full text of 0 items (0 passages)" beside a climbing item count
+  // reads as a full-text crawl that has stalled rather than one that has not started.
+  const showFulltext = s.fulltextEnabled && !(s.operation === 'build' && s.state === 'building' && s.phase === 'metadata');
+  const fulltext = showFulltext ? `, full text of ${s.fulltextItems} items (${s.fulltextPassages} passages)` : '';
   // An update's itemsFetched is the size of the delta, not progress through the library, so
   // rendering it as "7 of 5000" would read as a build that stalled on its first page.
   if (s.operation === 'update') {
     return `${s.itemsFetched} changed items re-indexed, ${s.itemsRemoved} removed, ${s.items} items total, ${s.passages} passages, ${s.vectors} vectors${fulltext} (embedder=${s.embedder})`;
+  }
+  // The full-text pass has finished walking the library, so counting items fetched out of
+  // items total would sit at 100% for however long the body crawl runs. Count what is
+  // actually moving instead (#23).
+  if (s.phase === 'fulltext') {
+    return `metadata indexed for ${s.items} items; full text ${s.fulltextItemsScanned} of ${s.fulltextItemsTotal} items scanned (${s.fulltextItems} with text, ${s.fulltextPassages} passages), ${s.passages} passages, ${s.vectors} vectors (embedder=${s.embedder})`;
   }
   const total = s.itemsTotal > 0 ? String(s.itemsTotal) : '?';
   const library = s.itemsAvailable > s.itemsTotal ? ` (${s.itemsAvailable} in library)` : '';
@@ -143,8 +153,16 @@ export function statusSummary(s: IndexBuildStatus): string {
     storageNotice(s) +
     updateNotice(s);
   switch (s.state) {
-    case 'building':
-      return `Index ${job} in progress: ${progressLine(s)}. Poll zotero_index action:"status" again shortly.${notice}`;
+    case 'building': {
+      // The payoff of indexing metadata first is worth stating outright: during the
+      // full-text pass the library is ALREADY searchable, and a caller who does not know
+      // that will sit and wait for a crawl that can run for days on a large library.
+      const searchable =
+        s.phase === 'fulltext'
+          ? ' Every item\'s metadata is already indexed and searchable — this pass only adds the body text of attachments.'
+          : '';
+      return `Index ${job} in progress: ${progressLine(s)}.${searchable} Poll zotero_index action:"status" again shortly.${notice}`;
+    }
     case 'error': {
       // A failed build keeps what it got; a failed update keeps nothing of its own, because
       // a half-applied delta is a wrong index rather than a partial one.
@@ -205,13 +223,19 @@ export function startIndexBuild(
   // The configured limit is the ceiling; an explicit `maxItems` may only lower it.
   const configured = ctx.config.indexMaxItems;
   const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
+  // Decided once, here, and then forced on every page below. The routing rule is
+  // re-evaluated per request and the desktop app can appear or vanish while a crawl runs,
+  // so letting it decide each page would splice two independently-versioned APIs into one
+  // index under a single stamp. If the API chosen here goes away mid-crawl the page fetch
+  // fails and the build ends in `error` with no stamp written, which is the right outcome.
+  const backend: VersionBackend = ctx.router.servesLocally(lib) ? 'local' : 'cloud';
   const fetchPage = async (start: number) => {
     // Page through the router, not the Web API directly: a running desktop app serves the
     // personal library key-free (users/0), and from Zotero 10 any group it holds too, so
     // indexing needs no cloud key for either. The router sends the rest to the cloud: a
     // group this desktop does not hold, and everything once the app is closed.
     // `lib` stays undefined for the default library so the router resolves it itself.
-    const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true });
+    const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true, backend });
     return { items: page.data, totalResults: page.totalResults, lastModifiedVersion: page.lastModifiedVersion };
   };
 
@@ -219,8 +243,8 @@ export function startIndexBuild(
   // recorded on the build status rather than swallowed here: see persistNotice.
   const job = ctx.search.buildIncremental(fetchPage, {
     maxItems: cap,
-    versionBackend: ctx.router.servesLocally(lib) ? 'local' : 'cloud',
-    ...crawlOptions(ctx, lib, opts),
+    versionBackend: backend,
+    ...crawlOptions(ctx, lib, opts, backend),
   });
   job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
   return ctx.search.buildStatus();
@@ -257,7 +281,7 @@ export function startIndexUpdate(
   const fetchChanged = async (start: number) => {
     // The same routed, top-level crawl a build does, narrowed by `?since=`: on a library
     // where nothing moved this is a single request that returns an empty page.
-    const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true, since });
+    const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true, since, backend });
     return { items: page.data, totalResults: page.totalResults, lastModifiedVersion: page.lastModifiedVersion };
   };
   const liveKeys = async (): Promise<Set<string>> => {
@@ -266,7 +290,7 @@ export function startIndexUpdate(
     const keys = new Set<string>();
     let start = 0;
     for (let page = 0; page < MAX_VERSION_PAGES; page++) {
-      const res = await ctx.router.itemVersions({ library: lib, top: true, limit: VERSIONS_PAGE_SIZE, start });
+      const res = await ctx.router.itemVersions({ library: lib, top: true, limit: VERSIONS_PAGE_SIZE, start, backend });
       const batch = Object.keys(res.versions ?? {});
       for (const k of batch) keys.add(k);
       // Advance by what actually came back, not by the requested page size: the endpoint
@@ -283,7 +307,7 @@ export function startIndexUpdate(
     fetchChanged,
     liveKeys,
     maxItems: cap,
-    ...crawlOptions(ctx, lib, opts),
+    ...crawlOptions(ctx, lib, opts, backend),
   });
   job.catch((e) => ctx.logger.error(`Index update crashed: ${e instanceof Error ? e.message : String(e)}`));
   return ctx.search.buildStatus();
@@ -294,22 +318,35 @@ export function startIndexUpdate(
  * starters are synchronous by contract and must return a status for the caller to poll)
  * and the embedding batch dials.
  */
-function crawlOptions(ctx: ToolContext, lib: LibraryRef | undefined, opts: BuildFulltextOptions) {
+function crawlOptions(
+  ctx: ToolContext,
+  lib: LibraryRef | undefined,
+  opts: BuildFulltextOptions,
+  backend: VersionBackend,
+) {
   const wantFulltext = opts.fulltext ?? ctx.config.indexFulltext;
   const maxChars = opts.fulltextMaxChars ?? ctx.config.indexFulltextMaxChars;
   let source: Promise<FulltextSource> | undefined;
-  const fulltextFor = wantFulltext
-    ? async (itemKey: string) => {
-        source ??= createFulltextSource(ctx, lib, { maxChars }).then((src) => {
-          if (src.unavailable) ctx.search.noteFulltextUnavailable(src.unavailable);
-          else ctx.logger.info(`Full-text indexing: ${src.attachments} attachment(s) over ${src.items} item(s).`);
-          return src;
-        });
-        return (await source).textFor(itemKey);
-      }
-    : undefined;
+  let opened: FulltextSource | undefined;
+  // One memoized source behind all three entry points: the key set, the text and the
+  // failure count come from the same attachment crawl, and building it twice would double
+  // the cost of starting the full-text pass.
+  const openSource = (): Promise<FulltextSource> =>
+    (source ??= createFulltextSource(ctx, lib, { maxChars, backend }).then((src) => {
+      opened = src;
+      if (src.unavailable) ctx.search.noteFulltextUnavailable(src.unavailable);
+      else ctx.logger.info(`Full-text indexing: ${src.attachments} attachment(s) over ${src.items} item(s).`);
+      return src;
+    }));
+  const fulltextFor = wantFulltext ? async (itemKey: string) => (await openSource()).textFor(itemKey) : undefined;
+  const fulltextKeys = wantFulltext ? async () => (await openSource()).itemKeys : undefined;
+  // Read straight off the resolved source. It is set by the time anything asks: the only
+  // caller is the end of the full-text pass, which got there by awaiting `fulltextFor`.
+  const fulltextFailures = wantFulltext ? () => opened?.readFailures() ?? 0 : undefined;
   return {
     fulltextFor,
+    fulltextKeys,
+    fulltextFailures,
     ...(opts.note ? { note: opts.note } : {}),
     // Passages per embedding request, and the pause between requests: the dials an API
     // provider's per-request token cap and per-minute rate limit are tuned against.
@@ -318,6 +355,10 @@ function crawlOptions(ctx: ToolContext, lib: LibraryRef | undefined, opts: Build
     // A full-text index is far bigger, and on the JSON backend persisting means
     // re-serializing all of it. Save less often so the write does not dominate the build.
     // (On SQLite a persist is a commit, so this only costs a slightly longer transaction.)
-    ...(wantFulltext ? { persistEveryItems: 500, persistEveryMs: 60_000 } : {}),
+    //
+    // Scoped to the full-text pass alone. Slowing the metadata pass down to match would
+    // undo the point of running it first: its results are exactly the ones worth making
+    // durable early, and its rows are small enough that saving often costs little.
+    ...(wantFulltext ? { persistEveryItemsFulltext: 500, persistEveryMsFulltext: 60_000 } : {}),
   };
 }

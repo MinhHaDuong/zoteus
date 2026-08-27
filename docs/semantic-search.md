@@ -221,6 +221,20 @@ Progress and outcome are reported by `zotero_index action:"status"`: `fulltextIt
 (no extracted attachments, or the endpoints were unreachable) the build still completes as
 a metadata index and `fulltextReason` says why, rather than looking complete.
 
+**Metadata first, then bodies.** A build runs in two passes, and `status` reports which one
+is running as `phase`. The first indexes every item's own text — title, abstract, creators,
+tags — across the whole library; only then does the second crawl attachment bodies, tracked
+by `fulltextItemsScanned` of `fulltextItemsTotal`. The point is the gap between them: on a
+large library the body crawl can run for hours or days, and the library is fully searchable
+on its metadata for all of it rather than only at the end. A build stopped during the second
+pass therefore leaves complete metadata and partial full text, which is worth knowing before
+you decide whether to resume it.
+
+The version stamp an `action:"update"` diffs against is written only when *both* passes have
+finished. A build interrupted during the body crawl is deliberately left unstamped, because
+a stamp would make the next update skip every item whose attachments were never read: those
+items are unchanged in Zotero, so they would appear in no delta, ever.
+
 ## Storage backends
 
 Where the index lives is set by **`ZOTEUS_INDEX_BACKEND`**:
@@ -262,15 +276,29 @@ and `søren` does not answer to `soren`.
 also writes `-wal` and `-shm` sidecar files while the database is open; a clean shutdown
 folds them back in.
 
-**If the index is damaged.** A search index that SQLite cannot read no longer stops the
-server from starting: it is a derived cache, and no other tool reads it, so item lookups,
-bibliographies, attachments and citations carry on working. Search alone refuses, with a
-message naming the file, its sidecars and the command to remove them. It is not rebuilt for
-you — a rebuild re-reads the whole library and takes minutes to tens of minutes, which is
-not a job to start inside somebody's query. Delete the three files and run `zotero_index`
-with `action:"build"`. Deleting them is also what clears the version stamp, which lives in
-the same database: a recovery that dropped the passages and kept the stamp would leave an
-empty index reporting itself as up to date.
+**If the index is damaged.** A search index that cannot be read no longer stops the server
+from starting: it is a derived cache, and no other tool reads it, so item lookups,
+bibliographies, attachments and citations carry on working. Search alone refuses, and says
+why.
+
+To repair it, call `zotero_index` with `action:"build"`. That call — and only that call —
+deletes the unreadable file and its write-ahead sidecars, opens a fresh index in their
+place, and rebuilds in the background. Asking for a build is what makes the deletion
+consented to: nothing repairs the index at startup or inside a query, because a rebuild
+re-reads the whole library and takes minutes to tens of minutes, which is not a job to
+begin without being asked. `action:"update"` refuses and points you here, since a delta
+needs the index it cannot read. If the files cannot be deleted — another Zoteus is holding
+them, or they are read-only — the message falls back to naming them for `rm`.
+
+Deletion rather than truncation is deliberate: the version stamp lives inside the same
+database, so a repair that dropped the passages and kept the stamp would leave an empty
+index reporting itself as up to date. Removing the file removes the stamp with it.
+
+The same applies to a `search-index.json` that cannot be parsed. It used to load as an
+*empty* index, which reads exactly like a library holding nothing — and, because loading
+resets before it parses, the next clean shutdown wrote that emptiness back over the file.
+A JSON artifact that fails to parse is now refused, left untouched on disk, and repaired by
+the same `action:"build"`.
 
 **Migration is automatic and lossless.** The first time the SQLite backend opens a data dir
 that holds a `search-index.json` and no database, it imports the JSON index and leaves the

@@ -9,6 +9,7 @@ import type {
   VersionsResult,
 } from '../api/web-client.js';
 import type { LocalApiClient } from '../api/local-client.js';
+import type { VersionBackend } from '../features/search/backend.js';
 
 export interface LibraryRouterOptions {
   config: ZoteusConfig;
@@ -19,6 +20,22 @@ export interface LibraryRouterOptions {
 
 export interface ReadOpts {
   library?: LibraryRef;
+  /**
+   * Force this read to one API instead of letting the router choose.
+   *
+   * For crawls that span many requests and then RECORD which API served them. The routing
+   * rule is re-evaluated per request, and whether the desktop app is up can change while a
+   * crawl runs, so an index build that let the rule decide each page could splice pages
+   * from two APIs together and stamp the result with a single library version — and the
+   * two APIs number their versions independently, so the next incremental update would
+   * diff against a sequence its rows never came from.
+   *
+   * Pinning the decision instead makes the crawl coherent by construction: if the app it
+   * chose goes away mid-crawl the read fails, the build ends in `error`, and no stamp is
+   * written. That is the right outcome — better a build to redo than an index that quietly
+   * claims to be current.
+   */
+  backend?: VersionBackend;
 }
 
 /**
@@ -55,7 +72,10 @@ export class LibraryRouter {
     return { type: 'user', id: 0 };
   }
 
-  private useLocal(library: LibraryRef): boolean {
+  private useLocal(library: LibraryRef, pinned?: VersionBackend): boolean {
+    // A pinned read has already been routed once, by `servesLocally`, and is repeating that
+    // decision rather than making a new one.
+    if (pinned) return pinned === 'local';
     if (!this.local || !this.capabilities.localApi || this.config.local === 'off') return false;
     const def = this.defaultLibrary();
     // users/0 maps to the desktop's own personal library, whatever its cloud id.
@@ -80,16 +100,16 @@ export class LibraryRouter {
   async itemVersions(
     opts: ReadOpts & { since?: number; top?: boolean; limit?: number; start?: number } = {},
   ): Promise<VersionsResult> {
-    const { library, ...rest } = opts;
+    const { library, backend, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.itemVersions(rest, lib);
+    if (this.useLocal(lib, backend)) return this.local!.itemVersions(rest, lib);
     return this.web.itemVersions(lib, rest);
   }
 
   async searchItems(query: ItemQuery & ReadOpts = {}): Promise<ListResult> {
-    const { library, ...q } = query;
+    const { library, backend, ...q } = query;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.listItems(q, lib);
+    if (this.useLocal(lib, backend)) return this.local!.listItems(q, lib);
     return this.web.listItems(lib, q);
   }
 
@@ -122,14 +142,14 @@ export class LibraryRouter {
    */
   async getFullText(key: string, opts: ReadOpts = {}): Promise<any | null> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.getFullText(key, lib);
+    if (this.useLocal(lib, opts.backend)) return this.local!.getFullText(key, lib);
     return this.web.getFullText(lib, key);
   }
 
   /** Attachment keys whose full text changed after `version`, mapped to that version. */
   async fullTextSince(version: number, opts: ReadOpts = {}): Promise<Record<string, number>> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.fullTextSince(version, lib);
+    if (this.useLocal(lib, opts.backend)) return this.local!.fullTextSince(version, lib);
     return this.web.fullTextSince(lib, version);
   }
 

@@ -5,7 +5,7 @@ import { mkdir, readFile, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { tokenize } from './tokenize.js';
-import { SearchIndexCorruptError, isCorruptionError } from './corruption.js';
+import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError } from './corruption.js';
 import type { ChunkRecord, IndexCounts, IndexSnapshot, RankedId, SearchIndexOptions } from './backend.js';
 
 /**
@@ -148,6 +148,20 @@ export class SqliteSearchIndex extends SearchIndexBase {
       await this.close().catch(() => {});
       throw new SearchIndexCorruptError(this.file, e);
     }
+  }
+
+  /**
+   * Record damage discovered mid-flight and return the error to raise for it.
+   *
+   * Until this existed, a healthy-looking index that met corruption during a query threw
+   * the right sentence and remembered nothing: its status stayed clean and the next call
+   * went straight back to the same broken file. Recording it makes the refusal stick, and
+   * is what lets `zotero_index action:"build"` see that there is something to repair.
+   */
+  private noteCorruption(cause: unknown): SearchIndexCorruptError {
+    const fault = cause instanceof SearchIndexCorruptError ? cause : new SearchIndexCorruptError(this.file, cause);
+    this.noteStoreFault(fault);
+    return fault;
   }
 
   private get handle(): Database {
@@ -459,7 +473,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // A file that has gone bad under us is not a rejected query, and must not be
       // swallowed into an empty result set: an index that answers "no matches" forever
       // reads as an empty library rather than as a fault.
-      if (isCorruptionError(e)) throw new SearchIndexCorruptError(this.file, e);
+      if (isCorruptionError(e)) throw this.noteCorruption(e);
+      // Everything that is not SQLite rejecting the match string we just built propagates.
+      // This catch was written for that one condition and implemented as swallow-anything,
+      // so `disk I/O error`, `no such table: passages`, a locked database and an
+      // interrupted statement all came back as an empty library (#21).
+      if (!isQuerySyntaxError(e)) throw e;
       // A term the FTS5 parser rejects must not take the whole search down with it.
       this.opts.logger?.debug(`FTS5 query rejected (${match}): ${e instanceof Error ? e.message : String(e)}`);
       return [];
@@ -498,7 +517,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // Corruption in the passages b-tree is discovered here — every fused hit hydrates
       // through this read — and must reach the caller as the typed refusal, not as
       // SQLite's bare sentence naming neither the file nor the way out.
-      if (isCorruptionError(e)) throw new SearchIndexCorruptError(this.file, e);
+      if (isCorruptionError(e)) throw this.noteCorruption(e);
       throw e;
     }
   }
@@ -513,6 +532,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
 
   /** Commit the build's open transaction: this is what makes the last passages durable. */
   async save(): Promise<void> {
+    this.refuseIfFaulted();
     this.flush();
   }
 

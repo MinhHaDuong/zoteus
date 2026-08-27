@@ -16,9 +16,20 @@ export interface Capabilities {
 
 export interface ProbeDeps {
   web: Pick<WebApiClient, 'hasKey' | 'keysCurrent'>;
-  local?: Pick<LocalApiClient, 'ping' | 'listLocalGroupIds'>;
+  /**
+   * `probe` is optional so a fixture can supply `ping` alone; where it exists it is
+   * preferred, because it carries a time budget and `ping` does not.
+   */
+  local?: Pick<LocalApiClient, 'ping' | 'listLocalGroupIds'> & Partial<Pick<LocalApiClient, 'probe'>>;
   logger: Logger;
 }
+
+/**
+ * Budget for one startup attempt. Without it each attempt inherits the fetcher's 25 s
+ * default, so a firewall that DROPs the packet instead of refusing it turns three attempts
+ * into over a minute of startup before the answer is even `false`.
+ */
+const STARTUP_PROBE_TIMEOUT_MS = 2_000;
 
 export async function probeCapabilities(
   config: ZoteusConfig,
@@ -40,7 +51,10 @@ export async function probeCapabilities(
     config.local !== 'off' && deps.local
       ? (async () => {
           for (let attempt = 0; attempt < 3; attempt++) {
-            if (await deps.local!.ping().catch(() => false)) return true;
+            const up = deps.local!.probe
+              ? await deps.local!.probe(STARTUP_PROBE_TIMEOUT_MS).then((r) => r.up).catch(() => false)
+              : await deps.local!.ping().catch(() => false);
+            if (up) return true;
             await new Promise((r) => setTimeout(r, 600));
           }
           return false;

@@ -13,6 +13,9 @@ export function registerResources(server: McpServer, source: ToolContextSource):
     },
     async (uri) => {
       const ctx = await resolveContext(source);
+      // Resources route through the same library router as tools, so they need the same
+      // live answer about the desktop app; they do not pass through registerAllTools (#22).
+      await ctx.localStatus?.ensure();
       const schema = await ctx.schema.getSchema();
       return {
         contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(schema) }],
@@ -30,6 +33,9 @@ export function registerResources(server: McpServer, source: ToolContextSource):
     },
     async (uri) => {
       const ctx = await resolveContext(source);
+      // Resources route through the same library router as tools, so they need the same
+      // live answer about the desktop app; they do not pass through registerAllTools (#22).
+      await ctx.localStatus?.ensure();
       const result = await ctx.router.listCollections({});
       return {
         contents: [

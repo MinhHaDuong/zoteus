@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ZodRawShape } from 'zod';
 import type { ZoteusConfig } from '../config.js';
 import type { Capabilities } from '../router/capabilities.js';
+import type { LocalApiStatus } from '../router/local-status.js';
 import type { LibraryRouter } from '../router/library-router.js';
 import type { SchemaService } from '../schema/schema-service.js';
 import type { WebApiClient, LibraryRef } from '../api/web-client.js';
@@ -41,6 +42,21 @@ export interface ToolContext {
    * opened by createSearchIndex, so tools go through `search` rather than this path.
    */
   searchIndexPath: string;
+  /**
+   * Close this context's search index and open a fresh one from the same options, putting
+   * it in `search`. The only sanctioned writer of that field.
+   *
+   * This is what lets a fault be cleared at all. A fault is never cleared in place — the
+   * index refuses for as long as it lives — so repairing means replacing the object the
+   * context holds, and only the code that built it knows what to build it from.
+   */
+  reopenSearchIndex(): Promise<SearchIndex>;
+  /**
+   * Keeps `capabilities.localApi` live rather than frozen at what the startup probe saw.
+   * Optional so a hand-built test context need not supply one; where it is absent the
+   * capability simply stays as it was set.
+   */
+  localStatus?: LocalApiStatus;
   /** Release update check (operator context only); zotero_whoami surfaces its result. */
   updates?: UpdateChecker;
   /** Lightweight catalog of all registered tools (for search_tools discovery). */
@@ -145,6 +161,12 @@ export function registerAllTools(
         let ctx: ToolContext | undefined;
         try {
           ctx = await resolveContext(source);
+          // Every tool gets a current answer about the desktop app, because the startup
+          // probe's answer is a function of launch order and nothing else (#22). Costs a
+          // boolean where no desktop app can apply (hosted per-user contexts), a clock
+          // comparison while the cached answer is fresh, and at most one bounded loopback
+          // connect per TTL window otherwise, shared across concurrent calls.
+          await ctx.localStatus?.ensure();
           return await def.handler(args, ctx);
         } catch (err) {
           const message =
@@ -180,16 +202,18 @@ export function isLocalWritesUnavailable(err: unknown): boolean {
 
 
 /**
- * The local-API capability is probed at startup, but Zotero may be restarted (or
- * briefly unresponsive) during a long-lived server process. This re-pings once and
- * refreshes the flag so desktop write paths recover without a restart.
+ * A current answer to "is the desktop app reachable", for the write paths that must not
+ * act on a stale one. Delegates to `LocalApiStatus`, which caches, backs off and shares
+ * one in-flight probe; the inline path below is the fallback for a context built without
+ * one (hand-made test fixtures).
  *
- * The group list is re-probed with it: the startup probe skips it whenever the app was
- * down, leaving `localGroupIds` frozen at []. A keyless local-only user who starts Zotero
- * after the server would otherwise never reach a group the desktop holds, since the
- * router keeps routing it to a cloud API that has no key.
+ * The group list travels with it: the startup probe skips it whenever the app was down,
+ * leaving `localGroupIds` frozen at []. A keyless local-only user who starts Zotero after
+ * the server would otherwise never reach a group the desktop holds, since the router keeps
+ * routing it to a cloud API that has no key.
  */
 export async function ensureLocalApi(ctx: ToolContext): Promise<boolean> {
+  if (ctx.localStatus) return ctx.localStatus.ensure();
   if (ctx.capabilities.localApi) return true;
   if (!ctx.local || ctx.config.local === 'off') return false;
   const up = await ctx.local.ping().catch(() => false);

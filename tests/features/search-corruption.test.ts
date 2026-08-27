@@ -155,7 +155,7 @@ describe('opening an index that cannot be read', () => {
     const { index } = await openCorrupted();
     const summary = statusSummary(index.buildStatus());
     // The recovery paragraph belongs in exactly one field; it used to land in three.
-    expect(summary.match(/To recover, delete the file/g)).toHaveLength(1);
+    expect(summary.match(/To repair it, call zotero_index/g)).toHaveLength(1);
     await index.close();
   });
 

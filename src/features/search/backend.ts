@@ -148,6 +148,18 @@ export interface IndexBuildStatus extends SearchIndexStatus {
    * cheap successful one.
    */
   updateNotice?: string;
+  /**
+   * Which pass of a build the counters describe. A build indexes every item's metadata
+   * first and only then crawls attachment full text, so that a large library becomes
+   * searchable on titles, abstracts, creators and tags within minutes rather than after a
+   * body-text crawl that can run for days (#23). `'metadata'` throughout when full text
+   * was not asked for.
+   */
+  phase: 'metadata' | 'fulltext';
+  /** Items the full-text pass has looked at, whether or not they had extractable text. */
+  fulltextItemsScanned: number;
+  /** Size of the full-text pass's worklist; 0 until the metadata pass has finished. */
+  fulltextItemsTotal: number;
 }
 
 /** One page of library items plus the library-wide total (for progress). */
@@ -189,7 +201,28 @@ export interface IncrementalBuildOptions {
    * chunked into extra passages beside the metadata ones, so a search can match the body
    * of a paper and not only its title and abstract. Opt-in: see ZOTEUS_INDEX_FULLTEXT.
    */
-  fulltextFor?: (itemKey: string, item: any) => Promise<string | undefined>;
+  fulltextFor?: (itemKey: string, item?: any) => Promise<string | undefined>;
+  /**
+   * The item keys the full-text source can actually serve. Lets the full-text pass skip
+   * the items with no extractable attachment instead of awaiting a no-op for each, which
+   * on a library where a minority of items have PDFs is most of the worklist.
+   */
+  fulltextKeys?: () => Promise<Set<string>>;
+  /**
+   * Attachments whose text could not be read so far. Consulted after the full-text pass,
+   * because those failures are caught per item so the pass always "succeeds" — and a
+   * desktop app that quits partway through would otherwise leave a build reporting `done`
+   * with a valid version stamp and most of its body text silently missing.
+   */
+  fulltextFailures?: () => number;
+  /**
+   * Persist cadence for the full-text pass only. Body passages are far bulkier than
+   * metadata ones (and on the JSON backend a persist re-serializes everything), so that
+   * pass saves less often — while the metadata pass keeps the fast default, which is what
+   * makes its results durable early.
+   */
+  persistEveryItemsFulltext?: number;
+  persistEveryMsFulltext?: number;
   /** Concurrent full-text fetches while indexing one page of items (default 4). */
   fulltextConcurrency?: number;
   /** Sentence to carry on the status, e.g. why this rebuild replaced an update. */
