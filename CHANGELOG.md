@@ -22,6 +22,14 @@ All notable changes to Zoteus are documented here. The format is based on
   version unless all four were filled in by hand. Read out of `/proc/<pid>/environ` of the
   running extension rather than inferred; an unresolved reference, a blank string,
   `undefined` and `null` now all mean the setting's own default applies.
+- **An unset marker can no longer become the data directory** (#18). `ZOTEUS_DATA_DIR` was
+  the one setting whose fallback re-read the raw environment instead of the parsed value,
+  so a marker the schema had just rejected was handed straight back by `defaultDataDir`.
+  With an unexpanded reference in that variable the server created a directory named
+  `${user_config.data_dir}` in whatever the working directory happened to be, silently, and
+  put the search index, the OAuth store and saved attachments in it. The check that decides
+  what counts as unset now lives in one place that both the schema and `defaultDataDir`
+  read.
 - **The stdio shutdown no longer ends the process it is running in** (#18). 1.7.2 finished
   every ending with `process.exit(0)`, which assumes the server owns its process. The host
   in #18 reports `Using built-in Node.js for MCP server` and a probe that `requires the
@@ -35,17 +43,27 @@ All notable changes to Zoteus are documented here. The format is based on
   SIGKILL) remains the backstop.
 
 ### Changed
-- **No single setting can stop the server from starting** (#18). Configuration used to be
-  all-or-nothing: any value a schema rejected, whether a host marker nobody anticipated or
-  a typo, threw out of `loadConfig` before there was a logger to explain it. A rejected
-  value is now reported by name on stderr and replaced by what its absence would have
-  given, so `ZOTEUS_INDEX_MAX_ITEMS=lots` starts the server on 5000 items and says why,
-  rather than taking down `zotero_get_item`, bibliographies and citations, none of which
-  reads that setting. It is #20's reasoning (a damaged index stopped being fatal) applied
-  to configuration, and it is what keeps the next unanticipated substitution a warning
-  instead of another silent startup crash. The settings that have no safe default, the
-  OAuth credentials, are unchanged: they are checked after parsing, where the failure can
-  name what is missing.
+- **A tuning knob can no longer stop the server from starting** (#18). Configuration used
+  to be all-or-nothing: any value a schema rejected, whether a host marker nobody
+  anticipated or a typo, threw out of `loadConfig` before there was a logger to explain it.
+  A rejected knob is now reported by name on stderr and replaced by what its absence would
+  have given, so `ZOTEUS_INDEX_MAX_ITEMS=lots` starts the server on 5000 items and says
+  why, rather than taking down `zotero_get_item`, bibliographies and citations, none of
+  which reads that setting. It is #20's reasoning (a damaged index stopped being fatal)
+  applied to configuration, and it is what keeps the next unanticipated substitution a
+  warning instead of another silent startup crash.
+
+  Not every setting is a knob, and the ones that are not still refuse. `ZOTERO_LIBRARY_ID`
+  and `ZOTERO_LIBRARY_TYPE` choose which library is read and written, so `Group` no longer
+  quietly becomes `user`. With OAuth enabled, `ZOTEUS_OAUTH_MODE` and `ZOTEUS_OAUTH_STORE`
+  choose a security model: falling back would have served every client from the operator's
+  own Zotero key, or skipped the encryption key that file-backed tokens require. An
+  unexpanded `${...}` in `ZOTEUS_CIMD_ALLOWED_HOSTS` refuses too, because an empty host list
+  there means no restriction at all, and `docker --env-file` does no interpolation. None of
+  these appears in the desktop manifest, so none of them can be reached by a settings pane
+  a host fills in. A refusal now also carries the warnings collected before it, because
+  throwing discarded them: a rejected `ZOTEUS_PUBLIC_URL` used to report only that the
+  variable was required, which is misleading when it is plainly set.
 
 ### Documentation
 - **Where a desktop install's logs actually are** (#18). Recent Claude Desktop versions run

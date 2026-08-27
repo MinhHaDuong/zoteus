@@ -176,15 +176,12 @@ describe('loadConfig', () => {
     const cfg = loadConfig({
       ZOTEUS_INDEX_MAX_ITEMS: 'lots',
       ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '-1',
-      ZOTERO_LIBRARY_ID: 'mine',
       ZOTEUS_CONTACT_EMAIL: 'not-an-address',
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.indexMaxItems).toBe(5000);
     expect(cfg.indexFulltextMaxChars).toBe(40000);
-    expect(cfg.libraryId).toBeUndefined();
     expect(cfg.contactEmail).toBeUndefined();
     expect(cfg.warnings).toEqual([
-      'ZOTERO_LIBRARY_ID="mine" is not usable, ignoring it',
       'ZOTEUS_INDEX_FULLTEXT_MAX_CHARS="-1" is not usable, using 40000',
       'ZOTEUS_INDEX_MAX_ITEMS="lots" is not usable, using 5000',
       'ZOTEUS_CONTACT_EMAIL="not-an-address" is not usable, ignoring it',
@@ -192,15 +189,89 @@ describe('loadConfig', () => {
   });
 
   it('still refuses to start when a setting that has no default is missing', () => {
-    // Tolerance stops at the values there is no safe answer for: a public URL the schema
-    // rejected is gone by the time the cross-field checks run, and they say so.
+    expect(() =>
+      loadConfig({
+        ZOTEUS_OAUTH_ENABLED: 'true',
+        ZOTEUS_OAUTH_PASSCODE: 'a-long-enough-passcode',
+      } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTEUS_PUBLIC_URL is required/);
+  });
+
+  it('says a required setting was rejected rather than that it is missing', () => {
+    // The operator plainly set it, so "is required" would send them looking for the wrong
+    // problem. Throwing also discards the warnings, so the refusal carries them itself.
     expect(() =>
       loadConfig({
         ZOTEUS_OAUTH_ENABLED: 'true',
         ZOTEUS_PUBLIC_URL: 'zoteus.example.com',
         ZOTEUS_OAUTH_PASSCODE: 'a-long-enough-passcode',
       } as unknown as NodeJS.ProcessEnv),
-    ).toThrow(/ZOTEUS_PUBLIC_URL is required/);
+    ).toThrow(/ZOTEUS_PUBLIC_URL="zoteus.example.com" is not usable: it must be an absolute URL/);
+  });
+
+  it('never turns an unset marker into the data directory', () => {
+    // loadConfig maps the marker to undefined, and the fallback then re-read the raw
+    // environment and handed it straight back, so the server made a directory named after
+    // the reference in whatever the working directory happened to be.
+    for (const marker of ['${user_config.data_dir}', 'undefined', 'null', '   ', '']) {
+      const cfg = loadConfig({ ZOTEUS_DATA_DIR: marker } as unknown as NodeJS.ProcessEnv);
+      expect(cfg.dataDir).not.toBe(marker);
+      expect(cfg.dataDir.includes('${')).toBe(false);
+      expect(cfg.dataDir.trim()).not.toBe('');
+    }
+    expect(loadConfig({ ZOTEUS_DATA_DIR: '/tmp/zoteus-data' } as unknown as NodeJS.ProcessEnv).dataDir).toBe(
+      '/tmp/zoteus-data',
+    );
+  });
+
+  it('refuses a scope it would otherwise have to guess', () => {
+    // Falling back here would silently point reads, and writes, at a different library.
+    expect(() =>
+      loadConfig({ ZOTERO_LIBRARY_TYPE: 'Group', ZOTERO_LIBRARY_ID: '123' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTERO_LIBRARY_TYPE="Group" is not usable/);
+    expect(() =>
+      loadConfig({ ZOTERO_LIBRARY_ID: 'g123456' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTERO_LIBRARY_ID="g123456" is not usable/);
+  });
+
+  it('refuses a security model it would otherwise have to guess', () => {
+    const base = {
+      ZOTEUS_OAUTH_ENABLED: 'true',
+      ZOTEUS_PUBLIC_URL: 'https://zoteus.example.com',
+      ZOTERO_OAUTH_CLIENT_KEY: 'ck',
+      ZOTERO_OAUTH_CLIENT_SECRET: 'cs',
+      ZOTEUS_OAUTH_PASSCODE: 'a-long-enough-passcode',
+    };
+    // A capitalised mode used to refuse. Falling back to passcode would serve every client
+    // from the operator's own Zotero key instead of each user's own login.
+    expect(() =>
+      loadConfig({ ...base, ZOTEUS_OAUTH_MODE: 'Zotero' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTEUS_OAUTH_MODE="Zotero" is not usable/);
+    // Falling back to memory would skip the ZOTEUS_OAUTH_TOKEN_SECRET check that file
+    // storage exists to enforce.
+    expect(() =>
+      loadConfig({ ...base, ZOTEUS_OAUTH_STORE: 'File' } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTEUS_OAUTH_STORE="File" is not usable/);
+    // Both are knobs again when OAuth is off, because then they choose nothing.
+    expect(loadConfig({ ZOTEUS_OAUTH_MODE: 'Zotero' } as unknown as NodeJS.ProcessEnv).oauth.mode).toBe(
+      'passcode',
+    );
+  });
+
+  it('refuses an allowlist that is a reference nothing expanded', () => {
+    // An empty CIMD host list means "any public host", so mapping an unexpanded reference
+    // to empty would turn a restriction into none. docker --env-file does no interpolation.
+    expect(() =>
+      loadConfig({
+        ZOTEUS_CIMD_ENABLED: 'true',
+        ZOTEUS_CIMD_ALLOWED_HOSTS: '${CIMD_HOSTS}',
+      } as unknown as NodeJS.ProcessEnv),
+    ).toThrow(/ZOTEUS_CIMD_ALLOWED_HOSTS.*never expanded/);
+    // Blank is how "no restriction" is spelled on purpose, and stays legal.
+    expect(
+      loadConfig({ ZOTEUS_CIMD_ENABLED: 'true', ZOTEUS_CIMD_ALLOWED_HOSTS: '' } as unknown as NodeJS.ProcessEnv)
+        .cimd.allowedHosts,
+    ).toEqual([]);
   });
 
   it('treats empty optional string secrets as unset (no min(1) parse crash)', () => {

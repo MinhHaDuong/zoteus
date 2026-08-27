@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { defaultDataDir } from './lib/paths.js';
+import { isUnset, looksUnexpanded } from './lib/env.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from './features/search/fulltext-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './features/search/limits.js';
 
@@ -77,79 +78,64 @@ export interface ZoteusConfig {
 /** Minimum length for the consent passcode (defense-in-depth alongside /consent throttling). */
 export const MIN_PASSCODE_LENGTH = 12;
 
-/**
- * Values that mean "the host had nothing to put here", rather than a setting.
- *
- * A desktop-extension (`.mcpb`) client substitutes every env entry its manifest declares,
- * including the ones whose `user_config` field the user left empty. Where that field also
- * has no `default` in the manifest, Claude Desktop 1.37937 does not substitute anything at
- * all: it passes the reference through verbatim, so the server is handed the literal text
- * `${user_config.embed_batch_size}`. That is #18, read out of `/proc/<pid>/environ` of the
- * running extension rather than inferred. A blank string is the other form, which is what
- * a bare `KEY=` line in a .env file produces and what earlier hosts sent for an empty
- * field; `undefined` and `null` are what a host that stringifies an absent value would
- * send, and are covered because this is the third round of guessing which one arrives.
- * None of them is a value, so none reaches a schema: they become `undefined` and the
- * schema's own `.default()`/`.optional()` applies. Without this, `z.coerce.number()` reads
- * '' as 0 and an unresolved reference as NaN, the first silently replacing a default (no
- * full-text cap, no rate limit) and the second stopping the server from starting.
- */
-const UNSET_MARKER = /^(?:undefined|null|nan|\$\{.*\})$/i;
-
-const isUnset = (v: unknown): boolean =>
-  typeof v === 'string' && (v.trim() === '' || UNSET_MARKER.test(v.trim()));
-
-/** An optional flag. Absent, or blank in the sense above, keeps `def`. */
+/** An optional flag. Absent, or unset in the sense of `isUnset`, keeps `def`. */
 const bool = (def: boolean) =>
   z
     .string()
     .optional()
     .transform((v) => (v === undefined ? def : v.toLowerCase() === 'true' || v === '1'));
 
-/**
- * What a schema yields for a variable that is not set: its `.default()`, or `undefined`
- * where it is `.optional()`. Asking the schema keeps that answer in one place instead of
- * restating every default beside itself.
- */
-const whenAbsent = <T extends z.ZodTypeAny>(schema: T): z.output<T> => {
-  const parsed = schema.safeParse(undefined);
-  return (parsed.success ? parsed.data : undefined) as z.output<T>;
-};
+/** What `knob` collects: the readable warnings, and the keys a schema actually refused. */
+interface Rejections {
+  warnings: string[];
+  rejected: Set<string>;
+}
 
 /**
- * One setting, and the promise that no single one of them can stop the server from
- * starting. A value that is present but unusable (a host marker this version does not
- * recognise, a typo, a negative cap) is collected in `warnings` and replaced by what the
- * variable's absence would have given.
+ * One setting, and the promise that no knob among them can stop the server from starting.
+ * A value that is present but unusable (a host marker this version does not recognise, a
+ * typo, a negative cap) is collected and replaced by what the variable's absence would
+ * have given.
  *
  * `loadConfig` runs before the logger exists, so a `ZodError` here is a `FATAL` line on
  * stderr and a dead process: exactly how #18 crashed, and a mistyped tuning knob is not
  * worth that. It is the reasoning of #20 (a damaged index stopped being fatal) applied to
- * configuration. The settings that have no safe default, the OAuth credentials, are still
- * checked below, after parsing, where the failure can name what is missing.
+ * configuration. The exceptions are deliberate and listed at the end of `loadConfig`:
+ * settings that choose a scope or a security model are not knobs, and none of them can be
+ * reached by a desktop host filling in a settings pane.
  */
-const knob = <T extends z.ZodTypeAny>(key: string, schema: T, warnings: string[]) =>
-  z.preprocess((v) => (isUnset(v) ? undefined : v), schema).catch((ctx) => {
-    const fallback = whenAbsent(schema);
-    warnings.push(
+const knob = <T extends z.ZodTypeAny>(key: string, schema: T, into: Rejections) => {
+  const absent = schema.safeParse(undefined);
+  if (!absent.success) {
+    // Not reachable from configuration: it means a field was declared with no answer for
+    // an unset variable, which would make the cast in `tolerant` untrue. Fail on the first
+    // load rather than on the first person to mistype that field.
+    throw new Error(`${key} must accept an absent variable: give it .default() or .optional()`);
+  }
+  return z.preprocess((v) => (isUnset(v) ? undefined : v), schema).catch((ctx) => {
+    into.rejected.add(key);
+    into.warnings.push(
       `${key}=${JSON.stringify(ctx.input)} is not usable, ` +
-        (fallback === undefined ? 'ignoring it' : `using ${JSON.stringify(fallback)}`),
+        (absent.data === undefined ? 'ignoring it' : `using ${JSON.stringify(absent.data)}`),
     );
-    return fallback;
+    return absent.data as z.output<T>;
   });
+};
 
 /**
  * Wraps every field in `knob`, so the key a warning names is the key that failed and the
  * two cannot drift apart. The cast restates the wrapper's output type, which is what
- * `z.object` reads and which `knob` leaves exactly as the wrapped schema's.
+ * `z.object` reads and which `knob` leaves exactly as the wrapped schema's. `knob` checks
+ * the invariant that makes that true.
  */
-const tolerant = <S extends z.ZodRawShape>(fields: S, warnings: string[]): S =>
+const tolerant = <S extends z.ZodRawShape>(fields: S, into: Rejections): S =>
   Object.fromEntries(
-    Object.entries(fields).map(([key, schema]) => [key, knob(key, schema, warnings)]),
+    Object.entries(fields).map(([key, schema]) => [key, knob(key, schema, into)]),
   ) as unknown as S;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   const warnings: string[] = [];
+  const rejected = new Set<string>();
   const schema = z.object(
     tolerant(
       {
@@ -204,18 +190,56 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_CIMD_ALLOWED_REDIRECT_SCHEMES: z.string().default('https'),
         ZOTEUS_CIMD_ALLOWED_HOSTS: z.string().default(''),
       },
-      warnings,
+      { warnings, rejected },
     ),
   );
 
   const parsed = schema.parse(env);
+
+  /**
+   * The end of the knobs, and the start of the settings that are not knobs.
+   *
+   * A rejected value falls back everywhere above, because no tuning number is worth a
+   * server that will not start. These are different: each one chooses a scope or a
+   * security model, so falling back would quietly change who the server answers for
+   * rather than how fast it runs. `ZOTEUS_OAUTH_MODE=Zotero` must not serve every client
+   * from the operator's own key, and a library id the API cannot address must not resolve
+   * to the personal library instead. None of them appears in `mcpb/manifest.json`, so a
+   * desktop user, whose settings a host fills in and who has no stderr to read, cannot
+   * reach any of these (#18). An operator setting them by hand can read the refusal.
+   *
+   * The message carries the warnings collected so far, because throwing here discards
+   * them: without that, a rejected `ZOTEUS_PUBLIC_URL` reported only that the variable was
+   * required, which is a lie when the operator has plainly set it.
+   */
+  const refuse = (key: string, why: string): never => {
+    const detail = warnings.length ? ` (${warnings.join('; ')})` : '';
+    throw new Error(`${key}=${JSON.stringify(env[key])} is not usable: ${why}${detail}`);
+  };
+  if (rejected.has('ZOTERO_LIBRARY_TYPE')) {
+    refuse('ZOTERO_LIBRARY_TYPE', 'refusing to guess whether to read and write a personal or a group library');
+  }
+  if (rejected.has('ZOTERO_LIBRARY_ID')) {
+    refuse('ZOTERO_LIBRARY_ID', 'refusing to fall back to whichever library the API key belongs to');
+  }
 
   const oauthEnabled = parsed.ZOTEUS_OAUTH_ENABLED;
   const publicUrl = parsed.ZOTEUS_PUBLIC_URL?.replace(/\/+$/, '');
   const mode = parsed.ZOTEUS_OAUTH_MODE;
   const store = parsed.ZOTEUS_OAUTH_STORE;
   if (oauthEnabled) {
-    if (!publicUrl) throw new Error('ZOTEUS_PUBLIC_URL is required when ZOTEUS_OAUTH_ENABLED=true');
+    if (rejected.has('ZOTEUS_OAUTH_MODE')) {
+      refuse('ZOTEUS_OAUTH_MODE', 'refusing to fall back to shared-passcode auth, which would serve every client from the operator\'s own Zotero key');
+    }
+    if (rejected.has('ZOTEUS_OAUTH_STORE')) {
+      refuse('ZOTEUS_OAUTH_STORE', 'refusing to fall back to in-memory tokens, which would skip the encryption key that file storage requires');
+    }
+    if (!publicUrl) {
+      if (rejected.has('ZOTEUS_PUBLIC_URL')) {
+        refuse('ZOTEUS_PUBLIC_URL', 'it must be an absolute URL, e.g. https://zoteus.example.com');
+      }
+      throw new Error('ZOTEUS_PUBLIC_URL is required when ZOTEUS_OAUTH_ENABLED=true');
+    }
     if (mode === 'passcode') {
       if (!parsed.ZOTEUS_OAUTH_PASSCODE) {
         throw new Error('ZOTEUS_OAUTH_PASSCODE is required when ZOTEUS_OAUTH_ENABLED=true (passcode mode)');
@@ -239,6 +263,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       );
     }
   }
+  // An empty CIMD host list means "any public host" (src/lib/cimd.ts), so a reference that
+  // never expanded must not arrive here as empty: that turns a restriction the operator
+  // wrote into no restriction at all. Blank stays legal, because blank is how it is spelled
+  // deliberately.
+  if (parsed.ZOTEUS_CIMD_ENABLED && looksUnexpanded(env.ZOTEUS_CIMD_ALLOWED_HOSTS)) {
+    refuse('ZOTEUS_CIMD_ALLOWED_HOSTS', 'it looks like a reference that was never expanded, and an empty host list means no restriction at all');
+  }
+
   const allowedHosts = (parsed.ZOTEUS_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((s) => s.trim())
