@@ -6,6 +6,28 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- **A search index written by a newer Zoteus is moved aside, never written into** (#25,
+  thanks @MinhHaDuong). `createSchema()` stamped `schemaVersion` with `INSERT OR REPLACE`
+  before anything read what the file already said, and nothing anywhere read it back: the
+  stamp was written and consulted by no one. So the ordinary result of a downgrade, a
+  database created by a later build, was silently re-stamped with this build's version and
+  then used under a schema it might not have, destroying the one piece of evidence the
+  stamp exists to carry at exactly the moment it mattered. The stamp is now read through a
+  read-only handle before any DDL or connection pragma touches the file (`journal_mode =
+  WAL` is itself a write to the header, so even that waits). A database at a version this
+  build does not understand, one whose stamp will not parse, or one that carries tables but
+  no stamp at all, is renamed to `search-index.sqlite.incompatible-<timestamp>` with its
+  write-ahead sidecars, nothing deleted, and a fresh index is created in its place;
+  `action:"status"` reports what moved and where in `storageNotice`. The moved file stays a
+  complete database that the build which stamped it can still open. A zero-byte file is
+  treated as a first open rather than an incompatibility, since that is exactly what a
+  handle opened and dropped before any DDL leaves behind, and a lock or an I/O error
+  propagates instead of being read as a missing stamp, so a healthy index is never moved
+  merely because another process held it. If the file can be read but not moved, the
+  server survives, search refuses while naming the file, and an explicit
+  `zotero_index action:"build"` clears it.
+
 ## [1.8.0] - 2026-08-27
 
 ### Added
