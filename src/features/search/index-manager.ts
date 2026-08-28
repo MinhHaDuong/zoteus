@@ -6,6 +6,7 @@ import { batchPause, embedderIdentity } from './embeddings.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
 import { progressLine } from './build.js';
+import { describeLibraryToken } from './backend.js';
 import { saveIndex } from './persistence.js';
 import type {
   BuildCheckpoint,
@@ -182,6 +183,13 @@ export abstract class SearchIndexBase implements SearchIndex {
    * resume redoes to a single persistence interval (#24).
    */
   protected checkpoint: BuildCheckpoint | undefined = undefined;
+  /**
+   * Canonical identity of the library whose rows this store holds (canonicalLibraryToken;
+   * undefined until a stamped build writes rows, or for indexes persisted before the
+   * stamp existed). Written with the first rows rather than at completion: a half-built
+   * index is already somebody's index, and assertLibrary must protect it too.
+   */
+  protected library: string | undefined = undefined;
   /** What the last update did, or why a rebuild replaced it (see IndexBuildStatus). */
   protected updateNotice: string | undefined = undefined;
   /**
@@ -233,6 +241,24 @@ export abstract class SearchIndexBase implements SearchIndex {
   /** Refuse rather than answer from a store that is known to be unreadable. */
   protected refuseIfFaulted(): void {
     if (this.fault) throw this.fault;
+  }
+
+  /**
+   * The guard on the single-library assumption startIndexBuild documents: one index
+   * file, one library. A build or update for another library would reach clearStore()
+   * and erase this one's rows, so it refuses instead, naming both. An empty store or a
+   * pre-stamp index guards nothing — there is either nothing to lose, or no way to know
+   * whose rows these are.
+   */
+  assertLibrary(library: string): void {
+    const held = this.library;
+    if (!held || held === library) return;
+    if (this.counts().documents === 0) return;
+    throw new Error(
+      `This index holds ${describeLibraryToken(held)}; building for ${describeLibraryToken(library)} ` +
+        `would erase it. One index file holds one library. To index ${describeLibraryToken(library)}, ` +
+        'run Zoteus with its own data directory (ZOTEUS_DATA_DIR), or delete the index file and rebuild.',
+    );
   }
 
   /**
@@ -506,6 +532,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextVersion: this.fulltextVersion,
     };
     if (this.libraryBackend) s.libraryBackend = this.libraryBackend;
+    if (this.library) s.library = this.library;
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
     if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
@@ -538,6 +565,9 @@ export abstract class SearchIndexBase implements SearchIndex {
     // indexed, and the checkpoint names a crawl whose committed rows have just been erased.
     this.fulltextVersion = 0;
     this.checkpoint = undefined;
+    // And the library stamp: an emptied store holds nobody's rows. The build that called
+    // this restamps its own library immediately after (the guard already ran before it).
+    this.library = undefined;
   }
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
@@ -637,6 +667,10 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
     this.refuseIfFaulted();
+    // Before anything is cleared: a build for a different library than the rows held must
+    // refuse here rather than reach reset() below (startIndexBuild also asserts this
+    // synchronously, so tool callers see the refusal rather than a logged rejection).
+    if (opts.library) this.assertLibrary(opts.library);
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
     // Read before anything is reset, and in the synchronous prologue, so the status the
     // fire-and-forget caller returns to its user already says a resume is what started.
@@ -684,6 +718,11 @@ export abstract class SearchIndexBase implements SearchIndex {
     // A resumed build inherits the body passages the interrupted one committed, so it is a
     // full-text index whether or not this run was asked to crawl any more of them.
     this.fulltextEnabled = Boolean(opts.fulltextFor) || (resume ? this.counts().fulltextPassages > 0 : false);
+    // Stamped before the first row, not at completion: every partial persist carries the
+    // identity of the library it belongs to, so even an interrupted build stays guarded.
+    // After the resume branch above, so a continued build restamps the identity it was
+    // already asserted against rather than leaving a resumed store unstamped.
+    this.library = opts.library;
     this.vectorEmbedderId = this.embedderId;
 
     const embedBatchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
@@ -1054,6 +1093,9 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   async updateIncremental(opts: IncrementalUpdateOptions): Promise<IndexBuildStatus> {
     this.refuseIfFaulted();
+    // Same guard as the full build: a delta for a different library would splice its
+    // changes into — and delete "missing" items from — rows that were never its own.
+    if (opts.library) this.assertLibrary(opts.library);
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
     const fromVersion = this.libraryVersion;
     this.buildState = 'building';
@@ -1184,6 +1226,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       if (!token.cancelled && reconciled && crawlVersion) {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.backend;
+        // An index stamped before the library stamp existed gets one here: the update just
+        // asserted (or trivially holds) that these rows are this library's.
+        if (opts.library) this.library = opts.library;
       }
       // The full-text cursor advances under the same rule as the stamp, and for the same
       // reason: an update that did not finish must repeat this delta, not skip past it.
@@ -1696,6 +1741,7 @@ export class MemorySearchIndex extends SearchIndexBase {
     // Present only while a build is unfinished, which is exactly when the next one has
     // somewhere to pick up from (#24).
     if (this.checkpoint) snapshot.checkpoint = this.checkpoint;
+    if (this.library) snapshot.library = this.library;
     return snapshot;
   }
 
@@ -1728,5 +1774,8 @@ export class MemorySearchIndex extends SearchIndexBase {
     // Absent in files written before resume existed, and in any file a finished build
     // wrote: both mean there is nothing to resume, which is what undefined says (#24).
     this.checkpoint = data.checkpoint;
+    // Absent in files written before the library stamp existed: an unstamped index
+    // refuses nothing (assertLibrary), which is the only workable answer for it.
+    this.library = data.library;
   }
 }

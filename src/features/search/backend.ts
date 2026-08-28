@@ -1,5 +1,22 @@
 import type { EmbeddingProvider } from './embeddings.js';
 import type { Logger } from '../../lib/logger.js';
+import type { LibraryRef } from '../../api/web-client.js';
+
+/**
+ * Canonical identity of a library for index stamping: `user` for the personal library,
+ * `group:<id>` for a group. The personal library is deliberately one token with no id:
+ * the desktop app serves it as users/0 while the cloud names the real user id, and the
+ * doc-comment on startIndexBuild promises that seam never splits the index — so it must
+ * never split the stamp either.
+ */
+export function canonicalLibraryToken(lib?: LibraryRef): string {
+  return lib?.type === 'group' ? `group:${lib.id}` : 'user';
+}
+
+/** The token, for humans: "the personal library", or "group 4523". */
+export function describeLibraryToken(library: string): string {
+  return library === 'user' ? 'the personal library' : library.replace(/^group:/, 'group ');
+}
 
 /**
  * Store an index lives in. `memory` is the original in-memory + JSON implementation:
@@ -122,6 +139,13 @@ export interface SearchIndexStatus {
    * `action:"update"` forever (#26). This is the cursor an update hands to `/fulltext?since=`.
    */
   fulltextVersion: number;
+  /**
+   * Canonical identity of the library whose rows this index holds (`user`, or
+   * `group:<id>` — see canonicalLibraryToken). Absent in indexes written before the
+   * stamp existed. One index file holds one library, and this is the stamp
+   * `assertLibrary` guards on.
+   */
+  library?: string;
 }
 
 /**
@@ -308,6 +332,14 @@ export interface IncrementalBuildOptions {
    * about.
    */
   fresh?: boolean;
+  /**
+   * Canonical identity of the library being indexed (see canonicalLibraryToken).
+   * Asserted against the stored stamp before anything is cleared — a build for a
+   * different library refuses instead of erasing this one — and stamped on the index
+   * with the first rows written. Callers should also assert synchronously
+   * (`assertLibrary`) so the refusal reaches them, not a fire-and-forget job's log.
+   */
+  library?: string;
 }
 
 /** What Zotero's full-text sequence has extracted since a cursor, and the new cursor. */
@@ -379,6 +411,8 @@ export interface IndexSnapshot {
   /** Where an interrupted build stopped (absent in files written before #24, and once
    * a build has finished: a completed build has nothing to resume). */
   checkpoint?: BuildCheckpoint;
+  /** Canonical identity of the library these rows belong to (absent in older files). */
+  library?: string;
 }
 
 export interface QueryOptions {
@@ -435,6 +469,14 @@ export interface SearchIndex {
   embed(texts: string[]): Promise<number[][]>;
   build(libraryItems: any[], opts?: BuildOptions): Promise<SearchIndexStatus>;
   buildIncremental(fetchPage: PageFetcher, opts?: IncrementalBuildOptions): Promise<IndexBuildStatus>;
+  /**
+   * Refuse to index `library` over the rows of a different one. Throws, naming both,
+   * when the store is non-empty and stamped with another library; silent otherwise
+   * (same library, empty store, or a pre-stamp index). Build/update callers check this
+   * BEFORE kicking off their fire-and-forget job, so the refusal reaches the tool
+   * caller instead of the job's error log.
+   */
+  assertLibrary(library: string): void;
   /**
    * Why a delta update cannot run against this index right now, or undefined when it can.
    * Checked by the caller BEFORE any request is made, so a refusal costs nothing and can

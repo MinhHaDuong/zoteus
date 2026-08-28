@@ -1,6 +1,7 @@
 import type { ToolContext } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
 import type { IndexBuildStatus, VersionBackend } from './backend.js';
+import { canonicalLibraryToken } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
 
@@ -213,6 +214,11 @@ export interface BuildFulltextOptions {
  * split the index from the one built against the cloud, and a build that switched
  * backends between runs stays coherent.
  *
+ * The other face of that rule is enforced here too: one index file holds ONE library's
+ * rows. The index stamps the canonical library it holds (`canonicalLibraryToken`), and a
+ * build for a different one refuses up front — naming both — instead of reaching the
+ * clearStore() that would silently erase the first library's index.
+ *
  * A completed build also stamps the library's real Last-Modified-Version and the API that
  * issued it, which is what `startIndexUpdate` later diffs against. The two sequences are
  * never mixed: the stamp is only usable while the routing that produced it still holds, and
@@ -233,6 +239,10 @@ export function startIndexBuild(
   maxItems?: number,
   opts: BuildFulltextOptions = {},
 ): IndexBuildStatus {
+  // Synchronously, before the fire-and-forget job below: a refusal thrown inside the job
+  // would only reach the logger, and the tool caller would see a build that "started".
+  const library = canonicalLibraryToken(lib);
+  ctx.search.assertLibrary(library);
   // The configured limit is the ceiling; an explicit `maxItems` may only lower it.
   const configured = ctx.config.indexMaxItems;
   const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
@@ -258,6 +268,7 @@ export function startIndexBuild(
     maxItems: cap,
     versionBackend: backend,
     ...(opts.fresh ? { fresh: true } : {}),
+    library,
     ...crawlOptions(ctx, lib, opts, backend),
   });
   job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
@@ -279,6 +290,10 @@ export function startIndexUpdate(
   opts: BuildFulltextOptions = {},
 ): IndexBuildStatus {
   const backend: VersionBackend = ctx.router.servesLocally(lib) ? 'local' : 'cloud';
+  // Same synchronous guard as startIndexBuild, and for the same reason: the version stamp
+  // this update would diff against belongs to the library the index holds, not to `lib`.
+  const library = canonicalLibraryToken(lib);
+  ctx.search.assertLibrary(library);
   const blocker = ctx.search.updateBlocker(backend);
   if (blocker) {
     return startIndexBuild(ctx, lib, maxItems, {
@@ -322,6 +337,7 @@ export function startIndexUpdate(
     fetchChanged,
     liveKeys,
     maxItems: cap,
+    library,
     ...crawlOptions(ctx, lib, opts, backend),
   });
   job.catch((e) => ctx.logger.error(`Index update crashed: ${e instanceof Error ? e.message : String(e)}`));
