@@ -300,6 +300,15 @@ resets before it parses, the next clean shutdown wrote that emptiness back over 
 A JSON artifact that fails to parse is now refused, left untouched on disk, and repaired by
 the same `action:"build"`.
 
+**A database from a different schema version is moved aside, never written into.** The
+schema stamp is read before anything touches the file. A database stamped with a version
+this build does not understand — typically one written by a newer Zoteus after a downgrade
+— is renamed to `search-index.sqlite.incompatible-<timestamp>` (its write-ahead sidecars
+with it, nothing deleted), a fresh index is created in its place, and `storageNotice` says
+what moved and where. The moved file stays a complete database, readable by the build that
+stamped it; rebuild with `zotero_index action:"build"`, and a later re-upgrade finds the
+moved file intact.
+
 **Migration is automatic and lossless.** The first time the SQLite backend opens a data dir
 that holds a `search-index.json` and no database, it imports the JSON index and leaves the
 file exactly where it was (a downgrade to an older Node still finds it). If the JSON file is

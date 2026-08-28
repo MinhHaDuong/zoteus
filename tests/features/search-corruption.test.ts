@@ -259,6 +259,6 @@ describe('opening an index that cannot be read', () => {
     );
     expect(rejection).toBeInstanceOf(Error);
     expect(rejection).not.toBeInstanceOf(SearchIndexCorruptError);
-    expect((rejection as Error).message).toMatch(/unable to open|EISDIR|ENOTDIR|EEXIST/i);
+    expect((rejection as Error).message).toMatch(/unable to open|disk I\/O error|EISDIR|ENOTDIR|EEXIST/i);
   });
 });

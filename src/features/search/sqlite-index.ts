@@ -1,11 +1,11 @@
 import { createRequire } from 'node:module';
 import type { DatabaseSync as Database, StatementSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { tokenize } from './tokenize.js';
-import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError } from './corruption.js';
+import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
 import type { ChunkRecord, IndexCounts, IndexSnapshot, RankedId, SearchIndexOptions } from './backend.js';
 
 /**
@@ -23,7 +23,11 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof
  */
 export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
 
-/** Bumped only when the schema below changes shape; an older file is rebuilt, not patched. */
+/**
+ * Bumped only when the schema below changes shape; a file at any other version is rebuilt,
+ * not patched. Enforced in open(): the stamp is read before any DDL or write touches the
+ * file, and a database this build does not understand is moved aside, never written into.
+ */
 const SCHEMA_VERSION = 1;
 
 /**
@@ -113,41 +117,134 @@ export class SqliteSearchIndex extends SearchIndexBase {
     if (this.file !== ':memory:') await mkdir(dirname(this.file), { recursive: true });
     // Checked before the handle is created, because creating it creates the file.
     const existed = this.file !== ':memory:' && existsSync(this.file);
-    this.db = new DatabaseSync(this.file);
     try {
-      // Before anything that takes a lock, so every statement below inherits the wait.
-      this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-      // WAL rather than the rollback journal: a build commits every few hundred items, and
-      // WAL makes those commits cheap while still leaving a complete database behind a
-      // crash (an interrupted build rolls back to its last commit, never a torn file).
-      // Switching modes needs an exclusive lock that a second process can hold for as long
-      // as it is connected, past any busy timeout — but the mode is a property of the file,
-      // so that process has already set it and this one just inherits it. Failing to set a
-      // mode the database is in is not worth refusing to open over.
-      try {
-        this.db.exec('PRAGMA journal_mode = WAL');
-      } catch (err) {
-        if (isCorruptionError(err)) throw err;
-        this.opts.logger?.debug(`Could not set journal_mode=WAL on ${this.file}: ${String(err)}`);
-      }
-      // NORMAL fsyncs at checkpoints instead of on every commit. A power cut can then cost
-      // the last commits of a running build, which the next build replaces anyway, but it
-      // can never cost the database itself.
-      this.db.exec('PRAGMA synchronous = NORMAL');
+      // Read before write: the stamp of an existing file is examined before any DDL or
+      // connection pragma touches it. Doing it the other way around — createSchema first —
+      // re-stamped a database written by a newer build and then misread it, destroying the
+      // one piece of evidence the stamp exists to carry at exactly the moment it mattered.
+      if (existed) await this.sidelineIfIncompatible();
+      this.openHandle();
       this.createSchema();
       this.prepareStatements();
+      // `existed` deliberately still gates the import after a sideline: the legacy JSON
+      // was already consumed by whichever build wrote the incompatible database, and
+      // re-importing it here would resurrect stale data next to the moved-aside truth.
       if (!existed && this.migrateFrom) await this.importJson(this.migrateFrom);
       this.refreshCounts();
       this.loadMeta();
     } catch (e) {
-      if (!isCorruptionError(e)) throw e;
-      // The handle exists from the line above, so this object owns it and must release it
-      // before handing the failure on. Not housekeeping: the message names three files for
-      // the user to delete, and on Windows an open handle refuses the delete — a server
-      // holding them would block the recovery it is prescribing.
+      if (!isCorruptionError(e) && !(e instanceof SearchIndexCorruptError)) throw e;
+      // The handle may exist, so this object owns it and must release it before handing
+      // the failure on. Not housekeeping: the message names three files for the user to
+      // delete, and on Windows an open handle refuses the delete — a server holding them
+      // would block the recovery it is prescribing.
       await this.close().catch(() => {});
+      throw e instanceof SearchIndexCorruptError ? e : new SearchIndexCorruptError(this.file, e);
+    }
+  }
+
+  /** Create the writable handle and apply its connection pragmas, after the schema probe. */
+  private openHandle(): void {
+    this.db = new DatabaseSync(this.file);
+    // Before anything that takes a lock, so every statement below inherits the wait.
+    this.db.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    // WAL rather than the rollback journal: a build commits every few hundred items, and
+    // WAL makes those commits cheap while still leaving a complete database behind a
+    // crash (an interrupted build rolls back to its last commit, never a torn file).
+    // Switching modes needs an exclusive lock that a second process can hold for as long
+    // as it is connected, past any busy timeout — but the mode is a property of the file,
+    // so that process has already set it and this one just inherits it. Failing to set a
+    // mode the database is in is not worth refusing to open over.
+    try {
+      this.db.exec('PRAGMA journal_mode = WAL');
+    } catch (err) {
+      if (isCorruptionError(err)) throw err;
+      this.opts.logger?.debug(`Could not set journal_mode=WAL on ${this.file}: ${String(err)}`);
+    }
+    // NORMAL fsyncs at checkpoints instead of on every commit. A power cut can then cost
+    // the last commits of a running build, which the next build replaces anyway, but it
+    // can never cost the database itself.
+    this.db.exec('PRAGMA synchronous = NORMAL');
+  }
+
+  /**
+   * What an existing database says it is, read without writing anything.
+   *
+   * 'fresh' — no tables at all (a zero-byte file from a handle opened and dropped, which
+   * SQLite treats as a valid empty database): safe to create the schema in.
+   * 'unstamped' — tables exist but no readable integer stamp: an interrupted first
+   * creation, or a file some other program put at this path. Not ours to write into.
+   * Otherwise the integer the file is stamped with.
+   */
+  private storedSchemaVersion(db: Database): number | 'fresh' | 'unstamped' {
+    const tables = db
+      .prepare("SELECT count(*) AS n FROM sqlite_master WHERE type IN ('table', 'view')")
+      .get() as { n: number };
+    if (tables.n === 0) return 'fresh';
+    // Inspect rather than catching SELECT failures: a missing or foreign-shaped meta
+    // table means "unstamped", but a lock, I/O failure or interruption must propagate.
+    // Treating every non-corruption error as an absent stamp could move a healthy database
+    // merely because another legitimate Zoteus process held it for longer than the wait.
+    const metaColumns = db.prepare('PRAGMA table_info(meta)').all() as Array<{ name: string }>;
+    const names = new Set(metaColumns.map((column) => column.name));
+    if (!names.has('key') || !names.has('value')) return 'unstamped';
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'schemaVersion'").get() as
+      | { value: string }
+      | undefined;
+    const value = row?.value;
+    if (value === undefined) return 'unstamped';
+    const version = Number(value);
+    return Number.isInteger(version) ? version : 'unstamped';
+  }
+
+  /**
+   * Move a database this build must not write into out of the way, and open fresh.
+   *
+   * Sideline, never delete: the moved file is a complete database, evidence of the skew
+   * and readable by whichever build stamped it. Sidecars travel with it — a fresh database
+   * created beside an orphaned `-wal` is the one arrangement that can manufacture a
+   * corruption out of this protection, because SQLite would replay a log belonging to a
+   * file that no longer exists — and in sidecarsOf order, database last, so an interruption
+   * mid-move can only strand sidecars beside the moved file, never beside the fresh one.
+   * One notice, on the channel status already reports storage decisions on.
+   */
+  private async sidelineIfIncompatible(): Promise<void> {
+    // A genuinely read-only probe makes the ordering enforceable rather than documentary:
+    // in particular, journal_mode=WAL can rewrite bytes in the database header, so even
+    // the normal writable connection pragmas must wait until the stamp has been accepted.
+    const probe = new DatabaseSync(this.file, { readOnly: true });
+    let stored: number | 'fresh' | 'unstamped';
+    try {
+      probe.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      stored = this.storedSchemaVersion(probe);
+    } finally {
+      probe.close();
+    }
+    if (stored === 'fresh' || stored === SCHEMA_VERSION) return;
+    const dest = `${this.file}.incompatible-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    try {
+      for (const src of sidecarsOf(this.file)) {
+        const target = src === this.file ? dest : `${dest}${src.slice(this.file.length)}`;
+        await rename(src, target).catch((e: NodeJS.ErrnoException) => {
+          if (e?.code !== 'ENOENT') throw e;
+        });
+      }
+    } catch (e) {
+      // The file is readable — its stamp just said so — but it can neither be written into
+      // nor moved aside. That is exactly the state CorruptSearchIndex exists to hold: the
+      // server survives, search refuses naming this file, and an explicit
+      // `zotero_index action:"build"` may clear it, with the consent that implies (#21).
       throw new SearchIndexCorruptError(this.file, e);
     }
+    const said =
+      stored === 'unstamped'
+        ? 'carries tables but no schema stamp — an interrupted creation, or not a Zoteus index at all'
+        : `is stamped schema version ${stored}, which this build does not understand`;
+    this.storeNotice =
+      `The search index at ${this.file} ${said}. ` +
+      `It was moved aside to ${dest} (nothing was deleted) and a fresh index was created; ` +
+      `rebuild it with zotero_index action:"build".`;
+    this.opts.logger?.warn(this.storeNotice);
   }
 
   /**
