@@ -4,6 +4,16 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- **The Gemini API key no longer travels in the URL.** Gemini embedding requests carried
+  the key as a `?key=` query parameter; it now goes in the `x-goog-api-key` header, like
+  the OpenAI key's `Authorization` header. A URL is the part of a request that gets
+  logged — by proxies, by error causes, by anything that prints which endpoint failed —
+  and a header is not. Google accepts the header everywhere `?key=` works, so nothing
+  changes about which requests succeed.
+
 ## [1.9.0] - 2026-08-28
 
 ### Added
