@@ -48,3 +48,97 @@ describe('zotero_annotate action:"delete"', () => {
     expect(res.structuredContent?.trashed).toEqual(['ANN1']);
   });
 });
+
+// One page of Helvetica, so the anchoring path runs against real pdfjs geometry.
+const MINIMAL_PDF = new TextEncoder().encode(`%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj
+4 0 obj << /Length 41 >> stream
+BT /F1 24 Tf 20 100 Td (Hello PDF) Tj ET
+endstream endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+trailer << /Root 1 0 R >>
+%%EOF`);
+
+function anchoringCtx(overrides: any = {}) {
+  const writeItems = vi.fn(async (items: any[]) => ({
+    successful: items.map((_, i) => ({ index: i, key: `ANN${i}`, version: 1 })),
+    unchanged: [],
+    failed: [],
+    newLibraryVersion: 1,
+  }));
+  const ctx: any = {
+    capabilities: { cloud: null, localApi: true },
+    config: { local: 'auto' },
+    localWrites: { writeItems },
+    local: {
+      downloadFileBytes: vi.fn(async () => MINIMAL_PDF),
+      getItemChildren: vi.fn(async () => ({ data: [] })),
+    },
+    router: {
+      getItem: vi.fn(async () => ({ data: { itemType: 'attachment', key: 'ATT1', contentType: 'application/pdf' } })),
+      defaultLibrary: () => ({ type: 'user', id: 1 }),
+    },
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    ...overrides,
+  };
+  return { ctx, writeItems };
+}
+
+describe('zotero_annotate anchors a highlight from its text', () => {
+  it('computes page rects for a passage given without a position', async () => {
+    const { ctx, writeItems } = anchoringCtx();
+    const res = await annotate.handler(
+      { parent: 'ATT1', annotations: [{ type: 'highlight', text: 'Hello PDF', comment: 'from text alone' }] },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    const [written] = writeItems.mock.calls[0]![0] as any[];
+    const pos = JSON.parse(written.annotationPosition);
+    expect(pos.pageIndex).toBe(0);
+    expect(pos.rects).toHaveLength(1);
+    // Text is drawn at x=20 on a 200pt page: the rect must sit there, not at a made-up origin.
+    expect(pos.rects[0][0]).toBeCloseTo(20, 0);
+    expect(pos.rects[0][2]).toBeGreaterThan(pos.rects[0][0]);
+    expect(written.annotationText).toBe('Hello PDF');
+    // The sort index must come from the located offset and real page height, not from zeros.
+    expect(written.annotationSortIndex).toMatch(/^00000\|\d{6}\|\d{5}$/);
+    expect(res.structuredContent?.anchoredFromText).toBe(1);
+  });
+
+  it('refuses to guess when the passage is not in the PDF, and writes nothing', async () => {
+    const { ctx, writeItems } = anchoringCtx();
+    const res = await annotate.handler(
+      { parent: 'ATT1', annotations: [{ type: 'highlight', text: 'a passage this PDF does not contain' }] },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('passage not found');
+    expect(writeItems).not.toHaveBeenCalled();
+  });
+
+  it('leaves an explicitly positioned highlight alone and never fetches the PDF', async () => {
+    const { ctx, writeItems } = anchoringCtx();
+    const res = await annotate.handler(
+      { parent: 'ATT1', annotations: [{ type: 'highlight', text: 'Hello PDF', position: [2, [1, 2, 3, 4]] }] },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(ctx.local.downloadFileBytes).not.toHaveBeenCalled();
+    const [written] = writeItems.mock.calls[0]![0] as any[];
+    expect(JSON.parse(written.annotationPosition)).toEqual({ pageIndex: 2, rects: [[1, 2, 3, 4]] });
+  });
+
+  it('explains itself when the PDF cannot be read at all', async () => {
+    const { ctx, writeItems } = anchoringCtx();
+    ctx.local.downloadFileBytes = vi.fn(async () => { throw new Error('no stored copy'); });
+    const res = await annotate.handler(
+      { parent: 'ATT1', annotations: [{ type: 'highlight', text: 'Hello PDF' }] },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('the PDF could not be read');
+    expect(writeItems).not.toHaveBeenCalled();
+  });
+});

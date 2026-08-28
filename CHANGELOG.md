@@ -6,6 +6,43 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **Highlights can be made from the passage alone, with no page coordinates.** Zotero anchors
+  a highlight by page rects, and nothing that reads extracted text can know them: the text
+  carries content and page numbers, not positions. So a client that had read a PDF and
+  wanted to mark a claim in it had one honest move left, a sticky note pinned to the corner
+  of the page, because inventing rects draws a box over the wrong lines. `zotero_annotate`
+  now takes a highlight or underline given as `text` with no `position` and finds that
+  passage in the PDF itself, computing the rects Zotero stores. The comparison ignores
+  everything two renderings of the same passage disagree about: line and column breaks,
+  words hyphenated across a line, spacing, case, ligatures, smart quotes, and accents a PDF
+  sets beside a letter rather than over it, so a passage quoted back from
+  `zotero_get_fulltext` matches the page it came from. The result is one rect per visual
+  line, superscripts widening their line rather than fragmenting it, which is the shape the
+  reader itself produces: verified against 465 highlights drawn by hand in the Zotero
+  reader, the reconstructed rects sit a median 1pt from the reader's own, and the vertical
+  extent is exact wherever the font carries metrics (`[baseline + descent × size, baseline
+  + ascent × size]`, both read from the font). Passages quoted from Zoteus's own extracted
+  text anchored at 290/290 across 25 papers.
+
+  Nothing is written on a doubtful match. A passage that is not in the document, and a
+  passage that occurs more than once, are reported as themselves: the ambiguous case lists
+  every occurrence with its page and surrounding words, and a new per-annotation
+  `occurrence` (1-based, reading order) or the existing `page` picks between them. The
+  located offset and page height now feed `annotationSortIndex`, so an auto-anchored
+  highlight sorts into the sidebar in reading order like any other. An explicit `position`
+  still takes precedence and skips the lookup entirely, so nothing about the existing
+  calling convention changes.
+
+  Reading the PDF is what the feature costs. A Zoteus running beside Zotero reads the file
+  from the desktop app's own storage through the local API's `/file` endpoint (new
+  `LocalApiClient.downloadFileBytes`, which follows the `file://` redirect the app answers
+  with), so unsynced attachments and libraries with no storage quota work with no cloud key
+  at all; a hosted Zoteus downloads from Zotero storage as it already does for full text.
+  Where neither can reach the bytes, where the file exceeds the 20 MB parsing cap that
+  keeps a small host from being OOM-killed, or where the optional `pdfjs-dist` parser is
+  absent, the reply says which and suggests an explicit `position` or a page-anchored note.
+
 ### Fixed
 - **A search index written by a newer Zoteus is moved aside, never written into** (#25,
   thanks @MinhHaDuong). `createSchema()` stamped `schemaVersion` with `INSERT OR REPLACE`

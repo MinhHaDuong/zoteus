@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { RateLimitedFetcher } from './http.js';
 import type { ItemQuery, LibraryRef, ListResult, VersionsResult } from './web-client.js';
 
@@ -184,6 +185,39 @@ export class LocalApiClient {
       if (e instanceof LocalApiError && e.status === 404) return null;
       throw e;
     }
+  }
+
+  /**
+   * The attachment's file bytes, read from the desktop app's own storage.
+   *
+   * `/items/<key>/file` does not serve the file: it answers 302 with a `file://` Location
+   * pointing into the Zotero data directory, so the bytes are read off disk rather than
+   * over HTTP (fetch refuses a `file://` redirect, hence `redirect: 'manual'`). Only a
+   * Zoteus running on the user's own machine can take this path, but where it can it
+   * reaches PDFs the cloud has no copy of: a local-only library, or one whose storage
+   * quota was never bought. A hosted Zoteus has no route to that loopback and falls back
+   * to Web API file downloads.
+   */
+  async downloadFileBytes(key: string, lib?: LibraryRef): Promise<Uint8Array> {
+    const url = `${this.base}${localLibraryPrefix(lib)}/items/${key}/file`;
+    const res = await this.fetcher.fetch(
+      url,
+      { method: 'GET', headers: this.headers(), redirect: 'manual' },
+      { maxRetries: 0 },
+    );
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      if (!location) throw new LocalApiError(res.status, `Local API redirect without a location for ${key}`);
+      if (location.startsWith('file://')) {
+        const { readFile } = await import('node:fs/promises');
+        return new Uint8Array(await readFile(fileURLToPath(location)));
+      }
+      const followed = await this.fetcher.fetch(location, { method: 'GET' }, { maxRetries: 0 });
+      if (!followed.ok) throw new LocalApiError(followed.status, `Local API file fetch ${followed.status} for ${key}`);
+      return new Uint8Array(await followed.arrayBuffer());
+    }
+    if (!res.ok) throw new LocalApiError(res.status, `Local API file ${res.status} for ${key}`);
+    return new Uint8Array(await res.arrayBuffer());
   }
 
   /**

@@ -70,7 +70,7 @@ Trash (reversible) vs permanent delete:
 { "item_keys": ["KEY1"], "confirm": true }
 ```
 
-Highlight a passage in an item's PDF:
+Highlight a passage in an item's PDF, quoting the passage and nothing else:
 
 ```jsonc
 // zotero_annotate
@@ -78,12 +78,32 @@ Highlight a passage in an item's PDF:
   "type": "highlight",
   "text": "Attention mechanisms have become an integral part of sequence models",
   "comment": "core claim",
-  "color": "#ffd400",
+  "color": "#ffd400"
+}] }
+```
+
+`parent` is a regular item key (the PDF child is resolved for you) or an attachment key directly.
+
+**You do not need page coordinates.** Zotero anchors a highlight by page rects, which nothing that reads extracted text can know; Zoteus finds the passage in the PDF itself and computes them, so the same words you can quote are the words you can highlight. The rects follow the text across line breaks, column breaks and hyphenation, one per line, exactly as the reader draws them by hand. `annotationSortIndex` is derived from where the passage sits, so the sidebar order matches reading order.
+
+Quote the passage as `zotero_get_fulltext` returns it. Line breaks, hyphenation, spacing, case, ligatures and smart quotes are all ignored in the comparison; changed wording is not. Two answers other than success are possible, and both write nothing rather than guess:
+
+- **Not found**: the wording does not appear in the PDF (or not on the `page` given).
+- **Ambiguous**: the passage occurs more than once. The reply lists each occurrence with its page and surrounding words; re-send with `page`, or with `occurrence` (1-based, reading order), to say which one.
+
+Reading the PDF needs the file: a Zoteus running beside Zotero reads it from the desktop app's own storage, and a hosted one downloads it from Zotero storage, so a hosted Zoteus cannot anchor an attachment that has never synced.
+
+Passing `position` yourself still works and skips all of the above: it is Zotero's stored form, `pageIndex` 0-based and `rects` as `[x1, y1, x2, y2]` in **native PDF points with a bottom-left origin** (`char_offset` and `page_height` refine the sort index, `sort_index` sets it outright).
+
+```jsonc
+// zotero_annotate, explicit placement
+{ "action": "add", "parent": "ABCD1234", "annotations": [{
+  "type": "highlight", "text": "…",
   "position": { "pageIndex": 0, "rects": [[71.9, 520.4, 523.2, 534.8]] }
 }] }
 ```
 
-`parent` is a regular item key (the PDF child is resolved for you) or an attachment key directly. `position` is Zotero's stored form: `pageIndex` is 0-based, and `rects` are `[x1, y1, x2, y2]` in **native PDF points with a bottom-left origin** — the coordinates a PDF text-extraction pass gives you. Without a `position`, a highlight/underline is rejected (it could not render in place); `annotationSortIndex` is computed from the position so the sidebar order matches the reader (pass `char_offset` and `page_height` to refine it, or `sort_index` to set it outright). `action:"delete"` trashes annotations by key:
+`action:"delete"` trashes annotations by key:
 
 ```jsonc
 // zotero_annotate

@@ -1,6 +1,8 @@
 import { z } from 'zod';
-import type { ToolDefinition } from '../registry/registry.js';
+import type { ToolContext, ToolDefinition } from '../registry/registry.js';
 import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
+import { locatePassages, type PassageAnchor } from '../features/fulltext/pdf-locate.js';
+import { DEFAULT_PRECISE_MAX_BYTES } from '../features/fulltext/pdf-pages.js';
 
 /**
  * Normalize a caller-supplied position into Zotero's stored form:
@@ -74,7 +76,9 @@ const annotationSchema = z.object({
   page: z.number().int().optional().describe('0-based PDF page index (annotationPageLabel uses page+1 when unset).'),
   page_label: z.string().optional().describe('Explicit page label (overrides page+1).'),
   position: z.union([z.string(), z.any()]).optional()
-    .describe('Zotero position: {"pageIndex": N, "rects": [[x1,y1,x2,y2],...]} (points, bottom-left origin), its JSON string, or shorthand [N, [x1,y1,x2,y2]]. Required for highlights/underlines to render in place.'),
+    .describe('Zotero position: {"pageIndex": N, "rects": [[x1,y1,x2,y2],...]} (points, bottom-left origin), its JSON string, or shorthand [N, [x1,y1,x2,y2]]. Optional: when omitted, the passage in `text` is located in the PDF and its coordinates are computed for you.'),
+  occurrence: z.number().int().min(1).optional()
+    .describe('Which occurrence of `text` to anchor when the passage appears more than once (1-based, in reading order). Only needed when a first attempt reports an ambiguous passage.'),
   sort_index: z.string().optional().describe('Explicit annotationSortIndex; computed from position when omitted.'),
   char_offset: z.number().int().optional().describe('Reading-order character offset of the passage start on the page (refines sort_index).'),
   page_height: z.number().optional().describe('Page height in points (refines sort_index, e.g. 841.89 for A4).'),
@@ -85,7 +89,7 @@ const annotateTool: ToolDefinition = {
   name: 'zotero_annotate',
   title: 'Annotate a PDF (highlights, notes)',
   description:
-    'Add or delete Zotero PDF annotations (highlights, underlines, notes) — the same objects you create in the Zotero PDF reader. `action:"add"` needs `parent` (a regular item key OR a PDF attachment key) and `annotations`: each with `type` (highlight|note|underline, default highlight), `text` (the exact highlighted passage), optional `comment`, `color`, `page` (0-based page index), and `position` ({"pageIndex":N,"rects":[[x1,y1,x2,y2],...]} in PDF points with bottom-left origin — without a position a highlight cannot render in place). `action:"delete"` trashes the annotations in `annotation_keys`. Writes go to the running Zotero desktop app for your personal library (via its connector protocol, or its local-API writes where available), otherwise to the cloud Web API.',
+    'Add or delete Zotero PDF annotations (highlights, underlines, notes), the same objects you create in the Zotero PDF reader. `action:"add"` needs `parent` (a regular item key OR a PDF attachment key) and `annotations`: each with `type` (highlight|note|underline, default highlight), `text` (the exact passage to highlight), optional `comment`, `color`, `page` (0-based page index). **You do not need page coordinates**: give the passage in `text` and it is located in the PDF and anchored to the exact lines it occupies, so quoting a passage is enough to highlight it. Pass `page` to disambiguate a passage that repeats, or `occurrence` to pick among repeats; pass `position` ({"pageIndex":N,"rects":[[x1,y1,x2,y2],...]} in PDF points, bottom-left origin) only to place a highlight yourself. `action:"delete"` trashes the annotations in `annotation_keys`. Writes go to the running Zotero desktop app for your personal library (via its connector protocol, or its local-API writes where available), otherwise to the cloud Web API.',
   inputSchema: {
     action: z.enum(['add', 'delete']).optional().describe('Default "add".'),
     parent: z.string().optional().describe('Item key or PDF attachment key to annotate.'),
@@ -176,18 +180,28 @@ const annotateTool: ToolDefinition = {
     }
     const targetAttachment: string = attachmentKey;
 
+    // Anchor every passage-only highlight to the lines it occupies in the PDF, so a caller
+    // that can quote a passage never has to supply coordinates it has no way to know.
+    const problems: string[] = [];
+    const anchored = await anchorPassages(ctx, args, targetAttachment, anns, problems);
+
     // Build annotation items in Zotero's data model.
     const items: Record<string, unknown>[] = [];
-    const problems: string[] = [];
     anns.forEach((a: any, i: number) => {
       const type = a.type ?? 'highlight';
       if ((type === 'highlight' || type === 'underline') && !a.text) {
         problems.push(`annotations[${i}]: ${type} requires \`text\` (the exact passage).`);
         return;
       }
-      const pos = normalizePosition(a.position, a.page);
+      // A caller-supplied position always wins; the located passage fills in for its absence.
+      const given = normalizePosition(a.position, a.page);
+      const found = anchored.get(i);
+      const pos = given?.rects?.length ? given : found ? { pageIndex: found.pageIndex, rects: found.rects } : given;
       if ((type === 'highlight' || type === 'underline') && !pos?.rects?.length) {
-        problems.push(`annotations[${i}]: ${type} needs \`position\` ({"pageIndex":N,"rects":[[x1,y1,x2,y2],...]}) to render in place.`);
+        // anchorPassages has already explained why, in the terms the caller can act on.
+        if (!problems.some((p) => p.startsWith(`annotations[${i}]:`))) {
+          problems.push(`annotations[${i}]: ${type} could not be placed: the passage was not found in the PDF, and no \`position\` was given.`);
+        }
         return;
       }
       const pageIndex = pos?.pageIndex ?? a.page ?? 0;
@@ -197,7 +211,11 @@ const annotateTool: ToolDefinition = {
         annotationType: type,
         annotationColor: a.color ?? (type === 'note' ? '#26a69a' : '#ffd400'),
         annotationSortIndex:
-          a.sort_index ?? buildSortIndex(pageIndex, pos?.rects ?? [], { offset: a.char_offset, pageHeight: a.page_height }),
+          a.sort_index ??
+          buildSortIndex(pageIndex, pos?.rects ?? [], {
+            offset: a.char_offset ?? anchored.get(i)?.charOffset,
+            pageHeight: a.page_height ?? anchored.get(i)?.pageHeight,
+          }),
         annotationPosition: JSON.stringify(pos ?? { pageIndex, rects: [] }),
         tags: (a.tags ?? []).map((t: string) => ({ tag: t })),
       };
@@ -225,9 +243,10 @@ const annotateTool: ToolDefinition = {
           {
             target: 'local',
             attachment: targetAttachment,
+            anchoredFromText: anchored.size,
             created: result.successful.map((s, i) => ({ key: s.key, type: items[i]?.annotationType, text: items[i]?.annotationText ?? '', comment: items[i]?.annotationComment ?? '' })),
           },
-          `Added ${result.successful.length} annotation(s) to PDF ${targetAttachment} via the Zotero desktop app.`,
+          `Added ${result.successful.length} annotation(s) to PDF ${targetAttachment} via the Zotero desktop app.` + anchorNote(anchored.size),
         );
       } catch (e) {
         if (!isLocalWritesUnavailable(e)) throw e;
@@ -243,12 +262,13 @@ const annotateTool: ToolDefinition = {
           target: 'desktop',
           sessionID,
           attachment: targetAttachment,
+          anchoredFromText: anchored.size,
           created,
           note: created.length < items.length
             ? 'Some annotations could not be matched back yet; they may still appear in Zotero (check the PDF sidebar).'
             : undefined,
         },
-        `Added ${created.length}/${items.length} annotation(s) to PDF ${targetAttachment} via the running Zotero desktop app.`,
+        `Added ${created.length}/${items.length} annotation(s) to PDF ${targetAttachment} via the running Zotero desktop app.` + anchorNote(anchored.size),
       );
     }
     const lib = requireCloudLibrary(ctx, args);
@@ -257,13 +277,146 @@ const annotateTool: ToolDefinition = {
       {
         target: 'cloud',
         attachment: targetAttachment,
+        anchoredFromText: anchored.size,
         created: result.successful.map((s, i) => ({ key: s.key, type: items[i]?.annotationType })),
         failed: result.failed,
       },
-      `Added ${result.successful.length} annotation(s) to PDF ${targetAttachment} via the cloud Web API.`,
+      `Added ${result.successful.length} annotation(s) to PDF ${targetAttachment} via the cloud Web API.` + anchorNote(anchored.size),
     );
   },
 };
+
+/**
+ * Resolve the on-page geometry of every highlight/underline given as a passage rather than
+ * as coordinates.
+ *
+ * This is what makes a highlight reachable from text alone. Zotero anchors a highlight by
+ * page rects, which a caller reading extracted text cannot know; inventing them draws a
+ * box over the wrong lines, so the honest fallback used to be a page-anchored note. Here
+ * the passage is found in the PDF itself and its real rects computed, and where it cannot
+ * be found nothing is written and the reason says which of the two it was: the passage is
+ * not in the document, or it is there more than once.
+ *
+ * Annotations that already carry a `position`, and notes (which are placed by page, not by
+ * passage), are left alone, and when nothing needs anchoring the PDF is never fetched.
+ */
+async function anchorPassages(
+  ctx: ToolContext,
+  args: any,
+  attachmentKey: string,
+  anns: any[],
+  problems: string[],
+): Promise<Map<number, PassageAnchor>> {
+  const resolved = new Map<number, PassageAnchor>();
+  const pending: Array<{ index: number; text: string; pageIndex?: number }> = [];
+  anns.forEach((a, i) => {
+    const type = a.type ?? 'highlight';
+    if (type !== 'highlight' && type !== 'underline') return;
+    if (!a.text) return;
+    if (normalizePosition(a.position, a.page)?.rects?.length) return;
+    pending.push({ index: i, text: a.text, pageIndex: typeof a.page === 'number' ? a.page : undefined });
+  });
+  if (!pending.length) return resolved;
+
+  const bytes = await loadPdfBytes(ctx, args, attachmentKey);
+  if (!bytes) {
+    for (const p of pending) {
+      problems.push(
+        `annotations[${p.index}]: the PDF could not be read, so the passage cannot be placed. ` +
+          `Zoteus reads it from the running Zotero desktop app, or downloads it from Zotero storage when the file has synced. ` +
+          `Neither worked here (a linked file with no stored copy, or an unsynced attachment on a hosted Zoteus). ` +
+          `Pass an explicit \`position\` instead, or use type:"note" with \`page\`.`,
+      );
+    }
+    return resolved;
+  }
+
+  const hits = await locatePassages(
+    bytes,
+    pending.map((p) => ({ text: p.text, pageIndex: p.pageIndex })),
+  );
+  if (!hits) {
+    const maxMb = Math.round(DEFAULT_PRECISE_MAX_BYTES / (1024 * 1024));
+    for (const p of pending) {
+      problems.push(
+        `annotations[${p.index}]: the PDF could not be parsed for text positions ` +
+          `(a scanned/corrupt PDF, a file over the ${maxMb} MB parsing limit, or the optional pdfjs-dist parser is missing). ` +
+          `Pass an explicit \`position\`, or use type:"note" with \`page\`.`,
+      );
+    }
+    return resolved;
+  }
+
+  pending.forEach((p, n) => {
+    const found = hits[n] ?? [];
+    const where = p.pageIndex != null ? ` on page ${p.pageIndex + 1} (page index ${p.pageIndex})` : '';
+    if (!found.length) {
+      problems.push(
+        `annotations[${p.index}]: passage not found in the PDF${where}: ${JSON.stringify(p.text.slice(0, 60))}. ` +
+          `Quote it exactly as zotero_get_fulltext returns it (line breaks, hyphenation and spacing are ignored, but altered wording is not)` +
+          (p.pageIndex != null ? ', or drop `page` to search the whole document.' : '.'),
+      );
+      return;
+    }
+    const pick = anns[p.index]?.occurrence;
+    if (typeof pick === 'number') {
+      const chosen = found[pick - 1];
+      if (!chosen) {
+        problems.push(`annotations[${p.index}]: occurrence ${pick} requested but the passage occurs ${found.length} time(s).`);
+        return;
+      }
+      resolved.set(p.index, chosen);
+      return;
+    }
+    if (found.length > 1) {
+      // Placing the wrong one of several identical passages is the failure this whole path
+      // exists to avoid, so ask rather than guess.
+      const list = found
+        .map((h, k) => `  ${k + 1}. page ${h.pageIndex + 1}: …${h.context.slice(0, 90)}…`)
+        .join('\n');
+      problems.push(
+        `annotations[${p.index}]: the passage occurs ${found.length} times${where ? where : ''}; ` +
+          `re-send it with \`occurrence\` (or a \`page\`) to say which:\n${list}`,
+      );
+      return;
+    }
+    resolved.set(p.index, found[0]!);
+  });
+  return resolved;
+}
+
+/**
+ * The attachment's PDF bytes, from whichever side of Zoteus can reach them: the desktop
+ * app reads them off its own disk (so unsynced and storage-quota-less libraries work),
+ * a hosted Zoteus downloads them from Zotero storage. Returns null when neither can.
+ */
+async function loadPdfBytes(ctx: ToolContext, args: any, attachmentKey: string): Promise<Uint8Array | null> {
+  if (!args.library_id && ctx.local && (await ensureLocalApi(ctx))) {
+    try {
+      const bytes = await ctx.local.downloadFileBytes(attachmentKey);
+      if (bytes.byteLength) return bytes;
+    } catch (e) {
+      ctx.logger.debug(`Local file read failed for ${attachmentKey} (${e instanceof Error ? e.message : e}); trying the cloud.`);
+    }
+  }
+  if (!ctx.capabilities.cloud) return null;
+  try {
+    const lib = args.library_id
+      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
+      : ctx.router.defaultLibrary();
+    const { bytes } = await ctx.web.downloadFileBytes(lib, attachmentKey);
+    return bytes.byteLength ? bytes : null;
+  } catch (e) {
+    ctx.logger.debug(`Cloud file download failed for ${attachmentKey}: ${e instanceof Error ? e.message : e}`);
+    return null;
+  }
+}
+
+/** Says so when highlights were placed from their text rather than from caller coordinates. */
+function anchorNote(count: number): string {
+  if (!count) return '';
+  return ` ${count} highlight(s) were positioned by locating their text in the PDF.`;
+}
 
 /** Rank attachment children: stored PDFs first, then linked PDFs, then anything else. */
 function scorePdf(att: any): number {
