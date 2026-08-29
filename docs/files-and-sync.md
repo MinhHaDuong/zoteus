@@ -44,3 +44,5 @@ On Zotero 9 and earlier (a read-only local API) the desktop attempt fails before
 
 ## `zotero_annotate`
 Add or delete Zotero PDF annotations (highlights, underlines, notes), the same objects the PDF reader creates, so they appear in Zotero's reader sidebar and export with the item. `parent` may be a regular item key (the PDF child is resolved for you) or an attachment key. Highlights need only `text`, the passage itself: Zoteus locates it in the PDF and computes the page rects Zotero anchors a highlight by, following it across line and column breaks. An explicit `position` (`{"pageIndex":N,"rects":[[x1,y1,x2,y2],…]}` in native PDF points, bottom-left origin) overrides that. `annotationSortIndex` is derived from wherever the passage lands. `action:"delete"` trashes annotations by key. Routes to the desktop app for the personal library, else the cloud Web API. Details and examples in [`writing.md`](./writing.md).
+
+> Anchoring needs the PDF bytes, which come from the same three sources `zotero_get_fulltext` uses: the running desktop app, the local Zotero storage folder, then a cloud download. See [`grounding.md`](./grounding.md#where-the-file-bytes-come-from).

@@ -43,6 +43,77 @@ export async function extractPdfPages(
   }
 }
 
+/** One heading in a PDF's table of contents, flattened out of the nested outline tree. */
+export interface OutlineEntry {
+  title: string;
+  /** 1-based page the heading points at, when its destination could be resolved. */
+  page?: number;
+  /** Nesting depth: 0 for a top-level heading, 1 for its children, and so on. */
+  level: number;
+}
+
+/**
+ * The PDF's table of contents, flattened depth-first with each heading's page.
+ *
+ * A document's own outline is the cheapest possible map of it: the caller learns what is
+ * in the file and which pages to ask for without reading a single page of body text, which
+ * is what makes reading a 400-page book by page range practical at all.
+ *
+ * A heading's destination is either an explicit array (whose first element is a reference
+ * to the page object) or the name of one, resolved through the document's named
+ * destinations. Either can be missing or dangling, and one broken heading must not cost
+ * the whole outline, so a heading whose page cannot be resolved is returned without one.
+ *
+ * Returns `[]` for a PDF that simply has no outline, and null when the document could not
+ * be read at all (`pdfjs-dist` absent, over `maxBytes`, corrupt), mirroring
+ * `extractPdfPages`. Never throws.
+ */
+export async function extractPdfOutline(
+  bytes: Uint8Array,
+  opts: { maxBytes?: number } = {},
+): Promise<OutlineEntry[] | null> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_PRECISE_MAX_BYTES;
+  if (bytes.byteLength > maxBytes) return null;
+  let pdfjs: any;
+  try {
+    pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs' as any);
+  } catch {
+    return null; // dependency not installed (degrade)
+  }
+  try {
+    const data = bytes.slice();
+    const doc = await pdfjs.getDocument({ data, useSystemFonts: true, isEvalSupported: false }).promise;
+    const outline = await doc.getOutline();
+    if (!Array.isArray(outline) || !outline.length) return [];
+    const entries: OutlineEntry[] = [];
+    const walk = async (nodes: any[], level: number): Promise<void> => {
+      for (const node of nodes) {
+        const title = typeof node?.title === 'string' ? node.title.replace(/\s+/g, ' ').trim() : '';
+        if (title) entries.push({ title, page: await destinationPage(doc, node?.dest), level });
+        if (Array.isArray(node?.items) && node.items.length) await walk(node.items, level + 1);
+      }
+    };
+    await walk(outline, 0);
+    return entries;
+  } catch {
+    return null; // corrupt PDF / parse failure (degrade)
+  }
+}
+
+/** 1-based page a PDF outline destination points at, or undefined when it cannot be resolved. */
+async function destinationPage(doc: any, dest: unknown): Promise<number | undefined> {
+  try {
+    const resolved = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+    const target = Array.isArray(resolved) ? resolved[0] : undefined;
+    // An explicit destination names the page object; a remote/degenerate one names its index.
+    if (typeof target === 'number') return target + 1;
+    if (target && typeof target === 'object') return (await doc.getPageIndex(target)) + 1;
+  } catch {
+    // A dangling destination costs that heading its page, not the whole outline.
+  }
+  return undefined;
+}
+
 /** Join extracted page texts into one document text (pages separated by a blank line). */
 export function pdfPagesToText(pages: string[]): string {
   return pages.join('\n\n');

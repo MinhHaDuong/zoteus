@@ -4,13 +4,13 @@ Zoteus adds tools for research grounding: retrieve PDF passages with page locato
 
 ## `zotero_get_fulltext` — retrieve PDF text for grounding
 
-Retrieve the full text of a PDF attachment for use as grounding context. Pass either:
-- A **parent item key** — the best PDF child attachment is resolved automatically (prefers `application/pdf` content type; falls back to the first attachment if no PDF is found).
+Retrieve the full text of a PDF or EPUB attachment for use as grounding context. Pass either:
+- A **parent item key**, whose best child attachment is resolved automatically (a PDF first, then an EPUB, then whatever else is attached).
 - An **attachment key** directly — returned as-is.
 
 ### Retrieval modes
 
-One of three modes is selected based on the arguments:
+One of four modes is selected based on the arguments:
 
 **`query` mode** (pass `query`): Returns the top-k passages most relevant to the query, ranked by an ephemeral BM25 index (fused with vector re-ranking when an embedder is configured). Each passage carries:
 - `charStart` / `charEnd` — inclusive/exclusive character offsets in the source text.
@@ -19,18 +19,20 @@ One of three modes is selected based on the arguments:
 - `score` — BM25 score.
 - `max_passages` caps the number of passages returned (default 5, max 20).
 
-**`page_range` mode** (pass `page_range`, e.g. `"3-7"`): Returns the text for the specified page span (1-based, inclusive). Uses exact page text when `precise_pages` is available; otherwise approximates the character range proportionally.
+**`page_range` mode** (pass `page_range`, e.g. `"3-7"`): Returns the text for the specified page span (1-based, inclusive). The PDF is re-extracted so the span is the real one, which is what makes reading a long document page by page practical; asking for "page 5" and getting a proportional slice of the character stream answers a different question. Pass `precise_pages: false` to opt back out and take the proportional slice of the indexed text (no file read at all). When exact extraction is not possible the tool degrades to the proportional slice with a notice, exactly as `precise_pages` does.
 
-**Document mode** (neither argument): Returns a truncated head of the document with a notice prompting use of `query` or `page_range` for targeted retrieval.
+**`outline` mode** (pass `outline: true`): Returns the PDF's own table of contents instead of text. See [PDF outline](#pdf-outline-table-of-contents) below.
 
-In all modes, `max_chars` caps total returned text (default 12000, max 100000). A single passage is never split, so one passage may slightly exceed the cap.
+**Document mode** (no argument): Returns a truncated head of the document with a notice prompting use of `query` or `page_range` for targeted retrieval.
+
+In all text modes, `max_chars` caps total returned text (default 12000, max 100000). A single passage is never split, so one passage may slightly exceed the cap.
 
 ### Page locators
 
 By default, page numbers are **approximate** (`pageApprox`): a proportional estimate derived from the character offset divided by the total character count, clamped to 1-based page numbers. This requires only the Zotero cloud full-text index.
 
-Pass `precise_pages: true` to re-extract the PDF for **exact** page numbers. This:
-1. Downloads the attachment bytes from the cloud API.
+Pass `precise_pages: true` to re-extract the PDF for **exact** page numbers (`page_range` already does this without the flag). This:
+1. Reads the attachment bytes, from the running Zotero desktop app, the local Zotero storage folder, or the cloud API, in that order (see [Where the file bytes come from](#where-the-file-bytes-come-from)).
 2. Lazily imports the optional `pdfjs-dist` dependency (declared as an `optionalDependency`).
 3. Extracts per-page text and locates each passage.
 
@@ -41,20 +43,61 @@ Install the optional dependency for exact pages:
 npm i pdfjs-dist
 ```
 
-### Unindexed PDFs: on-the-fly extraction fallback
+### PDF outline (table of contents)
 
-`zotero_get_fulltext` normally serves text from Zotero's full-text index. When an attachment has **not been indexed yet** (no stored full text), the tool falls back to downloading the PDF and extracting its text directly with the same `pdfjs-dist` parser:
+Pass `outline: true` to get the PDF's own bookmark tree instead of its text:
 
-- The response is served exactly like indexed text — `query`, `page_range`, and document modes all work — with **exact** page locators (`pageSource: "exact"`) and `fulltextSource: "pdf"` so callers know the text was extracted on the fly.
+```jsonc
+{
+  "mode": "outline",
+  "fileSource": "local-api",
+  "outline": [
+    { "title": "Introduction", "page": 1, "level": 0 },
+    { "title": "Related work", "page": 3, "level": 0 },
+    { "title": "Anchoring", "page": 4, "level": 1 }
+  ],
+  "entries": 3
+}
+```
+
+- `level` is the nesting depth (0 for a top-level heading, 1 for its children).
+- `page` is the 1-based page the heading points at. A heading whose destination cannot be resolved is still listed, without a page.
+- The outline is read from the file itself and never touches Zotero's full-text index, so it works for an attachment added a minute ago.
+- A PDF with no bookmarks returns `outline: []` and a notice, not an error. An EPUB is refused with a pointer back to plain-text mode.
+- At most 500 headings are returned (`truncated: true` says when a longer tree was cut).
+
+Reading the outline first and then asking for the pages it names is the cheap way to work through a long document: two small calls instead of one call that returns a book.
+
+### Unindexed attachments: local extraction fallback
+
+`zotero_get_fulltext` normally serves text from Zotero's full-text index. When an attachment has **not been indexed yet** (no stored full text), the tool reads the file itself and extracts the text locally:
+
+- **PDF** via the same `pdfjs-dist` parser used for exact pages, with `fulltextSource: "pdf"` and **exact** page locators (`pageSource: "exact"`).
+- **EPUB** via a dependency-free reader (an EPUB is a zip of XHTML: Zoteus unpacks it with `node:zlib`, follows the package document's spine so the chapters come back in reading order, and strips the markup), with `fulltextSource: "epub"`. An EPUB reflows and has no fixed pages, so `page_range` does not apply to one and says so rather than inventing a span.
+- The response is served exactly like indexed text: `query`, `page_range` and document modes all work, and `fulltextSource` plus `fileSource` tell a caller that this text was extracted locally rather than read out of Zotero's index.
 - The fallback is on by default; pass `fallback: false` to opt out (the tool then returns an actionable "not indexed" error).
-- Same OOM guard as `precise_pages`: attachments larger than 20 MB are not parsed; the error tells you to open the PDF once in Zotero to index it.
+- Same OOM guard as `precise_pages`: attachments larger than 20 MB are not parsed; the error tells you to open the file once in Zotero to index it.
 - Scanned/image-only PDFs yield no text: the error explains that extraction found nothing.
 
-This covers libraries where many PDFs were never indexed — grounding works without waiting for Zotero to re-process the library.
+This is what makes "summarise the paper I just added" work. It covers libraries where many PDFs were never indexed, and grounding no longer waits for Zotero to re-process anything.
+
+### Where the file bytes come from
+
+Everything that reads the attachment file itself (the fallback above, `precise_pages`, `page_range`, `outline`, and `zotero_annotate`'s passage anchoring) tries three sources in order, and reports the one that answered as `fileSource`:
+
+| `fileSource` | Source | Reaches |
+|---|---|---|
+| `local-api` | The running Zotero desktop app (`/items/<key>/file`, which answers a `file://` redirect into its data directory) | Everything Zotero holds, including unsynced attachments and libraries with no storage quota. No cloud key. |
+| `storage` | `<Zotero data dir>/storage/<attachment key>/` read straight off disk | The same files **while Zotero is closed**, as long as Zoteus shares the machine. No cloud key, no desktop app. |
+| `cloud` | The Web API file download | Anything that has synced, from anywhere. Needs `ZOTERO_API_KEY` with file access. |
+
+The storage folder defaults to `~/Zotero` (`%USERPROFILE%\Zotero` on Windows). Zotero lets you move it, and the moved path lives in the app's own preferences where Zoteus cannot see it, so set `ZOTERO_DATA_DIR` if yours is elsewhere. A directory that is not there is skipped silently, so a hosted Zoteus loses nothing by looking.
+
+When no source can produce the file, the error names each one it tried and why it could not answer, rather than reporting only the last failure.
 
 ### Where the indexed text comes from
 
-Zotero's stored full text is read through the library router, not the cloud alone: a running desktop app (Zotero 7+) serves the `/fulltext` endpoints itself, so grounding works with **no cloud API key**, and for items that never synced. Group libraries, and everything when the app is closed, go to the cloud Web API. The PDF-download fallback above is cloud-only.
+Zotero's stored full text is read through the library router, not the cloud alone: a running desktop app (Zotero 7+) serves the `/fulltext` endpoints itself, so grounding works with **no cloud API key**, and for items that never synced. Group libraries, and everything when the app is closed, go to the cloud Web API.
 
 The same text feeds the opt-in full-text pass of the semantic index, so a passage found by `zotero_semantic_search` (marked `source: "fulltext"`) can be re-fetched here with a page locator. See [`semantic-search.md`](./semantic-search.md#full-text-indexing-opt-in).
 
