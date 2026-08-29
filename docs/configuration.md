@@ -11,6 +11,7 @@ A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, 
 | `ZOTERO_LIBRARY_ID` / `ZOTERO_LIBRARY_TYPE` | auto | Pin a library; otherwise resolved automatically from the key. |
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads, and personal-library writes). `off` forces everything through the cloud. |
 | `ZOTERO_LOCAL_PORT` | `23119` | Desktop local server port. |
+| `ZOTERO_DATA_DIR` | `~/Zotero` | The **Zotero desktop app's** data directory, whose `storage/<attachment key>/` folders hold the attachment files. Zoteus reads them there when it shares the machine with Zotero but the app is not running, which is what lets an unindexed PDF be extracted with no cloud key and no desktop app (see [`grounding.md`](./grounding.md#where-the-file-bytes-come-from)). Set it only if you moved Zotero's data directory; a directory that is not there is skipped. Not to be confused with `ZOTEUS_DATA_DIR`, which is Zoteus's own. |
 | `ZOTEUS_TRANSLATION_SERVER_URL` | `http://127.0.0.1:1969` | Optional Zotero translation-server for `zotero_import`. Without it, DOI and arXiv ids still resolve via built-in fallbacks; ISBN/PMID/bibcode and URLs need the server. See [`resolver.md`](./resolver.md). |
 | `ZOTEUS_EMBEDDINGS` | `local` | Semantic-search embeddings provider (`local` model, `openai`, `gemini`, or `off`). |
 | `ZOTEUS_EMBEDDING_MODEL` | provider default | Embedding model for whichever API provider `ZOTEUS_EMBEDDINGS` selected (`text-embedding-3-small` for `openai`, `text-embedding-004` for `gemini`). Vectors from two models are not comparable, so an index built with one is dropped, with a notice, when the server starts embedding with another: rebuild after changing it. See [`semantic-search.md`](./semantic-search.md#tuning-api-embeddings). |
@@ -99,11 +100,13 @@ Client ID Metadata Document support — resolve a URL `client_id` to a registere
 
 ## Optional dependencies
 
-**Exact full-text page locators** — `zotero_get_fulltext precise_pages:true` re-extracts the PDF for exact page numbers using `pdfjs-dist`, which is declared as an `optionalDependency`. Without it, the tool returns approximate (proportional) page numbers with a notice; no error is thrown:
+**PDF reading**: `zotero_get_fulltext` uses `pdfjs-dist` (declared as an `optionalDependency`) for exact page locators (`precise_pages:true`, and `page_range`), for the `outline:true` table of contents, and for extracting the text of a PDF Zotero has not indexed. Without it, page locators degrade to approximate (proportional) numbers with a notice and no error, and the outline and unindexed-PDF paths say the parser is missing:
 
 ```bash
 npm i pdfjs-dist
 ```
+
+EPUB extraction needs nothing extra: an EPUB is a zip of XHTML, which Zoteus unpacks with Node's own `node:zlib`.
 
 **Better BibTeX export** — `zotero_export format:"better-biblatex"` calls the Better BibTeX plugin running in your local desktop Zotero instance. It is desktop-local only: when desktop Zotero or the plugin is unavailable (e.g. the hosted connector), the tool automatically degrades to Zotero's built-in stock `biblatex` translator. See [`grounding.md`](./grounding.md) for details.
 

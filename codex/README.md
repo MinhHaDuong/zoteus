@@ -45,7 +45,7 @@ These files are generated from the tool registry — regenerate with `npm run ge
 | `groups()` | `zotero_groups` | List Zotero groups |
 | `exportTool()` | `zotero_export` | Export Zotero items |
 | `fulltext()` | `zotero_fulltext` | Attachment full-text |
-| `getFulltext()` | `zotero_get_fulltext` | Get attachment full text / passages (read-only) |
+| `getFulltext()` | `zotero_get_fulltext` | Get attachment full text / passages / outline (read-only) |
 | `sync()` | `zotero_sync` | Incremental sync delta |
 | `attachment()` | `zotero_attachment` | Zotero attachments (files) |
 | `annotate()` | `zotero_annotate` | Annotate a PDF (highlights, notes) |

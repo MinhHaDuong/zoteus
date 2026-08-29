@@ -3,6 +3,7 @@ import type { ToolContext, ToolDefinition } from '../registry/registry.js';
 import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
 import { locatePassages, type PassageAnchor } from '../features/fulltext/pdf-locate.js';
 import { DEFAULT_PRECISE_MAX_BYTES } from '../features/fulltext/pdf-pages.js';
+import { loadAttachmentBytes } from '../features/attachments/bytes.js';
 
 /**
  * Normalize a caller-supplied position into Zotero's stored form:
@@ -387,29 +388,22 @@ async function anchorPassages(
 
 /**
  * The attachment's PDF bytes, from whichever side of Zoteus can reach them: the desktop
- * app reads them off its own disk (so unsynced and storage-quota-less libraries work),
- * a hosted Zoteus downloads them from Zotero storage. Returns null when neither can.
+ * app reads them off its own disk (so unsynced and storage-quota-less libraries work), the
+ * Zotero storage folder answers when the app is not running but shares the machine, and a
+ * hosted Zoteus downloads them from Zotero storage. Returns null when none can.
  */
 async function loadPdfBytes(ctx: ToolContext, args: any, attachmentKey: string): Promise<Uint8Array | null> {
-  if (!args.library_id && ctx.local && (await ensureLocalApi(ctx))) {
-    try {
-      const bytes = await ctx.local.downloadFileBytes(attachmentKey);
-      if (bytes.byteLength) return bytes;
-    } catch (e) {
-      ctx.logger.debug(`Local file read failed for ${attachmentKey} (${e instanceof Error ? e.message : e}); trying the cloud.`);
-    }
-  }
-  if (!ctx.capabilities.cloud) return null;
-  try {
-    const lib = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : ctx.router.defaultLibrary();
-    const { bytes } = await ctx.web.downloadFileBytes(lib, attachmentKey);
-    return bytes.byteLength ? bytes : null;
-  } catch (e) {
-    ctx.logger.debug(`Cloud file download failed for ${attachmentKey}: ${e instanceof Error ? e.message : e}`);
-    return null;
-  }
+  const library = args.library_id
+    ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
+    : undefined;
+  const loaded = await loadAttachmentBytes(ctx, {
+    key: attachmentKey,
+    library,
+    maxBytes: DEFAULT_PRECISE_MAX_BYTES,
+  });
+  if (loaded.bytes) return loaded.bytes;
+  if (loaded.reasons.length) ctx.logger.debug(`No PDF bytes for ${attachmentKey}: ${loaded.reasons.join('; ')}`);
+  return null;
 }
 
 /** Says so when highlights were placed from their text rather than from caller coordinates. */

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { defaultDataDir } from './lib/paths.js';
+import { defaultDataDir, defaultZoteroDataDir } from './lib/paths.js';
 import { isUnset, looksUnexpanded } from './lib/env.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from './features/search/fulltext-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './features/search/limits.js';
@@ -35,6 +35,11 @@ export interface ZoteusConfig {
   indexBackend: 'auto' | 'sqlite' | 'memory';
   scholarProviders: string[];
   dataDir: string;
+  /**
+   * The ZOTERO desktop app's data directory, whose `storage/<key>/` folders hold the
+   * attachment files. Read when the app is not running but Zoteus shares its machine.
+   */
+  zoteroDataDir: string;
   contactEmail?: string;
   allowDelete: boolean;
   readOnly: boolean;
@@ -161,6 +166,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
         ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
         ZOTEUS_DATA_DIR: z.string().min(1).optional(),
+        ZOTERO_DATA_DIR: z.string().min(1).optional(),
         ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
         ZOTEUS_ALLOW_DELETE: bool(false),
         ZOTEUS_READ_ONLY: bool(false),
@@ -297,6 +303,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
       .map((s) => s.trim())
       .filter(Boolean),
     dataDir: parsed.ZOTEUS_DATA_DIR ?? defaultDataDir(env),
+    zoteroDataDir: parsed.ZOTERO_DATA_DIR ?? defaultZoteroDataDir(env),
     contactEmail: parsed.ZOTEUS_CONTACT_EMAIL,
     allowDelete: parsed.ZOTEUS_ALLOW_DELETE,
     readOnly: parsed.ZOTEUS_READ_ONLY,

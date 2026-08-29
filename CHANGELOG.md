@@ -6,6 +6,50 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **`zotero_get_fulltext` reads the attachment file itself, from wherever it actually is
+  (#29).** The fallback that parses an unindexed PDF used to have exactly one way to get
+  the bytes: download them from Zotero cloud storage. That is the one route that does not
+  work for the case the fallback exists for. A PDF added minutes ago has not synced, a
+  local-only library has no cloud copy at all, and an account that never bought storage
+  quota never will, so "summarise this paper I just added" failed on precisely the papers
+  the user had just added. The bytes are now taken from three sources in order: the running
+  Zotero desktop app (which reads them off its own disk), the local Zotero storage folder
+  at `<Zotero data dir>/storage/<key>/` (which needs no cloud key **and no running Zotero**,
+  only a Zoteus on the same machine), and a cloud download last. The answer says which one
+  produced the file, as `fileSource`, alongside the existing `fulltextSource`, so a caller
+  can always tell text Zotero indexed from text Zoteus extracted a moment ago, and from
+  where. Where nothing can produce the file, the error names each source it tried and why
+  each one could not answer, instead of reporting only the last failure. `ZOTERO_DATA_DIR`
+  points at a moved Zotero data directory; a directory that is not there is skipped, so a
+  hosted Zoteus loses nothing by looking. `zotero_annotate` shares the same loader, so
+  passage anchoring picks up the storage-folder source too.
+
+- **EPUB attachments extract locally, with no new dependency.** An EPUB is a zip of XHTML
+  documents plus a package file that puts them in reading order, so Zoteus unpacks it with
+  Node's own `node:zlib`, follows the spine (the reading order the book declares, which is
+  not the archive's alphabetical order), and strips the markup. An item whose only
+  attachment is an EPUB is no longer a dead end: the attachment picker prefers a PDF, then
+  an EPUB, then anything else, and the text comes back marked `fulltextSource: "epub"`. An
+  EPUB reflows and has no fixed pages, so `page_range` says so rather than inventing a span.
+
+- **`zotero_get_fulltext outline:true` returns a PDF's table of contents** with a page
+  number and nesting level per heading, read from the document's own bookmark tree and
+  never from Zotero's index. It is the cheapest possible map of a long document: reading
+  the outline and then asking for the pages it names is two small calls, where the
+  alternative is one call that returns a book. A PDF with no bookmarks answers with an
+  empty list and a notice rather than an error, and a heading whose destination cannot be
+  resolved is still listed, without a page.
+
+### Changed
+- **`page_range` now reads the real pages.** Asking for pages 3 to 7 used to slice the
+  indexed character stream proportionally unless `precise_pages:true` was also passed,
+  which answers a different question: roughly this share of the characters, not these
+  pages. A page range now re-extracts the PDF by default and returns the span itself,
+  degrading to the old proportional slice (with a notice) where the file or the parser is
+  out of reach. `precise_pages:false` opts back out and does no file read at all. `query`
+  and document modes are unchanged: they still cost nothing beyond the index.
+
 ### Security
 - **The Gemini API key no longer travels in the URL.** Gemini embedding requests carried
   the key as a `?key=` query parameter; it now goes in the `x-goog-api-key` header, like

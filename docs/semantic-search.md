@@ -179,8 +179,10 @@ ZOTEUS_INDEX_FULLTEXT=true
 **What it indexes.** The text Zotero itself extracted when the PDF was first opened, read
 from the `/fulltext` endpoints. Attachments Zotero has never extracted are skipped; open
 them once in Zotero and rebuild. Unlike `zotero_get_fulltext`, the build does **not** fall
-back to downloading and parsing PDFs itself: that would mean fetching and decoding the
-whole library.
+back to reading and parsing the files itself: that would mean fetching and decoding the
+whole library. A single unindexed attachment is still readable on demand through
+`zotero_get_fulltext`, which extracts it from the file (see
+[`grounding.md`](./grounding.md#unindexed-attachments-local-extraction-fallback)).
 
 **Local-first, key-free.** Zotero 7+ serves `/fulltext` from the desktop app, so full-text
 indexing works with no cloud API key, exactly like the metadata build. Group libraries (and
