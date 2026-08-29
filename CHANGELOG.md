@@ -14,6 +14,14 @@ All notable changes to Zoteus are documented here. The format is based on
   and a header is not. Google accepts the header everywhere `?key=` works, so nothing
   changes about which requests succeed.
 
+### Changed
+- **On-device model weights now cache under the data directory** (`<ZOTEUS_DATA_DIR>/models`)
+  instead of inside the transformers package's own install, so deleting the data directory
+  removes everything the index ever wrote — including its largest artifact, and including
+  weights that previously landed in a global `node_modules` outliving even an extension
+  uninstall. Existing installs re-download the model (~25 MB) once, into the new location;
+  the old copy stays where the package left it.
+
 ## [1.9.0] - 2026-08-28
 
 ### Added

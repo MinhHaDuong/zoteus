@@ -274,7 +274,8 @@ and `søren` does not answer to `soren`.
 **Where the files are.** `<ZOTEUS_DATA_DIR>/search-index.sqlite` beside the older
 `search-index.json` (and `search-index-<userId>.*` per tenant in multi-tenant mode). SQLite
 also writes `-wal` and `-shm` sidecar files while the database is open; a clean shutdown
-folds them back in.
+folds them back in. On-device model weights are cached under `<ZOTEUS_DATA_DIR>/models`,
+so removing the data directory removes everything the index ever wrote.
 
 **If the index is damaged.** A search index that cannot be read no longer stops the server
 from starting: it is a derived cache, and no other tool reads it, so item lookups,
@@ -377,7 +378,9 @@ width from the stored ones.
 npm i @huggingface/transformers
 ```
 
-The first local build downloads the model (~25 MB) once.
+The first local build downloads the model (~25 MB) once, into
+`<ZOTEUS_DATA_DIR>/models` — so deleting the data directory removes the weights along
+with the index.
 
 ### Why it is not bundled
 
@@ -434,7 +437,8 @@ A few things to know when indexing a big Zotero library:
   your CPU, so embedding thousands of passages takes real time. If you just want fast
   keyword search, set `ZOTEUS_EMBEDDINGS=off` for a quick keyword-only (BM25) index.
 - **First local run downloads the model** (~25 MB) before embedding begins — expect a
-  one-time delay (and a slower first build) while it fetches and caches.
+  one-time delay (and a slower first build) while it fetches and caches (under
+  `<ZOTEUS_DATA_DIR>/models`).
 - **Builds stop at `ZOTEUS_INDEX_MAX_ITEMS`, 5000 by default** (both Zotero APIs page
   100-at-a-time). A build that hits the cap reports how many items it left out, in status
   and in every later `zotero_semantic_search` result, so a bigger library never looks

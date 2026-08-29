@@ -148,6 +148,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     private readonly opts: {
       transformersPath?: string;
       dist?: string;
+      /** Where downloaded model weights live (see modelCacheDir); unset keeps the package's default. */
+      modelCacheDir?: string;
       /** Texts per pipeline call (defaults to BATCH_SIZE). */
       batchSize?: number;
       /** Pause between batches in ms (see batchPause). */
@@ -179,6 +181,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     if (typeof pipeline !== 'function') {
       throw new Error(`${TRANSFORMERS_MODULE} loaded but exposes no pipeline(). Is the install complete?`);
     }
+    // Pin the model cache before the pipeline downloads anything. The package's default
+    // caches weights inside its own install directory, which outlives the data directory —
+    // and for a bundled desktop install pointed at a global module via
+    // ZOTEUS_TRANSFORMERS_PATH, outlives the extension too. Deleting the data directory
+    // is supposed to be the whole uninstall, and the weights are its largest artifact.
+    const env = transformers.env ?? transformers.default?.env;
+    if (env && this.opts.modelCacheDir) env.cacheDir = this.opts.modelCacheDir;
     this.extractor = await pipeline('feature-extraction', this.model);
     return this.extractor;
   }
@@ -331,6 +340,7 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         provider: new LocalEmbeddingProvider(undefined, undefined, {
           transformersPath: config.transformersPath,
           dist: config.dist,
+          modelCacheDir: join(config.dataDir, 'models'),
           batchSize: config.embedBatchSize,
           batchDelayMs: config.embedBatchDelayMs,
         }),
