@@ -2,6 +2,7 @@ import type { ToolContext } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
 import type { IndexBuildStatus, VersionBackend } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
+import { createOwnWordsSource, OWN_WORDS_KEY_BATCH, type OwnWordsSource } from './own-words-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
 
 /**
@@ -77,6 +78,16 @@ export function fulltextNotice(s: IndexBuildStatus): string {
 }
 
 /**
+ * Sentence appended when the reader's own notes and annotations could not be crawled. Same
+ * reasoning as `fulltextNotice`: an index holding every paper and none of what their reader
+ * wrote about them looks, from the outside, exactly like a reader who wrote nothing.
+ */
+export function ownWordsNotice(s: IndexBuildStatus): string {
+  if (!s.ownWordsReason) return '';
+  return ` Your own notes and annotations are NOT indexed: ${s.ownWordsReason}`;
+}
+
+/**
  * Sentence appended when the vectors an earlier build persisted were produced by a different
  * embedder than the one now configured, and were therefore dropped on load. Same reasoning as
  * `embedderNotice`: without it, switching ZOTEUS_EMBEDDING_MODEL turns a healthy index into a
@@ -148,6 +159,7 @@ export function statusSummary(s: IndexBuildStatus): string {
     embedderNotice(s) +
     staleVectorsNotice(s) +
     fulltextNotice(s) +
+    ownWordsNotice(s) +
     truncationNotice(s) +
     persistNotice(s) +
     storageNotice(s) +
@@ -173,7 +185,13 @@ export function statusSummary(s: IndexBuildStatus): string {
       const ft = s.fulltextEnabled
         ? `, including attachment full text for ${s.fulltextItems} of them (${s.fulltextPassages} passages)`
         : '';
-      return `Index ready — ${s.documents} passages over ${s.items} items${ft} (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.${notice}`;
+      // Reported whenever there are any, without a matching `enabled` flag to gate it on:
+      // own words are indexed by default, so their absence from a library is a fact about
+      // the library rather than about how the build was configured.
+      const own = s.ownWordsPassages
+        ? `, and ${s.ownWordsPassages} passages from your own notes and annotations across ${s.ownWordsItems} items`
+        : '';
+      return `Index ready — ${s.documents} passages over ${s.items} items${ft}${own} (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.${notice}`;
     }
     default:
       return `Index: ${s.documents} passages over ${s.items} items; embedder=${s.embedder}.${notice}`;
@@ -293,11 +311,72 @@ export function startIndexUpdate(
   const configured = ctx.config.indexMaxItems;
   const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);
   const since = ctx.search.buildStatus().libraryVersion;
+  /**
+   * Items whose own words moved without the item itself moving. Editing a child note or a
+   * PDF annotation leaves the parent's version untouched, so it appears in no `?since=`
+   * delta over `/items/top` — the same blindness extracted full text had before #26, and
+   * the reason a `zotero_annotate` call could never become searchable by update alone.
+   *
+   * Resolved once, on the first page, and held: the crawl loop below stops as soon as
+   * `start` reaches the total the page it is holding reported, so that total has to be the
+   * combined one from the very first answer. The probe is one request, and it is the whole
+   * cost on a library where nothing was annotated since.
+   */
+  let ownWordsParents: string[] | undefined;
+  /** How far into that list the re-read has got. Kept here rather than derived from the
+   * crawl's `start`, which counts items RETURNED: a batch whose keys no longer resolve
+   * would slide the two apart, and the walk would either re-ask for keys it had already
+   * asked for or step over the ones behind them. */
+  let ownWordsCursor = 0;
+  /** How many items the top-level delta itself holds; undefined until its first page. */
+  let deltaTotal: number | undefined;
+  const total = (): number => (deltaTotal ?? 0) + (ownWordsParents?.length ?? 0);
   const fetchChanged = async (start: number) => {
-    // The same routed, top-level crawl a build does, narrowed by `?since=`: on a library
-    // where nothing moved this is a single request that returns an empty page.
-    const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true, since, backend });
-    return { items: page.data, totalResults: page.totalResults, lastModifiedVersion: page.lastModifiedVersion };
+    if (deltaTotal === undefined || start < deltaTotal) {
+      // The same routed, top-level crawl a build does, narrowed by `?since=`: on a library
+      // where nothing moved this returns an empty page. It runs first, so an update that
+      // has nothing to do still costs the one request it always cost.
+      const page = await ctx.router.searchItems({ library: lib, limit: PAGE_SIZE, start, top: true, since, backend });
+      deltaTotal = page.totalResults ?? 0;
+      const items = page.data ?? [];
+      if (start + items.length < deltaTotal) {
+        return { items, totalResults: deltaTotal, lastModifiedVersion: page.lastModifiedVersion };
+      }
+      // The delta is exhausted with this page, so the total it reports must already be the
+      // combined one: the crawl loop stops the moment `start` reaches the total the page it
+      // is holding named, and would otherwise never ask for what follows.
+      ownWordsParents ??= ctx.config.indexOwnWords
+        ? [...(await createOwnWordsSource(ctx, lib, { backend, since })).itemKeys]
+        : [];
+      // An empty last page is the delta being over, not the crawl: fall through rather than
+      // hand back the empty page the loop would stop on.
+      if (items.length > 0) {
+        return { items, totalResults: total(), lastModifiedVersion: page.lastModifiedVersion };
+      }
+    }
+    const parents = ownWordsParents ?? [];
+    // Re-read whole, by key, not patched in place: the update's upsert deletes the item and
+    // re-indexes it, which is what makes an emptied note's passage go away rather than
+    // linger as text nothing in Zotero says any more.
+    //
+    // A batch that resolves to nothing — every one of its parents deleted since — is
+    // stepped over rather than handed back, because an empty page is what ends the crawl
+    // and everything behind it would go unread.
+    while (ownWordsCursor < parents.length) {
+      const batch = parents.slice(ownWordsCursor, ownWordsCursor + OWN_WORDS_KEY_BATCH);
+      ownWordsCursor += batch.length;
+      const page = await ctx.router.searchItems({
+        library: lib,
+        backend,
+        itemKey: batch.join(','),
+        limit: OWN_WORDS_KEY_BATCH,
+      });
+      const items = page.data ?? [];
+      if (items.length > 0) {
+        return { items, totalResults: total(), lastModifiedVersion: page.lastModifiedVersion };
+      }
+    }
+    return { items: [], totalResults: total() };
   };
   const liveKeys = async (): Promise<Set<string>> => {
     // `?format=versions` with no `since`: the whole key set, keys and versions only, which
@@ -359,6 +438,25 @@ function crawlOptions(
       return src;
     }));
   const fulltextFor = wantFulltext ? async (itemKey: string) => (await openSource()).textFor(itemKey) : undefined;
+  // The reader's own words, on the same memoized-source pattern and for the same reason:
+  // one census behind every item the crawl reaches. Unlike full text this is on by default
+  // (ZOTEUS_INDEX_OWN_WORDS turns it off), because it costs one paged read of a set that is
+  // small in every library and no per-item request at all — where full text costs one
+  // request per attachment and can run for days.
+  let ownWords: Promise<OwnWordsSource> | undefined;
+  const openOwnWords = (): Promise<OwnWordsSource> =>
+    (ownWords ??= createOwnWordsSource(ctx, lib, { backend }).then((src) => {
+      if (src.unavailable) ctx.search.noteOwnWordsUnavailable(src.unavailable);
+      else if (src.notes || src.annotations) {
+        ctx.logger.info(
+          `Own words: ${src.notes} note(s) and ${src.annotations} annotation(s) over ${src.items} item(s).`,
+        );
+      }
+      return src;
+    }));
+  const ownWordsFor = ctx.config.indexOwnWords
+    ? async (itemKey: string) => (await openOwnWords()).wordsFor(itemKey)
+    : undefined;
   const fulltextKeys = wantFulltext ? async () => (await openSource()).itemKeys : undefined;
   // Read straight off the resolved source. Both are set by the time anything asks: the only
   // caller is the end of the full-text pass, which got there by awaiting `fulltextFor`.
@@ -385,6 +483,7 @@ function crawlOptions(
     : undefined;
   return {
     fulltextFor,
+    ownWordsFor,
     fulltextKeys,
     fulltextFailures,
     fulltextVersion,

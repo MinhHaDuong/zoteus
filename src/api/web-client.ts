@@ -40,6 +40,11 @@ export interface ItemQuery {
   q?: string;
   qmode?: 'titleCreatorYear' | 'everything';
   itemType?: string;
+  /**
+   * Comma-separated item keys, at most fifty, for reading a known set back without paging
+   * the library to find it. Both Zotero APIs accept it on the items endpoint.
+   */
+  itemKey?: string;
   tag?: string | string[];
   sort?: string;
   direction?: 'asc' | 'desc';

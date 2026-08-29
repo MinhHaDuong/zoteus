@@ -26,6 +26,12 @@ export interface ZoteusConfig {
   indexFulltext: boolean;
   /** Cap on indexed full-text characters per item (0 = no cap). */
   indexFulltextMaxChars: number;
+  /**
+   * Index the reader's own child notes and PDF annotations alongside item metadata. On by
+   * default, unlike full text: the whole census is one paged read of a set that is small in
+   * every library, with no per-item request behind it.
+   */
+  indexOwnWords: boolean;
   /** Cap on items per index build. Raise it for libraries larger than the default. */
   indexMaxItems: number;
   /**
@@ -166,6 +172,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
         ZOTEUS_TRANSFORMERS_PATH: z.string().min(1).optional(),
         ZOTEUS_INDEX_FULLTEXT: bool(false),
+        ZOTEUS_INDEX_OWN_WORDS: bool(true),
         ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: z.coerce
           .number()
           .int()
@@ -308,6 +315,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
     transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
+    indexOwnWords: parsed.ZOTEUS_INDEX_OWN_WORDS,
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     indexBackend: parsed.ZOTEUS_INDEX_BACKEND,

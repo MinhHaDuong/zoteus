@@ -7,6 +7,7 @@ import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
 import { progressLine } from './build.js';
 import { saveIndex } from './persistence.js';
+import type { OwnWords } from './own-words-source.js';
 import type {
   BuildCheckpoint,
   BuildOptions,
@@ -44,6 +45,7 @@ export type {
   IndexSnapshot,
   PageFetcher,
   PageResult,
+  PassageSource,
   QueryOptions,
   RankedId,
   SearchHit,
@@ -61,6 +63,15 @@ export type {
  */
 export const FULLTEXT_CHUNK_SIZE = 1200;
 export const FULLTEXT_CHUNK_OVERLAP = 150;
+
+/**
+ * Passage size for the reader's own words. The full-text size, for the same reason: a note
+ * is prose, and cutting it at the metadata size (512) would split a single thought across
+ * two passages and embed neither of them well. Most annotations are shorter than one
+ * passage anyway, so this only bites on long notes.
+ */
+export const OWN_WORDS_CHUNK_SIZE = FULLTEXT_CHUNK_SIZE;
+export const OWN_WORDS_CHUNK_OVERLAP = FULLTEXT_CHUNK_OVERLAP;
 
 /** One sentence for the status fields that have room only to say the index is unusable. */
 export const UNREADABLE_STORE = 'the search index cannot be read';
@@ -161,6 +172,7 @@ export abstract class SearchIndexBase implements SearchIndex {
   /** Whether the running/last build was asked for full text, and why it may not deliver. */
   protected fulltextEnabled = false;
   protected fulltextUnavailable: string | undefined = undefined;
+  protected ownWordsUnavailable: string | undefined = undefined;
   protected builtFromVersion = 0;
   /**
    * Zotero's Last-Modified-Version this index was built or updated from, and the API that
@@ -406,6 +418,16 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /**
+   * Explain why the reader's own notes and annotations are not in the index. Same reasoning
+   * as `noteFulltextUnavailable`: an index that could not crawl them holds every paper and
+   * none of what their reader wrote about them, and from the outside that is
+   * indistinguishable from a reader who wrote nothing.
+   */
+  noteOwnWordsUnavailable(reason: string): void {
+    this.ownWordsUnavailable = reason;
+  }
+
+  /**
    * Drop vectors this embedder did not produce, and remember why. Ranking them would not
    * fail, it would return plausible nonsense, which is the whole reason to be strict here.
    */
@@ -501,6 +523,8 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextEnabled: this.fulltextEnabled,
       fulltextItems: c.fulltextItems,
       fulltextPassages: c.fulltextPassages,
+      ownWordsItems: c.ownWordsItems,
+      ownWordsPassages: c.ownWordsPassages,
       builtFromVersion: this.builtFromVersion,
       libraryVersion: this.libraryVersion,
       fulltextVersion: this.fulltextVersion,
@@ -514,6 +538,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.vectorScanNotice) s.vectorScanNotice = this.vectorScanNotice;
     if (this.storeNotice) s.storageNotice = this.storeNotice;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
+    if (this.ownWordsUnavailable) s.ownWordsReason = this.ownWordsUnavailable;
     return s;
   }
 
@@ -549,9 +574,11 @@ export abstract class SearchIndexBase implements SearchIndex {
     // Whatever this build embeds carries the current embedder's identity.
     this.vectorEmbedderId = this.embedderId;
     // This path indexes metadata (plus any caller-supplied extraText), never attachment
-    // full text, so it must not inherit a previous incremental build's verdict.
+    // full text or child notes, so it must not inherit a previous incremental build's
+    // verdict on either.
     this.fulltextEnabled = false;
     this.fulltextUnavailable = undefined;
+    this.ownWordsUnavailable = undefined;
     const records: ChunkRecord[] = [];
     for (const item of libraryItems) {
       const d = item.data ?? item;
@@ -649,6 +676,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     // A rebuild is the retry for full text too: clear the previous run's verdict so a
     // library that has since been extracted in Zotero stops reporting the old reason.
     this.fulltextUnavailable = undefined;
+    this.ownWordsUnavailable = undefined;
     this.itemsRemoved = 0;
     this.phase = 'metadata';
     this.fulltextItemsScanned = 0;
@@ -866,6 +894,15 @@ export abstract class SearchIndexBase implements SearchIndex {
           // searchable, and its place in the full-text worklist came from the store.
           if (known?.has(itemKeyOf(item))) continue;
           const entry = this.addMetadata(item, pending);
+          // Indexed in this pass rather than a later one, unlike body text: the whole
+          // census behind `ownWordsFor` is two library-wide reads, so this awaits a map
+          // lookup, not a request. An item's notes therefore become searchable at the same
+          // moment its title does, and a build that is stopped before any full-text pass
+          // still has them.
+          if (entry && opts.ownWordsFor) {
+            const words = await opts.ownWordsFor(entry.key);
+            if (words.length) this.addOwnWords(entry.key, entry.title, words, pending);
+          }
           // Recorded now, crawled in the second pass. Truncating here rather than there is
           // what keeps the item cap honest without re-checking it against a moving count.
           if (entry && worklist) worklist.push(entry);
@@ -1069,6 +1106,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.updateNotice = undefined;
     this.itemsFetched = 0;
     this.itemsRemoved = 0;
+    if (opts.ownWordsFor) this.ownWordsUnavailable = undefined;
     if (opts.fulltextFor) {
       // An update is the retry for full text as well, but only upwards: an index that
       // already holds body passages does not stop being a full-text index when a metadata
@@ -1120,6 +1158,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         const pageItems = page.items ?? [];
         if (pageItems.length === 0) break;
         const texts = await this.fulltextForPage(pageItems, opts, token, fulltextLimit);
+        const words = await this.ownWordsForPage(pageItems, opts);
         for (let i = 0; i < pageItems.length; i++) {
           if (token.cancelled) break;
           const item = pageItems[i];
@@ -1136,7 +1175,7 @@ export abstract class SearchIndexBase implements SearchIndex {
           // are only mostly stable (a shorter abstract yields fewer chunks), so replacing
           // the item wholesale is the only way to leave no orphans behind.
           this.deleteItem(key);
-          this.addOneItem(item, pending, texts?.[i]);
+          this.addOneItem(item, pending, texts?.[i], words?.[i]);
           known.add(key);
           refreshed.add(key);
           this.itemsFetched++;
@@ -1350,6 +1389,30 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /**
+   * The notes and annotations for one page of changed items, in page order.
+   *
+   * No semaphore and no concurrency dial, unlike `fulltextForPage`: every answer comes off
+   * the resident map the own-words census built, so there is no request here to pace and
+   * nothing an unreadable attachment can make fail. A crawl that could not run at all
+   * yields empty lists, and the update then re-indexes those items without own words —
+   * which is what it should do, since deleting the item first has already removed the
+   * stale ones.
+   */
+  private async ownWordsForPage(
+    batch: any[],
+    opts: IncrementalBuildOptions,
+  ): Promise<Array<OwnWords[] | undefined> | undefined> {
+    if (!opts.ownWordsFor) return undefined;
+    const out: Array<OwnWords[] | undefined> = [];
+    for (const item of batch) {
+      const d = item?.data ?? item;
+      const key = item?.key ?? d?.key;
+      out.push(key ? await opts.ownWordsFor(key) : undefined);
+    }
+    return out;
+  }
+
+  /**
    * The same fetch as `fulltextForPage`, over the key/title pairs a build's metadata pass
    * recorded rather than over raw items. The full item is deliberately not kept: nothing
    * that supplies full text has ever used it (the supplier keys off the item key alone),
@@ -1413,9 +1476,11 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /** Chunk a single library item into the keyword index and queue passages for embedding. */
-  private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string): void {
+  private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string, ownWords?: OwnWords[]): void {
     const entry = this.addMetadata(item, pending);
-    if (entry && fulltext) this.addFulltext(entry.key, entry.title, fulltext, pending);
+    if (!entry) return;
+    if (ownWords?.length) this.addOwnWords(entry.key, entry.title, ownWords, pending);
+    if (fulltext) this.addFulltext(entry.key, entry.title, fulltext, pending);
   }
 
   /**
@@ -1458,6 +1523,34 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
   }
 
+  /**
+   * Index an item's child notes and annotations as extra passages. They carry the parent
+   * item's key, exactly like body text does, so what the reader wrote is found AS the paper
+   * he wrote it about — never as a separate result competing with it. That is also what
+   * bounds the effect on ranking: a query returns one hit per item, so an item with forty
+   * annotations still occupies one place in the result list, not forty.
+   *
+   * Ids are namespaced `#w<n>` so they collide with neither the metadata ids nor the `#f`
+   * ones, and each passage keeps the kind it came from, so a hit on a highlight is
+   * distinguishable from a hit on an abstract.
+   */
+  private addOwnWords(itemKey: string, title: string, words: OwnWords[], pending: ChunkRecord[]): void {
+    let n = 0;
+    for (const one of words) {
+      for (const ch of chunkText(one.text, OWN_WORDS_CHUNK_SIZE, OWN_WORDS_CHUNK_OVERLAP)) {
+        const rec: ChunkRecord = {
+          id: `${itemKey}#w${n++}`,
+          itemKey,
+          title,
+          text: ch.text,
+          source: one.kind,
+        };
+        this.putPassage(rec);
+        if (this.hasEmbedder) pending.push(rec);
+      }
+    }
+  }
+
   async query(q: string, opts: QueryOptions = {}): Promise<SearchHit[]> {
     // An unreadable store must refuse rather than answer nothing: a query that returns no
     // hits forever is indistinguishable from a library that holds nothing on the subject,
@@ -1497,8 +1590,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       seen.add(rec.itemKey);
       const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
       // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
-      // zotero_get_fulltext, whereas a metadata one is just the abstract.
-      if (rec.source === 'fulltext') hit.source = 'fulltext';
+      // zotero_get_fulltext, a note or an annotation is something the reader wrote himself,
+      // and a metadata one is just the abstract.
+      if (rec.source) hit.source = rec.source;
       hits.push(hit);
       if (hits.length >= limit) break;
     }
@@ -1543,6 +1637,9 @@ export class MemorySearchIndex extends SearchIndexBase {
   /** Items with at least one full-text passage, and how many such passages exist. */
   private fulltextItems = new Set<string>();
   private fulltextPassages = 0;
+  /** The same pair for the reader's own words, counted apart so a build can report them. */
+  private ownWordsItems = new Set<string>();
+  private ownWordsPassages = 0;
   private readonly path: string | undefined;
 
   constructor(opts: MemorySearchIndexOptions) {
@@ -1557,6 +1654,8 @@ export class MemorySearchIndex extends SearchIndexBase {
       items: this.items.size,
       fulltextItems: this.fulltextItems.size,
       fulltextPassages: this.fulltextPassages,
+      ownWordsItems: this.ownWordsItems.size,
+      ownWordsPassages: this.ownWordsPassages,
     };
   }
 
@@ -1568,6 +1667,8 @@ export class MemorySearchIndex extends SearchIndexBase {
     this.byItem = new Map();
     this.fulltextItems = new Set();
     this.fulltextPassages = 0;
+    this.ownWordsItems = new Set();
+    this.ownWordsPassages = 0;
   }
 
   protected putItem(itemKey: string, title: string): void {
@@ -1586,6 +1687,9 @@ export class MemorySearchIndex extends SearchIndexBase {
     if (rec.source === 'fulltext') {
       this.fulltextItems.add(rec.itemKey);
       this.fulltextPassages++;
+    } else if (rec.source) {
+      this.ownWordsItems.add(rec.itemKey);
+      this.ownWordsPassages++;
     }
   }
 
@@ -1593,12 +1697,14 @@ export class MemorySearchIndex extends SearchIndexBase {
     for (const id of this.byItem.get(itemKey) ?? []) {
       const rec = this.chunks.get(id);
       if (rec?.source === 'fulltext') this.fulltextPassages--;
+      else if (rec?.source) this.ownWordsPassages--;
       this.chunks.delete(id);
       this.bm25.removeDoc(id);
       this.vectors.remove(id);
     }
     this.byItem.delete(itemKey);
     this.fulltextItems.delete(itemKey);
+    this.ownWordsItems.delete(itemKey);
     this.items.delete(itemKey);
   }
 

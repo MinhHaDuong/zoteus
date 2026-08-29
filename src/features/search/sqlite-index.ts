@@ -12,6 +12,7 @@ import type {
   ChunkRecord,
   IndexCounts,
   IndexSnapshot,
+  PassageSource,
   RankedId,
   SearchIndexOptions,
 } from './backend.js';
@@ -177,13 +178,23 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private stmts!: Statements;
   /** True while a write transaction is open; save() is what commits it. */
   private inTransaction = false;
-  private c: IndexCounts = { documents: 0, vectors: 0, items: 0, fulltextItems: 0, fulltextPassages: 0 };
+  private c: IndexCounts = {
+    documents: 0,
+    vectors: 0,
+    items: 0,
+    fulltextItems: 0,
+    fulltextPassages: 0,
+    ownWordsItems: 0,
+    ownWordsPassages: 0,
+  };
   /**
    * Item keys that own full-text passages, so `fulltextItems` stays a distinct count.
    * Bounded by the number of ITEMS (thousands), never by passages: the passages and their
    * vectors are exactly what must not become resident.
    */
   private fulltextKeys = new Set<string>();
+  /** The same resident set for own words, so the counts a status reports cost no query. */
+  private ownWordsKeys = new Set<string>();
   /** Vector scans performed. A keyword-only query must never cause one (#10). */
   private vectorScans = 0;
   private readonly file: string;
@@ -540,6 +551,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
       items: one('SELECT COUNT(*) AS n FROM items'),
       fulltextItems: 0,
       fulltextPassages: one("SELECT COUNT(*) AS n FROM passages WHERE source = 'fulltext'"),
+      // Everything labelled and not body text is the reader's own: one predicate rather
+      // than a list, so a later kind of own words counts here without touching this line.
+      ownWordsItems: 0,
+      ownWordsPassages: one(
+        "SELECT COUNT(*) AS n FROM passages WHERE source IS NOT NULL AND source <> 'fulltext'",
+      ),
     };
     this.fulltextKeys = new Set(
       (db.prepare("SELECT DISTINCT item_key AS k FROM passages WHERE source = 'fulltext'").all() as Array<{
@@ -547,6 +564,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
       }>).map((r) => r.k),
     );
     this.c.fulltextItems = this.fulltextKeys.size;
+    this.ownWordsKeys = new Set(
+      (db
+        .prepare("SELECT DISTINCT item_key AS k FROM passages WHERE source IS NOT NULL AND source <> 'fulltext'")
+        .all() as Array<{ k: string }>).map((r) => r.k),
+    );
+    this.c.ownWordsItems = this.ownWordsKeys.size;
     // One rowid probe, not a count: all this decides is whether a write has a code to
     // invalidate. Counting them would read the whole codes table on every rollback.
     this.hasCodes = this.stmts.anyCode.get() !== undefined;
@@ -619,8 +642,17 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.handle.exec('DELETE FROM passages');
     this.handle.exec('DELETE FROM items');
     this.dropCodes();
-    this.c = { documents: 0, vectors: 0, items: 0, fulltextItems: 0, fulltextPassages: 0 };
+    this.c = {
+      documents: 0,
+      vectors: 0,
+      items: 0,
+      fulltextItems: 0,
+      fulltextPassages: 0,
+      ownWordsItems: 0,
+      ownWordsPassages: 0,
+    };
     this.fulltextKeys = new Set();
+    this.ownWordsKeys = new Set();
   }
 
   protected putItem(itemKey: string, title: string): void {
@@ -639,6 +671,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
       if (!this.fulltextKeys.has(rec.itemKey)) {
         this.fulltextKeys.add(rec.itemKey);
         this.c.fulltextItems++;
+      }
+    } else if (rec.source) {
+      this.c.ownWordsPassages++;
+      if (!this.ownWordsKeys.has(rec.itemKey)) {
+        this.ownWordsKeys.add(rec.itemKey);
+        this.c.ownWordsItems++;
       }
     }
   }
@@ -666,9 +704,11 @@ export class SqliteSearchIndex extends SearchIndexBase {
       this.c.documents--;
       if (row.has_vector) this.c.vectors--;
       if (row.source === 'fulltext') this.c.fulltextPassages--;
+      else if (row.source) this.c.ownWordsPassages--;
     }
     this.stmts.deletePassages.run(itemKey);
     if (this.fulltextKeys.delete(itemKey)) this.c.fulltextItems--;
+    if (this.ownWordsKeys.delete(itemKey)) this.c.ownWordsItems--;
     if (Number(this.stmts.deleteItemRow.run(itemKey).changes) > 0) this.c.items--;
   }
 
@@ -1193,7 +1233,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       const row = this.stmts.selectPassage.get(id) as PassageRow | undefined;
       if (!row) return undefined;
       const rec: ChunkRecord = { id: row.id, itemKey: row.item_key, title: row.title, text: row.text };
-      if (row.source === 'fulltext') rec.source = 'fulltext';
+      if (row.source) rec.source = row.source as PassageSource;
       return rec;
     } catch (e) {
       // Corruption in the passages b-tree is discovered here — every fused hit hydrates

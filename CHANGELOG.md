@@ -4,6 +4,25 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Your own notes and annotations are in the search corpus.** Every index crawl walks
+  top-level items, and a child note is not one; neither is a PDF annotation. So the index
+  held the library and none of its reader: a marginal comment, a highlight, a reading note
+  were all unfindable. Since `zotero_annotate` shipped in 1.10.0 that also meant Zoteus
+  could write an annotation it could never find again. Both are now indexed as extra
+  passages carrying the key of the item they hang off — the same attribution attachment
+  body text already gets — so a query finds the paper through what you wrote about it, and
+  an item with forty annotations still occupies one place in the results rather than forty.
+  A hit is marked `source:"note"` or `source:"annotation"` beside the existing
+  `source:"fulltext"`. On by default, unlike full text: the whole census is one paged
+  `itemType=note || annotation` read plus one `itemKey=` lookup per fifty annotated
+  attachments, with no per-item request behind it. `action:"update"` asks the same
+  `?since=` question of child notes and annotations, which carry their own version, because
+  annotating a PDF leaves the parent item's version untouched and it therefore appears in
+  no delta over top-level items. `ZOTEUS_INDEX_OWN_WORDS=false` turns it off.
+
 ## [1.10.0] - 2026-08-29
 
 ### Added

@@ -99,7 +99,15 @@ export class CorruptSearchIndex extends SearchIndexBase {
   // The storage primitives the base would call. Nothing reaches them — every public entry
   // point above refuses first — so they exist to satisfy the contract, not to be run.
   protected counts(): IndexCounts {
-    return { documents: 0, vectors: 0, items: 0, fulltextItems: 0, fulltextPassages: 0 };
+    return {
+      documents: 0,
+      vectors: 0,
+      items: 0,
+      fulltextItems: 0,
+      fulltextPassages: 0,
+      ownWordsItems: 0,
+      ownWordsPassages: 0,
+    };
   }
   protected clearStore(): void {}
   protected clearVectors(): void {}

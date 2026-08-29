@@ -89,7 +89,10 @@ describe('index build routing (local-first)', () => {
     startIndexBuild(ctx);
     await finished(search);
     // 250 items over 100-item pages: start=0, 100, 200 — then the total stops the loop.
-    expect(local.listItems.mock.calls.map((c: any[]) => c[0].start)).toEqual([0, 100, 200]);
+    // The own-words census pages the same endpoint for notes and annotations, so the item
+    // crawl is read off the calls that asked for top-level items.
+    const itemPages = local.listItems.mock.calls.filter((c: any[]) => c[0].top);
+    expect(itemPages.map((c: any[]) => c[0].start)).toEqual([0, 100, 200]);
     expect(search.buildStatus().itemsFetched).toBe(250);
     expect(search.buildStatus().itemsTotal).toBe(250);
   });
@@ -135,6 +138,9 @@ describe('index build routing (local-first)', () => {
     startIndexBuild(ctx, undefined, 5);
     await finished(search);
     expect(search.buildStatus().items).toBe(5);
-    expect(local.listItems).toHaveBeenCalledTimes(1);
+    // Counted over the top-level crawl alone: the own-words census pages the library's
+    // notes and annotations beside it, and it is not what the cap governs.
+    const itemPages = local.listItems.mock.calls.filter((c) => (c[0] as { top?: boolean })?.top);
+    expect(itemPages).toHaveLength(1);
   });
 });

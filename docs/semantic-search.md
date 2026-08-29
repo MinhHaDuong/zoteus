@@ -230,6 +230,37 @@ library and embedding seven items: minutes and real API spend against seconds an
 almost none. Rebuild when the model changes, when you raise the cap, or when the index is
 new; update the rest of the time.
 
+## Your own notes and annotations
+
+Every crawl above walks **top-level** items, so until now the index held the library and
+none of the reader. A child note is not a top-level item; neither is a PDF annotation.
+Both were invisible to search, which since `zotero_annotate` shipped meant Zoteus could
+write an annotation it could never find again.
+
+They are indexed by default now, as extra passages carrying the key of the item they hang
+off — the same attribution body text gets. A hit whose snippet came from one is marked
+`source:"note"` or `source:"annotation"`, beside the existing `source:"fulltext"`.
+
+**What it indexes.** The text of each child note, with its HTML stripped, and for each
+annotation the comment you typed followed by the passage you highlighted. A standalone
+note is skipped here because it is already a top-level item indexed on its own text. Up to
+20 000 characters per item; beyond that an item is being used as a scratch file rather than
+annotated.
+
+**What it costs.** One paged `itemType=note || annotation` read of the library, plus one
+`itemKey=` lookup per fifty attachments that actually carry an annotation — an annotation
+names the attachment it sits on, not the item that attachment belongs to. Nothing per item,
+and nothing at all in a library whose notes and annotations are empty. That is why this is
+on by default where full text is opt-in.
+
+**Updates.** Editing a note or annotating a PDF leaves the parent item's version untouched,
+so it appears in no `?since=` delta over top-level items — the same blindness extracted
+full text had. `action:"update"` therefore asks the same `?since=` question of child notes
+and annotations, which *are* versioned, and re-reads the items whose own words moved. An
+update on a library where nothing was annotated costs one extra request.
+
+Turn it off with `ZOTEUS_INDEX_OWN_WORDS=false`.
+
 ## Full-text indexing (opt-in)
 
 By default the index covers item **metadata**: title, abstract, creators, tags, date,

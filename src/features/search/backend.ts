@@ -1,4 +1,5 @@
 import type { EmbeddingProvider } from './embeddings.js';
+import type { OwnWords } from './own-words-source.js';
 import type { Logger } from '../../lib/logger.js';
 
 /**
@@ -24,9 +25,20 @@ export interface SearchHit {
   title: string;
   snippet: string;
   score: number;
-  /** Present when the snippet came from an attachment's body text, not its metadata. */
-  source?: 'fulltext';
+  /**
+   * Where the snippet came from, when it was not the item's own metadata: an attachment's
+   * body text, a child note, or a PDF annotation. The last two are the reader's own words
+   * rather than the publisher's, which is worth telling apart from both of the others.
+   */
+  source?: PassageSource;
 }
+
+/**
+ * What a passage was made from, when it was not the item's own metadata. `fulltext` is an
+ * attachment's extracted body; `note` and `annotation` are the reader's own writing, which
+ * hangs off the item as a child rather than being part of it.
+ */
+export type PassageSource = 'fulltext' | 'note' | 'annotation';
 
 /** One stored passage: the unit both the keyword index and the vector store rank. */
 export interface ChunkRecord {
@@ -35,7 +47,7 @@ export interface ChunkRecord {
   title: string;
   text: string;
   /** Absent for metadata passages, which keeps already-persisted index files loadable. */
-  source?: 'fulltext';
+  source?: PassageSource;
 }
 
 /** A candidate returned by one ranker, higher score = better. */
@@ -51,6 +63,8 @@ export interface IndexCounts {
   items: number;
   fulltextItems: number;
   fulltextPassages: number;
+  ownWordsItems: number;
+  ownWordsPassages: number;
 }
 
 export interface SearchIndexStatus {
@@ -101,6 +115,12 @@ export interface SearchIndexStatus {
   fulltextPassages: number;
   /** Why full text is not being indexed although it was requested. */
   fulltextReason?: string;
+  /** Items with at least one passage from a child note or an annotation. */
+  ownWordsItems: number;
+  /** Passages that came from child notes and annotations (a subset of `documents`). */
+  ownWordsPassages: number;
+  /** Why the reader's own notes and annotations are not in the index. */
+  ownWordsReason?: string;
   /**
    * Items crawled by the build that produced this index. Named for the Zotero library
    * version it was once meant to hold, and kept as an item COUNT because callers (and
@@ -275,6 +295,14 @@ export interface IncrementalBuildOptions {
    */
   fulltextKeys?: () => Promise<Set<string>>;
   /**
+   * Optional supplier of the child notes and annotations hanging off an item. When present,
+   * each one is chunked into an extra passage beside the metadata ones, so a search can
+   * match what the reader wrote about a paper and not only what the paper says about
+   * itself. Answered from a resident map, so unlike `fulltextFor` this costs no request per
+   * item and runs in the metadata pass rather than in a second crawl.
+   */
+  ownWordsFor?: (itemKey: string) => Promise<OwnWords[]>;
+  /**
    * Attachments whose text could not be read so far. Consulted after the full-text pass,
    * because those failures are caught per item so the pass always "succeeds" — and a
    * desktop app that quits partway through would otherwise leave a build reporting `done`
@@ -426,6 +454,7 @@ export interface SearchIndex {
   readonly isEmpty: boolean;
   /** Explain why an opt-in full-text build is not producing passages. */
   noteFulltextUnavailable(reason: string): void;
+  noteOwnWordsUnavailable(reason: string): void;
   status(): SearchIndexStatus;
   /** Full live status: index size + build progress. */
   buildStatus(): IndexBuildStatus;
