@@ -77,11 +77,35 @@ function norm(v: number[]): number {
   return Math.sqrt(s);
 }
 
-function cosine(a: number[], b: number[], an: number): number {
-  const bn = norm(b);
-  if (bn === 0) return 0;
+/**
+ * Cosine of the query against one stored vector: one traversal, two accumulators, where
+ * `norm(b)` followed by a dot-product loop walked every entry twice. Same products summed
+ * in the same order, so the scores are bit-identical; the tail loop preserves the old
+ * reading of a shorter query, which covered all of `b` for the norm but stopped at the
+ * shorter operand for the product. The SQLite backend carries the same shape, and gains
+ * more from it — there the shared `norm()` was polymorphic besides.
+ */
+export function cosine(a: number[], b: number[], an: number): number {
+  if (a.length < b.length) return cosineUneven(a, b, an);
   let dot = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) dot += a[i]! * b[i]!;
+  let sq = 0;
+  for (let i = 0; i < b.length; i++) {
+    const x = b[i]!;
+    dot += a[i]! * x;
+    sq += x * x;
+  }
+  const bn = Math.sqrt(sq);
+  if (bn === 0) return 0;
+  return dot / (an * bn);
+}
+
+/** The width-mismatch case, out of line so the hot path stays small. See sqlite-index.ts. */
+function cosineUneven(a: number[], b: number[], an: number): number {
+  let dot = 0;
+  let sq = 0;
+  for (let i = 0; i < a.length; i++) dot += a[i]! * b[i]!;
+  for (let i = 0; i < b.length; i++) sq += b[i]! * b[i]!;
+  const bn = Math.sqrt(sq);
+  if (bn === 0) return 0;
   return dot / (an * bn);
 }
