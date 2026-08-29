@@ -49,6 +49,12 @@ All notable changes to Zoteus are documented here. The format is based on
   degrading to the old proportional slice (with a notice) where the file or the parser is
   out of reach. `precise_pages:false` opts back out and does no file read at all. `query`
   and document modes are unchanged: they still cost nothing beyond the index.
+- **On-device model weights now cache under the data directory** (`<ZOTEUS_DATA_DIR>/models`)
+  instead of inside the transformers package's own install, so deleting the data directory
+  removes everything the index ever wrote — including its largest artifact, and including
+  weights that previously landed in a global `node_modules` outliving even an extension
+  uninstall. Existing installs re-download the model (~25 MB) once, into the new location;
+  the old copy stays where the package left it.
 
 ### Security
 - **The Gemini API key no longer travels in the URL.** Gemini embedding requests carried
@@ -57,14 +63,6 @@ All notable changes to Zoteus are documented here. The format is based on
   logged — by proxies, by error causes, by anything that prints which endpoint failed —
   and a header is not. Google accepts the header everywhere `?key=` works, so nothing
   changes about which requests succeed.
-
-### Changed
-- **On-device model weights now cache under the data directory** (`<ZOTEUS_DATA_DIR>/models`)
-  instead of inside the transformers package's own install, so deleting the data directory
-  removes everything the index ever wrote — including its largest artifact, and including
-  weights that previously landed in a global `node_modules` outliving even an extension
-  uninstall. Existing installs re-download the model (~25 MB) once, into the new location;
-  the old copy stays where the package left it.
 
 ## [1.9.0] - 2026-08-28
 
