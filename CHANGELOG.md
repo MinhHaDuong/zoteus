@@ -55,6 +55,46 @@ All notable changes to Zoteus are documented here. The format is based on
   weights that previously landed in a global `node_modules` outliving even an extension
   uninstall. Existing installs re-download the model (~25 MB) once, into the new location;
   the old copy stays where the package left it.
+- **`action:"build"` and `action:"refresh"` are no longer aliases**, in one respect: `build`
+  resumes an interrupted build where a checkpoint is on disk, and `refresh` always starts
+  the crawl over. Both still rebuild from scratch on an index whose last build finished,
+  which is every index that was not interrupted.
+- **The on-disk index format grows by two fields, and stays readable both ways.** A
+  `checkpoint` record and a `fulltextVersion` cursor are added to the JSON artifact and to
+  the SQLite `meta` table, with no schema-version bump: an index written by 1.9.0 loads
+  unchanged (no checkpoint means nothing to resume, and no cursor means the first update
+  that wants full text closes its coverage gap once), and an index written by this version
+  still opens in 1.9.0, which ignores the two keys it does not know.
+
+### Fixed
+- **An interrupted index build now resumes instead of starting from 0** (#24). The only
+  progress a build recorded was the library version stamp, and that stamp is deliberately
+  withheld from a build that did not finish, because it covers an unknown slice of the
+  library. The desktop local API frequently issues no version at all, so on that path there
+  was nothing to resume from in any case: stopping a build and starting another one cleared
+  the store and re-crawled, re-chunked and re-embedded items already committed to disk. A
+  build now writes a **checkpoint** (the crawl offset, the pass it was in, the library
+  totals it saw, the API that served it, the embedder identity, and the handful of passages
+  queued but not yet embedded) into the same write as the rows it describes, and
+  `action:"build"` carries on from it on either API. Committed passages stay searchable
+  throughout and are never re-fetched or re-embedded; what is redone is bounded by the last
+  save; the resume point is a stored offset rather than a scan; and the offset is verified
+  against the library's own totals on the first page read, falling back to a walk from the
+  top that steps over what the index already holds rather than to a rebuild. A resume is
+  refused under a different embedding model, and stamps the version the *interrupted* crawl
+  began from, so nothing modified in between is missed. `status` reports `resumedFrom`, and
+  the tool says outright that a resume is what started.
+- **`action:"update"` now sees full text Zotero extracted after the build** (#26). An update
+  keyed its whole view of "what changed" on the item version, but Zotero versions extracted
+  text on a sequence of its own: opening a PDF for the first time makes Zotero extract it
+  and touches no item version, so that item appeared in no `?since=` delta, ever, and an
+  index's full-text coverage stayed frozen at build time with a rebuild as the only remedy.
+  A build now records the highest full-text version it consumed (`fulltextVersion` in
+  `status`), and an update asks `/fulltext?since=<that cursor>` and attaches the new text
+  through the same attachment-to-parent map the build uses, replacing only that item's body
+  passages. On a library where nothing was extracted the probe is a single request and the
+  attachment map is never built. The cursor advances only when the update fully succeeded,
+  like the version stamp.
 
 ### Security
 - **The Gemini API key no longer travels in the URL.** Gemini embedding requests carried

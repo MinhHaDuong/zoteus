@@ -101,6 +101,53 @@ export interface SearchIndexStatus {
   libraryVersion: number;
   /** Which API issued `libraryVersion`; the two sequences are not comparable. */
   libraryBackend?: VersionBackend;
+  /**
+   * The highest version of Zotero's FULL-TEXT sequence this index has consumed (0 = none
+   * recorded). Zotero numbers extracted text on a sequence of its own, unrelated to the
+   * item versions `libraryVersion` holds: text extracted after a build leaves every item
+   * version untouched, so it appears in no `?since=` delta and used to stay invisible to
+   * `action:"update"` forever (#26). This is the cursor an update hands to `/fulltext?since=`.
+   */
+  fulltextVersion: number;
+}
+
+/**
+ * Where an interrupted build stopped, committed in the same write as the rows it describes.
+ *
+ * Kept apart from `libraryVersion` on purpose. That stamp answers "is this index current?"
+ * and is deliberately withheld from a build that did not finish, so it can never double as
+ * a resume cursor. That left a stopped build with nowhere to say how far it got, and the
+ * next build restarting from 0 over rows it had already paid to embed (#24). This record
+ * answers the other question, "where would a resume pick up?", and is cleared the moment a
+ * build completes.
+ */
+export interface BuildCheckpoint {
+  /** The pass that was running: informational, since a resume re-derives its own worklist. */
+  phase: 'metadata' | 'fulltext';
+  /** Crawl offset already covered, i.e. the `start` the metadata pass would fetch next. */
+  crawlOffset: number;
+  /** Items the library reported while that crawl ran (0 = never learned). */
+  itemsAvailable: number;
+  /** Items that crawl was going to index, after the build cap (0 = never learned). */
+  itemsTotal: number;
+  /** The cap in force on the interrupted build (0 = none). */
+  maxItems: number;
+  /** The library version the interrupted crawl began from (0 = the API issued none). */
+  crawlVersion: number;
+  /** Which API served it: offsets and versions from the other one are not comparable. */
+  backend?: VersionBackend;
+  /** Vectors the committed rows carry. A resume under another embedder is not a resume. */
+  embedderId?: string;
+  /** Whether that build was crawling attachment full text. */
+  fulltext: boolean;
+  /**
+   * Passages committed but not yet embedded: the tail of the queue an interruption caught
+   * between `putPassage` and the embedding call. Fewer than one batch by construction (the
+   * queue is drained down to that before every save), and named individually so a resume
+   * embeds exactly them instead of hunting the index for rows with no vector. Without it a
+   * resumed build converges on an index a handful of vectors short of an uninterrupted one.
+   */
+  pendingPassages?: string[];
 }
 
 /** Lifecycle of the asynchronous background index build. */
@@ -160,6 +207,12 @@ export interface IndexBuildStatus extends SearchIndexStatus {
   fulltextItemsScanned: number;
   /** Size of the full-text pass's worklist; 0 until the metadata pass has finished. */
   fulltextItemsTotal: number;
+  /**
+   * Items an interrupted build had already committed when this one resumed it (absent when
+   * this build started from nothing). Set in the build's synchronous prologue, so the
+   * status the starter returns already says a resume is what began (#24).
+   */
+  resumedFrom?: number;
 }
 
 /** One page of library items plus the library-wide total (for progress). */
@@ -225,10 +278,31 @@ export interface IncrementalBuildOptions {
   persistEveryMsFulltext?: number;
   /** Concurrent full-text fetches while indexing one page of items (default 4). */
   fulltextConcurrency?: number;
+  /**
+   * The highest full-text version the source behind `fulltextFor` has seen, read once the
+   * pass is over. Stored beside the library version so a later update can ask Zotero's
+   * own full-text sequence what has been extracted since this build (#26).
+   */
+  fulltextVersion?: () => number;
   /** Sentence to carry on the status, e.g. why this rebuild replaced an update. */
   note?: string;
   /** Which API is serving these pages, recorded alongside the version stamp. */
   versionBackend?: VersionBackend;
+  /**
+   * Start over rather than resume: discard any checkpoint an interrupted build left and
+   * crawl the library from the top. `action:"refresh"` is what asks for it; a plain
+   * `action:"build"` resumes, because redoing work already committed is the thing #24 is
+   * about.
+   */
+  fresh?: boolean;
+}
+
+/** What Zotero's full-text sequence has extracted since a cursor, and the new cursor. */
+export interface FulltextCatchUp {
+  /** Indexed items whose attachments carry text newer than the cursor handed in. */
+  itemKeys: Set<string>;
+  /** The highest full-text version seen, to store once those items are indexed. */
+  version: number;
 }
 
 /**
@@ -249,6 +323,17 @@ export interface IncrementalUpdateOptions extends IncrementalBuildOptions {
    * app too.
    */
   liveKeys: () => Promise<Set<string>>;
+  /**
+   * Ask Zotero's full-text sequence what it has extracted since `since`, the cursor this
+   * index stored when it was built. Without it an update sees text extracted after the
+   * build only for items that also changed in some other way, which is almost none of
+   * them: opening a PDF makes Zotero extract it and touches no item version at all (#26).
+   *
+   * Costs one request on a library where nothing was extracted, and only then the
+   * attachment map behind `fulltextFor`. Omitted when the update was not asked for full
+   * text.
+   */
+  fulltextCatchUp?: (since: number) => Promise<FulltextCatchUp>;
 }
 
 export interface BuildOptions {
@@ -276,6 +361,11 @@ export interface IndexSnapshot {
   /** Real Zotero library version stamp, and which API issued it (absent in older files). */
   libraryVersion?: number;
   libraryBackend?: VersionBackend;
+  /** Cursor into Zotero's full-text sequence (absent in files written before #26). */
+  fulltextVersion?: number;
+  /** Where an interrupted build stopped (absent in files written before #24, and once
+   * a build has finished: a completed build has nothing to resume). */
+  checkpoint?: BuildCheckpoint;
 }
 
 export interface QueryOptions {

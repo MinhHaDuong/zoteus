@@ -15,7 +15,9 @@ can never time out the MCP client, even on very large libraries.
   embedder is configured. Returns at once; **poll `action: "status"`**
   every few seconds until `state` is `done` (or `error`). Calling build again while one
   is running does **not** start a second build — it returns the current progress.
-  `refresh` is an alias: both mean *from scratch*.
+  The two differ in one thing only: `build` **resumes** a build that was interrupted, where
+  one is on disk, while `refresh` always starts from scratch. See
+  [Resuming an interrupted build](#resuming-an-interrupted-build).
 - `action: "update"` re-indexes only what changed since the last build, and drops what the
   library no longer holds. This is the cheap one; see
   [Updating the index](#updating-the-index).
@@ -25,8 +27,11 @@ can never time out the MCP client, even on very large libraries.
   `itemsAvailable` (what the library holds, before the cap; larger than `itemsTotal`
   exactly when the build was truncated), `passages`, `vectors`, `items`, the
   **effective** `embedder`, `libraryVersion` / `libraryBackend` (the version stamp an
-  update diffs from), `updateNotice` (what the last update did, or why a rebuild replaced
-  it), and `lastError` when
+  update diffs from), `fulltextVersion` (how far into Zotero's separate full-text sequence
+  the index has read, see [Text extracted after the
+  build](#text-extracted-after-the-build)), `resumedFrom` (items inherited when a build
+  resumed an interrupted one), `updateNotice` (what the last update did, or why a rebuild
+  replaced it), and `lastError` when
   `state` is `error`. Backward-compatible fields (`documents`, `vectors`, `items`,
   `embedder`, `builtFromVersion`) are still present. Progress is also logged on the
   server (every 500 items / 10s).
@@ -45,9 +50,10 @@ can never time out the MCP client, even on very large libraries.
   opening it imported a JSON index, or refused to), and `persistError` (present when the
   index could not be written).
 - `action: "stop"` cooperatively cancels a running job. A build halts between
-  pages/batches and the partial index is kept and stays searchable; a stopped **update**
-  keeps what it applied but leaves the version stamp where it was, so the next update
-  simply repeats the delta.
+  pages/batches and the partial index is kept and stays searchable; it also leaves a
+  checkpoint, so the next `action:"build"` carries on from it rather than starting over. A
+  stopped **update** keeps what it applied but leaves the version stamp where it was, so the
+  next update simply repeats the delta.
 - `limit` — optional max number of items to index. It lowers the configured cap for one
   build and can never raise it: the build stops at the lower of `limit` and
   `ZOTEUS_INDEX_MAX_ITEMS` (default 5000).
@@ -116,7 +122,11 @@ moved**:
    The `/deleted` endpoint is cloud-only, so a key-set diff is the only way this works
    against the desktop app too. A deleted item takes its passages, its vectors and its
    FTS5 rows with it.
-4. Advances the version stamp **only after all of that succeeded**, and persists once.
+4. Asks Zotero's **full-text sequence**, a second and independently numbered one, what
+   it has extracted since the cursor the index stored, and indexes the new body text
+   through the same attachment-to-parent map a build uses. One request when nothing was
+   extracted. See [Text extracted after the build](#text-extracted-after-the-build).
+5. Advances both cursors **only after all of that succeeded**, and persists once.
    On SQLite the whole update is one transaction: a failure rolls back to the last good
    state rather than leaving an index that is half fresh. On the JSON backend nothing is
    written until the update succeeds, so the file on disk stays the last good one (the
@@ -130,16 +140,74 @@ immediately and `updateNotice` (repeated in the `status` summary) says which cas
 
 | Condition | Why a delta cannot work |
 |---|---|
-| No version stamp | An index built before 1.7, imported from an older JSON file, or left by a cancelled build, covers an unknown slice of the library. |
+| No version stamp | An index built before 1.7, imported from an older JSON file, or left by a cancelled build, covers an unknown slice of the library. The rebuild it falls back to **resumes** that cancelled build rather than starting over, see [Resuming an interrupted build](#resuming-an-interrupted-build). |
 | The serving backend changed | The desktop app and the cloud number their library versions independently, so a stamp from one names a different point in the other's sequence. Closing Zotero between runs is enough to trigger this. |
 | The embedding model changed | Only the changed items would come back with vectors in the new space; the rest would be ranked against a foreign one. (Same rule as [Changing the model](#tuning-api-embeddings).) |
 | The store cannot delete rows | Deleted items could never leave the index. Both shipped backends can, so this is a guard for future stores. |
 | The census came back empty | Treated as a failed read, not an emptied library: deletions are skipped, the stamp is withheld, and `updateNotice` says so rather than erasing the index. |
 
-**One caveat, for full text.** The delta is over top-level items, so an update sees an item
-whose own record changed. Newly extracted text on an attachment does not always bump its
-parent's version, so a PDF you opened in Zotero for the first time may not be picked up
-until that item is edited, or until the next full `action:"build"`.
+### Text extracted after the build
+
+Zotero numbers extracted full text on a sequence of its **own**, unrelated to item
+versions. Opening a PDF for the first time makes Zotero extract it and touches no item
+version at all, so that item appears in no `?since=` delta, ever. An update that keyed
+everything on the item version therefore left the index's full-text coverage frozen at
+build time, with a full rebuild as the only remedy.
+
+So a build records a second cursor beside the version stamp (`fulltextVersion` in
+`status`, the highest version in the `/fulltext?since=0` census it consumed), and an update
+asks `/fulltext?since=<that cursor>` for what has been extracted since. New text is
+attached to its parent item through the same attachment map the build uses, replacing that
+item's body passages and leaving its metadata ones alone. `updateNotice` counts them
+separately, because they are a different question answered by a different sequence: *"N
+unchanged item(s) gained newly extracted attachment full text."*
+
+- **On a library where nothing was extracted, this costs one request.** The probe comes
+  first and on its own; only a non-empty answer is worth building the attachment map.
+- **The cursor advances only when the update fully succeeded**, under the same rule as the
+  version stamp, so a failed update repeats the catch-up rather than skipping past it.
+- **An index written before 1.10 has no cursor.** The first update that wants full text
+  cannot tell which text is new, so it catches up its **coverage gap** instead: the items
+  holding no body passages at all. That runs once, because the same update stores a real
+  cursor. An index that holds no body text at all is left alone entirely: turning
+  `action:"update"` into the hours-long full-text crawl that was never asked for is not an
+  update. Run `action:"build"` with `fulltext:true` for that.
+- **`fulltext` must be on for the update too.** An update not asked for full text never
+  consults the other sequence at all.
+
+### Resuming an interrupted build
+
+A build stopped by `action:"stop"`, a crash or a restart used to be lost work: the only
+progress a build recorded was the version stamp, which is deliberately **withheld** from a
+build that did not finish (it covers an unknown slice of the library), and the desktop
+local API commonly answers with no version at all. So the next build cleared the store and
+crawled from 0 over items it had already fetched, chunked and paid to embed.
+
+A build now commits a **checkpoint** (the crawl offset, the pass it was in, the library
+totals it saw, the API that served it, the embedder identity, and the handful of passages
+queued but not yet embedded) in the same write as the rows it describes. `action:"build"`
+finds it and carries on:
+
+- Everything already committed stays searchable throughout, and is never re-fetched,
+  re-chunked or re-embedded. What gets redone is bounded by the last save (200 items / 10s
+  on the metadata pass, 500 items / 60s on the full-text one).
+- The resume point is a stored offset, not a search for one: no scan of the index, and the
+  first request asks for the item after the last one committed.
+- The stored offset is **verified** against the library's own totals on the first page it
+  reads, since Zotero pages items newest-modified-first and one edit made while Zoteus was
+  down shifts everything down by one. If they disagree, the crawl walks the library from
+  the top again and steps over what the index holds by key: pages, never re-embedding.
+- The full-text pass resumes on the same principle: items whose body text is already
+  indexed are skipped, so no PDF is read twice.
+- A resumed build stamps the library version the **interrupted** crawl began from, so
+  anything modified in between is still waiting for the next `action:"update"`.
+- It refuses to resume under a different embedding model: two vector spaces in one index is
+  exactly what an update is refused over, and a resume must not create it by the back door.
+- `status` reports `resumedFrom` (the items inherited), and `updateNotice` says outright
+  that a resume is what started.
+
+`action:"refresh"` is the one that always starts over: same crawl, checkpoint discarded.
+That is the only behavioural difference between the two actions.
 
 **The item cap still applies.** An update maintains the subset the index already holds: an
 item already indexed is refreshed however full the index is, a *new* one only while there
@@ -235,7 +303,9 @@ you decide whether to resume it.
 The version stamp an `action:"update"` diffs against is written only when *both* passes have
 finished. A build interrupted during the body crawl is deliberately left unstamped, because
 a stamp would make the next update skip every item whose attachments were never read: those
-items are unchanged in Zotero, so they would appear in no delta, ever.
+items are unchanged in Zotero, so they would appear in no delta, ever. The checkpoint is
+what such a build leaves instead, and `action:"build"` picks the body crawl up from it: see
+[Resuming an interrupted build](#resuming-an-interrupted-build).
 
 ## Storage backends
 
