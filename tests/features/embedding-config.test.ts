@@ -18,6 +18,7 @@ const silentLogger = { debug() {}, info() {}, warn() {}, error() {} } as any;
 interface Captured {
   url: string;
   body: any;
+  headers: Record<string, string>;
 }
 
 /** Stub fetch with a minimal OpenAI/Gemini embeddings endpoint, recording every request. */
@@ -26,7 +27,7 @@ function captureEmbeddingRequests(): Captured[] {
   const stub = (async (input: any, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const body = JSON.parse(String(init?.body));
-    calls.push({ url, body });
+    calls.push({ url, body, headers: Object.fromEntries(new Headers(init?.headers).entries()) });
     const json = url.includes('openai')
       ? { data: (body.input as string[]).map(() => ({ embedding: [1, 0, 0] })) }
       : { embeddings: (body.requests as unknown[]).map(() => ({ values: [1, 0, 0] })) };
@@ -184,6 +185,33 @@ describe('the API providers embed with the configured model', () => {
     } finally {
       if (previous === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previous;
+    }
+  });
+});
+
+describe('the API key travels in a header, never in the URL', () => {
+  // A URL is the part of a request that gets logged — by proxies, by error causes, by
+  // anything that prints which endpoint failed — so no request may carry the key there.
+  it('sends the Gemini key as x-goog-api-key', async () => {
+    const calls = captureEmbeddingRequests();
+    await new ApiEmbeddingProvider('gemini', 'g-secret').embed(['a']);
+    expect(calls[0]!.headers['x-goog-api-key']).toBe('g-secret');
+  });
+
+  it('sends the OpenAI key as a bearer token', async () => {
+    const calls = captureEmbeddingRequests();
+    await new ApiEmbeddingProvider('openai', 'o-secret').embed(['a']);
+    expect(calls[0]!.headers['authorization']).toBe('Bearer o-secret');
+  });
+
+  it('puts the key in no URL, for either provider', async () => {
+    const calls = captureEmbeddingRequests();
+    await new ApiEmbeddingProvider('gemini', 'g-secret', { batchSize: 1 }).embed(['a', 'b']);
+    await new ApiEmbeddingProvider('openai', 'o-secret').embed(['a']);
+    for (const { url } of calls) {
+      expect(url).not.toContain('g-secret');
+      expect(url).not.toContain('o-secret');
+      expect(url).not.toContain('key=');
     }
   });
 });

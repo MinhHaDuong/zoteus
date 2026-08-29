@@ -254,11 +254,15 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
       const json = (await res.json()) as any;
       return json.data.map((d: any) => d.embedding);
     }
+    // The key travels in a header, like the OpenAI one above, never in the URL: URLs are
+    // the part of a request that gets logged — by proxies, by error causes, by anything
+    // that prints which endpoint failed — and Google accepts x-goog-api-key everywhere
+    // ?key= works.
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:batchEmbedContents?key=${this.apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:batchEmbedContents`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
         body: JSON.stringify({
           requests: texts.map((t) => ({ model: `models/${this.model}`, content: { parts: [{ text: t }] } })),
         }),
