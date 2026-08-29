@@ -516,6 +516,81 @@ The first local build downloads the model (~25 MB) once, into
 `<ZOTEUS_DATA_DIR>/models` — so deleting the data directory removes the weights along
 with the index.
 
+### Tuning the local embedder
+
+`ZOTEUS_EMBEDDING_DTYPE` sets the precision the model's weights are loaded at. Unset — the
+default — nothing is passed and the runtime picks, which on Node is full precision (fp32).
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `ZOTEUS_EMBEDDING_DTYPE` | runtime default (fp32 on Node) | Weight precision for the **local** embedder, passed to the transformers pipeline verbatim. Valid values are the runtime's, not Zoteus's: `fp32`, `q8`, `int8`, `uint8`, `q4`, `bnb4` and others, depending on which the model publishes. |
+
+Precision is the axis that costs the most, and it is worth knowing before turning the dial
+that the ladder is **not monotone** — the smallest value is not the cheapest, let alone the
+fastest. Measured on `nomic-ai/nomic-embed-text-v1.5` (ONNX CPU, i5-8250U, batch 1, one
+process per rung; the same shape reproduces on Qwen3-Embedding-0.6B):
+
+| dtype | download | resident | query median |
+|---|---|---|---|
+| fp32 | 522.0 MB | 884.9 MB | 30.3 ms |
+| q8 | 130.9 MB | 235.2 MB | 18.0 ms |
+| int8 | 130.9 MB | 232.9 MB | 13.7 ms |
+| uint8 | 130.9 MB | 239.5 MB | 14.0 ms |
+| q4 | 157.5 MB | 247.4 MB | 25.2 ms |
+| bnb4 | 150.7 MB | 253.7 MB | 91.4 ms |
+
+`q4`'s published file is *larger* than `q8`'s, holds more memory and is slower; `bnb4` has
+no optimised CPU kernel and runs 5.1x slower than `q8` and 3x slower than full precision.
+Eight bits is the knee. On this model `q8` and `int8` are the same published file, so the
+gap between those two rows is the measurement noise floor rather than a difference.
+
+On the default model the same lever is smaller, because a fixed overhead is a larger share
+of a small model's total. `all-MiniLM-L6-v2`, warm, same machine:
+
+| | fp32 (default) | q8 |
+|---|---|---|
+| resident after load | 230.6 MB | 165.6 MB |
+| resident added by the load | 143.7 MB | 69.1 MB |
+| load | 415.2 ms | 191.1 ms |
+
+Query latency is where the knob buys least here, and the honest statement is that `q8` is
+not slower rather than that it is faster: at batch 1 a 384-dimension encoder is already at
+a few milliseconds, and run-to-run spread on that column is comparable to the gap between
+the two dtypes. Memory and load time are the reasons to reach for this.
+
+Two caveats worth having in advance:
+
+- **Not every value loads on every machine.** `fp16` and `q4f16` abort at session init on
+  the CPU provider with a graph-fusion error. Zoteus reports that rather than quietly
+  loading something else: semantic ranking goes off, keyword search keeps working, and
+  `zotero_index action:"status"` names the value, the model and the remedy. Substituting
+  the default precision instead would be friendlier for exactly one build and wrong
+  afterwards — the index records which embedder produced its vectors *before* it embeds
+  them, so vectors written at a precision other than the requested one would carry the
+  wrong label permanently, and nothing can detect that later because quantisation does not
+  change the vector's width.
+- **A value the runtime does not recognise is not an error.** It is ignored silently and
+  you get the default precision, bit-identical to it. Nothing reports this — not the log,
+  not `status` — so a typo in this variable is invisible, and the only way to know the
+  setting took effect is that resident memory drops.
+
+**Changing the precision means rebuilding the index**, for the same reason changing the
+model does. Quantised vectors are close to their full-precision originals but not equal:
+on `all-MiniLM-L6-v2`, `q8` scores 0.992652 cosine against the fp32 default. That is far
+enough to make ranking one against the other quietly worse, so the precision is part of the
+stored embedder identity (`local:Xenova/all-MiniLM-L6-v2@q8`) and switching it discards the
+stored vectors with a notice, exactly as switching models does. An index built before this
+option existed carries no precision in its identity and is left alone.
+
+**The execution device is not configurable, and Zoteus passes none.** The runtime's Node
+default is the CPU provider. Its `device: 'auto'` is not a safe substitute: it hands ONNX
+Runtime the whole per-platform provider list, and on linux-x64 that list always begins with
+CUDA — selected on platform and architecture alone, never on whether CUDA is usable. There
+is no fallback loop behind it, so on a machine with no NVIDIA runtime the session fails
+outright with `OrtSessionOptionsAppendExecutionProvider_Cuda: Failed to load shared library
+… libcublasLt.so.12`, where the same call with no device option loads and serves. Measured
+on `@huggingface/transformers` 4.2.0.
+
 ### Why it is not bundled
 
 `@huggingface/transformers` statically imports `onnxruntime-node`, whose prebuilt native

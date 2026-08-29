@@ -15,6 +15,7 @@ A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, 
 | `ZOTEUS_TRANSLATION_SERVER_URL` | `http://127.0.0.1:1969` | Optional Zotero translation-server for `zotero_import`. Without it, DOI and arXiv ids still resolve via built-in fallbacks; ISBN/PMID/bibcode and URLs need the server. See [`resolver.md`](./resolver.md). |
 | `ZOTEUS_EMBEDDINGS` | `local` | Semantic-search embeddings provider (`local` model, `openai`, `gemini`, or `off`). |
 | `ZOTEUS_EMBEDDING_MODEL` | provider default | Embedding model for whichever API provider `ZOTEUS_EMBEDDINGS` selected (`text-embedding-3-small` for `openai`, `text-embedding-004` for `gemini`). Vectors from two models are not comparable, so an index built with one is dropped, with a notice, when the server starts embedding with another: rebuild after changing it. See [`semantic-search.md`](./semantic-search.md#tuning-api-embeddings). |
+| `ZOTEUS_EMBEDDING_DTYPE` | runtime default (fp32 on Node) | Weight precision for the **local** embedder, passed to the transformers pipeline verbatim; valid values are the runtime's (`q8`, `int8`, `uint8`, `q4`, …), not an allowlist here. The ladder is not monotone — `q4` is larger, heavier and slower than `q8` — and a value the runtime cannot load turns semantic ranking off with a named reason rather than substituting another precision. Precision is part of the stored embedder identity, so changing it rebuilds the index. The execution device is not configurable. See [`semantic-search.md`](./semantic-search.md#tuning-the-local-embedder). |
 | `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call: one API request, or one local pipeline call. Lower it when a provider rejects a batch outright (OpenAI answers `400` above 300K tokens per request, a ceiling full-text passages reach far sooner than metadata ones). |
 | `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop (unchanged behaviour); a positive value sleeps, which is how a large build stays under a provider's tokens-per-minute limit. |
 | `ZOTEUS_TRANSFORMERS_PATH` | — | Where to resolve `@huggingface/transformers` from when the install cannot see it itself (notably a `.mcpb` bundle). Point it at the directory `npm root -g` prints. See [`semantic-search.md`](./semantic-search.md). |
@@ -48,6 +49,7 @@ environment once, at startup).
 | Zotero local API | `ZOTEUS_LOCAL` |
 | Semantic-search embeddings | `ZOTEUS_EMBEDDINGS` |
 | Embedding model | `ZOTEUS_EMBEDDING_MODEL` |
+| Local embedder weight precision | `ZOTEUS_EMBEDDING_DTYPE` |
 | Embedding batch size | `ZOTEUS_EMBED_BATCH_SIZE` |
 | Pause between embedding calls (ms) | `ZOTEUS_EMBED_BATCH_DELAY_MS` |
 | Index PDF full text | `ZOTEUS_INDEX_FULLTEXT` |

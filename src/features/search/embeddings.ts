@@ -9,6 +9,8 @@ export interface EmbeddingProvider {
   readonly name: string;
   /** Model producing the vectors; part of the index's embedder identity. */
   readonly model?: string;
+  /** Weight precision actually in use, when the provider has one; also part of that identity. */
+  readonly dtype?: string;
   embed(texts: string[]): Promise<number[][]>;
 }
 
@@ -25,9 +27,20 @@ export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
  * Identity of the vectors a provider produces. Two models never share a vector space (nor,
  * usually, a dimension), so an index persists this and refuses to rank its stored vectors
  * against queries embedded by a different one. See SearchIndex.loadFromJSON.
+ *
+ * Precision belongs in the identity for the same reason the model does, if less obviously:
+ * quantising the weights moves the vectors far enough to matter. Measured on
+ * Xenova/all-MiniLM-L6-v2, q8 against the fp32 default scores 0.992652 cosine — a real
+ * distance, not a rounding artifact, and well outside the band where two spaces can be
+ * ranked against each other. An index that mixed them would silently rank q8 rows against
+ * fp32 queries with nothing to show for it but slightly worse answers.
+ *
+ * An unset dtype keeps the identity it has always had, so no existing index is invalidated
+ * by this field appearing.
  */
-export function embedderIdentity(p: { name: string; model?: string }): string {
-  return p.model ? `${p.name}:${p.model}` : p.name;
+export function embedderIdentity(p: { name: string; model?: string; dtype?: string }): string {
+  const base = p.model ? `${p.name}:${p.model}` : p.name;
+  return p.dtype ? `${base}@${p.dtype}` : base;
 }
 
 /**
@@ -154,8 +167,28 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       batchSize?: number;
       /** Pause between batches in ms (see batchPause). */
       batchDelayMs?: number;
+      /** Weight precision passed to the pipeline; unset keeps the runtime's default. */
+      dtype?: string;
     } = {},
   ) {}
+
+  /**
+   * The precision these vectors are produced at. Constant for the provider's life, which
+   * is load-bearing rather than incidental.
+   *
+   * This value feeds the embedder identity, and the index stamps that identity BEFORE the
+   * first embed call — `SearchIndexBase.build` sets `vectorEmbedderId` while the records
+   * are still unembedded, and the incremental path does the same. A provider that quietly
+   * downgraded its precision on a failed load would therefore stamp one identity and then
+   * produce vectors of another, leaving the index labelled with a precision it does not
+   * hold. Nothing downstream could catch that: quantisation does not change the vector
+   * width, so the dimension check on the query path sees nothing wrong, and the identity
+   * string is the only defence there is. A precision that will not load is an error, never
+   * a silent substitution.
+   */
+  get dtype(): string | undefined {
+    return this.opts.dtype;
+  }
 
   private async ensure(): Promise<any> {
     if (this.extractor) return this.extractor;
@@ -188,8 +221,52 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     // is supposed to be the whole uninstall, and the weights are its largest artifact.
     const env = transformers.env ?? transformers.default?.env;
     if (env && this.opts.modelCacheDir) env.cacheDir = this.opts.modelCacheDir;
-    this.extractor = await pipeline('feature-extraction', this.model);
+    this.extractor = await this.construct(pipeline);
     return this.extractor;
+  }
+
+  /**
+   * Build the pipeline at the configured precision.
+   *
+   * The options object is built rather than spelled out so an unset dtype leaves the key
+   * ABSENT. `{dtype: undefined}` is a third call shape, distinct from both this one and
+   * from the bare call that shipped before, and passing it would make the default path
+   * depend on how the runtime happens to treat an explicit undefined.
+   *
+   * A precision that will not load is reported, not worked around. Measured on
+   * @huggingface/transformers 4.2.0, linux-x64: `fp16` throws at session init on the CPU
+   * provider — a graph-fusion failure, not a missing kernel. Retrying at the default
+   * precision would keep semantic search alive, and was the first thing tried here; it is
+   * wrong because of what the precision is wired into. See the `dtype` getter: the index
+   * stamps the embedder identity before the first embed, so a provider that changed
+   * precision mid-flight would leave the stored vectors labelled with a precision they do
+   * not have, which is the one failure the identity exists to prevent and the one nothing
+   * downstream can detect.
+   *
+   * Failing here is not "taking the server down". It reaches `noteEmbedFailure` like any
+   * other embedder failure, so the index falls back to keyword-only, reports the reason
+   * through `embedderReason`, and repeats it in every search summary — the same path a
+   * missing @huggingface/transformers already takes. The message names the value and the
+   * model, because the remedy is to change or unset one environment variable.
+   *
+   * Note what this does NOT cover. An unrecognised value such as `q7` never throws: the
+   * runtime ignores it and serves the default precision, bit-identical. No catch can see
+   * that, so nothing here pretends to guard against a mistyped dtype.
+   */
+  private async construct(pipeline: (...args: any[]) => Promise<any>): Promise<any> {
+    const pipelineOpts: { dtype?: string } = {};
+    if (this.opts.dtype) pipelineOpts.dtype = this.opts.dtype;
+    try {
+      return await pipeline('feature-extraction', this.model, pipelineOpts);
+    } catch (e) {
+      if (!this.opts.dtype) throw e;
+      throw new Error(
+        `ZOTEUS_EMBEDDING_DTYPE=${this.opts.dtype} could not be loaded for ${this.model} ` +
+          `(${e instanceof Error ? e.message : String(e)}). Semantic ranking is off; keyword (BM25) ` +
+          'search still works. Unset the variable to use the runtime default precision, or pick a ' +
+          'value this model publishes and that loads on this machine.',
+      );
+    }
   }
 
   /**
@@ -336,6 +413,16 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         logger?.warn(`ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed; using keyword-only search.`);
         return { provider: null, configured: 'local', unavailable: missingTransformersHint(config) };
       }
+      // No `device` is passed, deliberately. The runtime's Node default is already
+      // ['cpu']; `device: 'auto'` hands ONNX Runtime the whole per-platform provider list
+      // instead, and on linux-x64 that list always begins with CUDA — gated on
+      // platform/arch alone, never on whether CUDA is usable. There is no fallback loop to
+      // catch it: createInferenceSession passes the list straight to the binding. Measured
+      // on a clean install of @huggingface/transformers 4.2.0 with no NVIDIA runtime
+      // present, `device: 'auto'` fails the session outright with
+      // "OrtSessionOptionsAppendExecutionProvider_Cuda: Failed to load shared library
+      // ... libcublasLt.so.12", where the same call with no device option loads and serves.
+      // That is the shipped default path for most Linux users, so it stays untouched.
       return {
         provider: new LocalEmbeddingProvider(undefined, undefined, {
           transformersPath: config.transformersPath,
@@ -343,6 +430,7 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
           modelCacheDir: join(config.dataDir, 'models'),
           batchSize: config.embedBatchSize,
           batchDelayMs: config.embedBatchDelayMs,
+          dtype: config.embeddingDtype,
         }),
         configured: 'local',
       };

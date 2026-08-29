@@ -16,6 +16,12 @@ export interface ZoteusConfig {
   embeddings: 'local' | 'openai' | 'gemini' | 'off';
   /** Model for the active API embedder (unset = that provider's own default). */
   embeddingModel?: string;
+  /**
+   * Weight precision for the local embedder, passed through to the transformers pipeline
+   * (unset = the runtime's own default, fp32 on Node). Not enumerated here: the valid set
+   * belongs to the runtime and a local copy of it would rot.
+   */
+  embeddingDtype?: string;
   /** Passages per embedding call (unset = DEFAULT_EMBED_BATCH_SIZE where one is batched). */
   embedBatchSize?: number;
   /** Pause between embedding batches in ms; 0 only yields to the event loop. */
@@ -162,6 +168,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_TRANSLATION_SERVER_URL: z.string().url().default('http://127.0.0.1:1969'),
         ZOTEUS_EMBEDDINGS: z.enum(['local', 'openai', 'gemini', 'off']).default('local'),
         ZOTEUS_EMBEDDING_MODEL: z.string().min(1).optional(),
+        ZOTEUS_EMBEDDING_DTYPE: z.string().min(1).optional(),
         ZOTEUS_EMBED_BATCH_SIZE: z.coerce.number().int().positive().optional(),
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
         ZOTEUS_TRANSFORMERS_PATH: z.string().min(1).optional(),
@@ -304,6 +311,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     translationServerUrl: parsed.ZOTEUS_TRANSLATION_SERVER_URL,
     embeddings: parsed.ZOTEUS_EMBEDDINGS,
     embeddingModel: parsed.ZOTEUS_EMBEDDING_MODEL?.trim() || undefined,
+    embeddingDtype: parsed.ZOTEUS_EMBEDDING_DTYPE?.trim() || undefined,
     embedBatchSize: parsed.ZOTEUS_EMBED_BATCH_SIZE,
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
     transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,
