@@ -8,6 +8,7 @@ import { Semaphore } from '../../lib/semaphore.js';
 import { progressLine } from './build.js';
 import { saveIndex } from './persistence.js';
 import type {
+  BuildCheckpoint,
   BuildOptions,
   BuildState,
   ChunkRecord,
@@ -17,6 +18,7 @@ import type {
   IndexCounts,
   IndexSnapshot,
   PageFetcher,
+  PageResult,
   QueryOptions,
   RankedId,
   SearchHit,
@@ -30,9 +32,11 @@ import type {
 // The contract and its types live in backend.ts (two implementations share them); they are
 // re-exported here because this module was their home and every caller still imports it.
 export type {
+  BuildCheckpoint,
   BuildOptions,
   BuildState,
   ChunkRecord,
+  FulltextCatchUp,
   IncrementalBuildOptions,
   IncrementalUpdateOptions,
   IndexBuildStatus,
@@ -74,6 +78,15 @@ function itemText(d: any): string {
   return [d.title, d.abstractNote, creators, tags, d.date, d.publicationTitle, d.bookTitle, d.note]
     .filter(Boolean)
     .join('. ');
+}
+
+/**
+ * An item's key, from either shape the APIs return it in (a wrapped item, or the `data`
+ * object alone). Empty when it has none, which every caller reads as "not indexable".
+ */
+function itemKeyOf(item: any): string {
+  const d = item?.data ?? item;
+  return item?.key ?? d?.key ?? '';
 }
 
 /**
@@ -156,6 +169,19 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   protected libraryVersion = 0;
   protected libraryBackend: VersionBackend | undefined = undefined;
+  /**
+   * How far into Zotero's FULL-TEXT sequence this index has read. A second cursor because
+   * it counts a second sequence: Zotero numbers extracted text independently of item
+   * versions, so text extracted after a build moves no item version, appears in no
+   * `?since=` delta, and was invisible to every later update (#26).
+   */
+  protected fulltextVersion = 0;
+  /**
+   * Where an interrupted build stopped, or undefined when there is nothing to resume.
+   * Written in the same commit as the rows it describes, which is what bounds the work a
+   * resume redoes to a single persistence interval (#24).
+   */
+  protected checkpoint: BuildCheckpoint | undefined = undefined;
   /** What the last update did, or why a rebuild replaced it (see IndexBuildStatus). */
   protected updateNotice: string | undefined = undefined;
   /**
@@ -221,6 +247,8 @@ export abstract class SearchIndexBase implements SearchIndex {
   private phase: 'metadata' | 'fulltext' = 'metadata';
   private fulltextItemsScanned = 0;
   private fulltextItemsTotal = 0;
+  /** Items a resumed build inherited from the run it is continuing (see IndexBuildStatus). */
+  private resumedFrom: number | undefined = undefined;
   private lastBuildError: string | undefined = undefined;
   private cancelToken: { cancelled: boolean } | null = null;
   /**
@@ -259,6 +287,24 @@ export abstract class SearchIndexBase implements SearchIndex {
    * why this may be materialized: the deletion diff needs the whole set at once anyway.
    */
   protected abstract listItemKeys(): string[];
+  /**
+   * Every item in the store as the key and title a full-text pass needs to come back to
+   * it, in the order the crawl added them. Same bound as `listItemKeys`, and the reason a
+   * resumed build can rebuild its worklist without re-crawling the library or reading a
+   * single stored passage (#24).
+   */
+  protected abstract listItems(): Array<{ key: string; title: string }>;
+  /** The title recorded for an indexed item (undefined when the store does not hold it). */
+  protected abstract itemTitle(itemKey: string): string | undefined;
+  /** True when the store already holds attachment body passages for this item. */
+  protected abstract hasFulltext(itemKey: string): boolean;
+  /**
+   * Remove only this item's body passages, leaving its metadata ones. What a full-text
+   * catch-up needs: the item itself did not change, so re-fetching and re-chunking its
+   * metadata would be waste, but its `#f<n>` passage ids have to be free before new ones
+   * are written under them.
+   */
+  protected abstract clearFulltext(itemKey: string): void;
   /** False when this store cannot delete rows, which makes an update impossible. */
   abstract readonly supportsDelete: boolean;
   /** Attach a vector to an already-stored passage. */
@@ -398,6 +444,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextItemsScanned: this.fulltextItemsScanned,
       fulltextItemsTotal: this.fulltextItemsTotal,
     };
+    if (this.resumedFrom !== undefined) s.resumedFrom = this.resumedFrom;
     if (this.fault) {
       s.state = 'error';
       s.lastError = UNREADABLE_STORE;
@@ -439,6 +486,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextPassages: c.fulltextPassages,
       builtFromVersion: this.builtFromVersion,
       libraryVersion: this.libraryVersion,
+      fulltextVersion: this.fulltextVersion,
     };
     if (this.libraryBackend) s.libraryBackend = this.libraryBackend;
     const reason = this.embedderReason;
@@ -467,6 +515,10 @@ export abstract class SearchIndexBase implements SearchIndex {
     // behind would make the next update fetch `?since=` against passages that are gone.
     this.libraryVersion = 0;
     this.libraryBackend = undefined;
+    // Both cursors go for the same reason: the full-text one names text that is no longer
+    // indexed, and the checkpoint names a crawl whose committed rows have just been erased.
+    this.fulltextVersion = 0;
+    this.checkpoint = undefined;
   }
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
@@ -511,6 +563,45 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /**
+   * Whether this build can carry on from where an interrupted one stopped, and from where.
+   *
+   * The checkpoint alone is not enough: it describes rows this index still has to be
+   * holding, embedded by the model it still has to be using. A resume under another
+   * embedder would leave two vector spaces in one index, which is the very thing
+   * `updateBlocker` refuses a delta over.
+   */
+  private resumeFrom(opts: IncrementalBuildOptions): BuildCheckpoint | undefined {
+    if (opts.fresh) return undefined;
+    const cp = this.checkpoint;
+    if (!cp) return undefined;
+    // Nothing committed: a resume would be a build with extra steps, and its "no version
+    // stamp" report would be misleading rather than merely redundant.
+    if (this.counts().documents === 0) return undefined;
+    if ((cp.embedderId ?? undefined) !== this.embedderId) return undefined;
+    return cp;
+  }
+
+  /**
+   * Whether a checkpoint's crawl OFFSET can still be trusted, judged from the first page
+   * the resumed crawl read.
+   *
+   * Only the offset: the committed rows are kept either way, since they are keyed by item
+   * key, which means the same thing on both APIs and at any offset. What can go stale is
+   * the position: Zotero pages items newest-modified first, so one item touched while the
+   * build was stopped shifts every later item down by one, and resuming at the old offset
+   * would step over an item that was never indexed. The library's own totals are what
+   * detect that, and they are the only identity the desktop app offers: it commonly serves
+   * no Last-Modified-Version at all, which is precisely why the version stamp could never
+   * be the resume cursor (#24).
+   */
+  private offsetStillHolds(cp: BuildCheckpoint, page: PageResult, backend: VersionBackend | undefined): boolean {
+    if (cp.backend !== backend) return false;
+    if (cp.itemsAvailable && page.totalResults && cp.itemsAvailable !== page.totalResults) return false;
+    if (cp.crawlVersion && page.lastModifiedVersion && cp.crawlVersion !== page.lastModifiedVersion) return false;
+    return true;
+  }
+
+  /**
    * Asynchronous, incremental, resumable index build.
    *
    * Pages items via `fetchPage`, chunks/keyword-indexes them as they arrive, embeds in
@@ -518,10 +609,18 @@ export abstract class SearchIndexBase implements SearchIndex {
    * timeout, crash, or `requestStop()` never leaves a corrupt index and whatever was
    * saved stays queryable. Returns the final build status; the caller should kick this
    * off without awaiting (fire-and-forget) and poll `buildStatus()`.
+   *
+   * A build that finds a checkpoint from an interrupted run carries on from it instead of
+   * clearing the store and crawling from 0: the committed passages stay searchable and are
+   * never re-chunked or re-embedded, and only the work since the last commit is redone
+   * (#24). `opts.fresh` is how a caller asks for the old behaviour outright.
    */
   async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
     this.refuseIfFaulted();
     if (this.isBuilding) throw new Error('Index build already in progress; poll action:"status".');
+    // Read before anything is reset, and in the synchronous prologue, so the status the
+    // fire-and-forget caller returns to its user already says a resume is what started.
+    const resume = this.resumeFrom(opts);
     this.buildState = 'building';
     this.operation = 'build';
     this.lastBuildError = undefined;
@@ -529,21 +628,42 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.persistError = undefined;
     // A rebuild is the retry for full text too: clear the previous run's verdict so a
     // library that has since been extracted in Zotero stops reporting the old reason.
-    this.fulltextEnabled = Boolean(opts.fulltextFor);
     this.fulltextUnavailable = undefined;
-    this.itemsFetched = 0;
     this.itemsRemoved = 0;
-    this.itemsTotal = 0;
-    this.itemsAvailable = 0;
     this.phase = 'metadata';
     this.fulltextItemsScanned = 0;
     this.fulltextItemsTotal = 0;
+    this.resumedFrom = undefined;
     // Carried from the caller, e.g. the reason an update fell back to this rebuild, so it
     // must survive the reset below rather than being cleared with the rest of the state.
     this.updateNotice = opts.note;
     const token = { cancelled: false };
     this.cancelToken = token;
-    this.reset();
+    /**
+     * Items already in the store when a resumed build began, so its crawl can step over
+     * them: an item committed by the run being continued is already chunked, already
+     * embedded and already searchable, and re-indexing it would pay for it twice and (on
+     * a re-crawl from the top) risk writing its passages a second time. Bounded by items,
+     * not by passages, so finding the resume point never walks the index.
+     */
+    let known: Set<string> | undefined;
+    if (resume) {
+      // The store is kept exactly as it is, so what it holds keeps answering queries
+      // throughout, and the counters it was committed with come back with it.
+      this.itemsTotal = resume.itemsTotal;
+      this.itemsAvailable = resume.itemsAvailable;
+      known = new Set(this.listItemKeys());
+      this.itemsFetched = known.size;
+      this.resumedFrom = known.size;
+    } else {
+      this.itemsFetched = 0;
+      this.itemsTotal = 0;
+      this.itemsAvailable = 0;
+      this.reset();
+    }
+    // A resumed build inherits the body passages the interrupted one committed, so it is a
+    // full-text index whether or not this run was asked to crawl any more of them.
+    this.fulltextEnabled = Boolean(opts.fulltextFor) || (resume ? this.counts().fulltextPassages > 0 : false);
     this.vectorEmbedderId = this.embedderId;
 
     const embedBatchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
@@ -573,14 +693,67 @@ export abstract class SearchIndexBase implements SearchIndex {
      * would fetch text for items this index does not hold and miss ones it does.
      */
     const worklist: Array<{ key: string; title: string }> | undefined = opts.fulltextFor ? [] : undefined;
+    // A resume's crawl never re-reads the items it inherited, so their place in the
+    // full-text worklist comes from the store instead, in the order they were indexed.
+    // Appended one by one rather than spread: the list is as long as the library, and a
+    // spread that long is an argument list long enough to overflow the stack.
+    if (worklist && resume) for (const entry of this.listItems()) worklist.push(entry);
     /** Set when the full-text pass could not read anything at all; see where it is used. */
     let fulltextPassFailed = false;
-    let start = 0;
-    let crawlVersion = 0;
+    let fulltextFailures = 0;
+    // Where the crawl reads next, and the one number a resume needs: it was committed with
+    // the rows, so what a resume redoes is bounded by the last persistence interval.
+    let start = resume ? resume.crawlOffset : 0;
+    // A resumed build stamps the version the INTERRUPTED crawl began from, not the one it
+    // sees now. Everything modified in between then sorts after the stamp and is still
+    // waiting for the next update, exactly as it would have been had the build run through.
+    let crawlVersion = resume?.crawlVersion ?? 0;
+    // Cleared by the first page a resume reads, which is where the stored offset is either
+    // confirmed or abandoned in favour of a walk from the top.
+    let offsetUnverified = Boolean(resume);
+    /** Set when that verification failed and the crawl went back to the top. */
+    let recrawled = false;
+    /**
+     * Say outright that this build is continuing an interrupted one rather than starting
+     * over. Written in the prologue, so a caller polling status while the crawl runs is
+     * told what it is watching, and again at the end, once whether the offset held is
+     * known. Without it, a resume and the rebuild-from-0 it replaced look identical from
+     * the outside, which is how #24 was reported in the first place.
+     */
+    const noteResumed = (): void => {
+      const how = recrawled
+        ? 'The library had moved on since, so the crawl walked the whole library again to be sure of covering it, ' +
+          'but nothing already indexed was re-chunked or re-embedded.'
+        : `The crawl picked up at item ${resume!.crawlOffset}, so nothing already indexed was re-fetched or re-embedded.`;
+      const resumed = `This build RESUMED an interrupted one: ${this.resumedFrom} items were already indexed. ${how}`;
+      this.updateNotice = opts.note ? `${opts.note} ${resumed}` : resumed;
+    };
+    if (resume) noteResumed();
     let itemsSincePersist = 0;
     let lastPersistAt = Date.now();
     let itemsSinceLog = 0;
     let lastLogAt = Date.now();
+
+    /**
+     * Record where a resume would pick this build up. Called immediately before every
+     * persist, so the checkpoint and the rows it describes reach disk in the same write
+     * (on SQLite, the same transaction): a checkpoint ahead of the rows would skip items
+     * that were never committed.
+     */
+    const noteCheckpoint = (): void => {
+      this.checkpoint = {
+        phase: this.phase,
+        crawlOffset: start,
+        itemsAvailable: this.itemsAvailable,
+        itemsTotal: this.itemsTotal,
+        maxItems: maxItems ?? 0,
+        crawlVersion,
+        fulltext: Boolean(opts.fulltextFor),
+        ...(opts.versionBackend ? { backend: opts.versionBackend } : {}),
+        ...(this.vectorEmbedderId ? { embedderId: this.vectorEmbedderId } : {}),
+        ...(pending.length ? { pendingPassages: pending.map((r) => r.id) } : {}),
+      };
+    };
 
     const persistNow = async (): Promise<void> => {
       itemsSincePersist = 0;
@@ -598,7 +771,9 @@ export abstract class SearchIndexBase implements SearchIndex {
     const maybePersist = async (): Promise<void> => {
       const everyItems = this.phase === 'fulltext' ? persistEveryItemsFt : persistEveryItems;
       const everyMs = this.phase === 'fulltext' ? persistEveryMsFt : persistEveryMs;
-      if (itemsSincePersist >= everyItems || Date.now() - lastPersistAt >= everyMs) await persistNow();
+      if (itemsSincePersist < everyItems && Date.now() - lastPersistAt < everyMs) return;
+      noteCheckpoint();
+      await persistNow();
     };
     const forceLog = (): void => {
       itemsSinceLog = 0;
@@ -615,10 +790,35 @@ export abstract class SearchIndexBase implements SearchIndex {
       this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, force);
 
     try {
+      // The passages the interrupted run had written but not yet embedded, re-queued
+      // through the same path everything else takes. They are committed and searchable on
+      // keywords already; this is what stops a resumed index from settling a batch of
+      // vectors short of the one an uninterrupted build produces.
+      if (resume?.pendingPassages?.length && this.hasEmbedder) {
+        for (const id of resume.pendingPassages) {
+          const rec = this.passage(id);
+          if (rec) pending.push(rec);
+        }
+      }
       for (;;) {
         if (token.cancelled) break;
         if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
         const page = await fetchPage(start);
+        if (offsetUnverified) {
+          offsetUnverified = false;
+          if (!this.offsetStillHolds(resume!, page, opts.versionBackend)) {
+            // The library moved while this build was stopped, so the stored offset points
+            // somewhere else now. Walk from the top instead: the committed rows are kept
+            // and stepped over by key, so this costs pages, never re-chunking or re-embedding.
+            start = 0;
+            recrawled = true;
+            // The totals came back with the checkpoint and are exactly what just failed to
+            // match, so let the next page re-derive them.
+            this.itemsTotal = 0;
+            this.itemsAvailable = 0;
+            continue;
+          }
+        }
         // The library as it stood when the crawl began: recorded once, from the first page,
         // so a change made mid-crawl stays after the stamp and the next update still sees it.
         if (!crawlVersion && page.lastModifiedVersion) crawlVersion = page.lastModifiedVersion;
@@ -628,12 +828,24 @@ export abstract class SearchIndexBase implements SearchIndex {
           this.itemsAvailable = page.totalResults;
           this.itemsTotal = maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
         }
-        // Only the items that still fit under the cap are worth indexing at all.
-        const room = maxItems === undefined ? pageItems.length : Math.max(0, maxItems - this.itemsFetched);
-        const batch = pageItems.slice(0, room);
-        for (let i = 0; i < batch.length; i++) {
+        /**
+         * Items of this page the crawl actually got through, which is what `start` may
+         * advance by. Not the page's length: a stop lands between two items, and counting
+         * the whole page would put the checkpoint's offset past items nothing indexed, and
+         * a resume would then step over them and they would never be indexed at all.
+         */
+        let consumed = 0;
+        for (const item of pageItems) {
           if (token.cancelled) break;
-          const entry = this.addMetadata(batch[i], pending);
+          // Only the items that still fit under the cap are worth indexing at all. Checked
+          // per item rather than by slicing the page, because an item a resume already
+          // holds costs nothing against the cap and must not consume one of its places.
+          if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
+          consumed++;
+          // Already committed by the run this one is resuming: it is indexed, embedded and
+          // searchable, and its place in the full-text worklist came from the store.
+          if (known?.has(itemKeyOf(item))) continue;
+          const entry = this.addMetadata(item, pending);
           // Recorded now, crawled in the second pass. Truncating here rather than there is
           // what keeps the item cap honest without re-checking it against a moving count.
           if (entry && worklist) worklist.push(entry);
@@ -641,7 +853,7 @@ export abstract class SearchIndexBase implements SearchIndex {
           itemsSincePersist++;
           itemsSinceLog++;
         }
-        start += pageItems.length;
+        start += consumed;
         await embedPending(false);
         maybeLog();
         await maybePersist();
@@ -657,6 +869,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       // save nothing survives a restart, and a second process sharing the data dir sees
       // nothing at all.
       if (!token.cancelled) await embedPending(true);
+      noteCheckpoint();
       await persistNow();
 
       if (worklist && !token.cancelled) {
@@ -673,8 +886,14 @@ export abstract class SearchIndexBase implements SearchIndex {
         // than awaited one by one: on a library where a minority of items have PDFs that is
         // most of the worklist, and each would otherwise cost a round trip to learn nothing.
         const servable = await opts.fulltextKeys?.().catch(() => undefined);
-        const todo = servable ? worklist.filter((e) => servable.has(e.key)) : worklist;
-        this.fulltextItemsTotal = todo.length;
+        const wanted = servable ? worklist.filter((e) => servable.has(e.key)) : worklist;
+        this.fulltextItemsTotal = wanted.length;
+        // A resumed pass skips the items whose body text is already in the store, which is
+        // both the resume point and the reason no body is ever fetched or embedded twice.
+        // Position in the worklist could not do this job: which items are servable is
+        // decided by a census taken now, and Zotero may have extracted more since.
+        const todo = resume ? wanted.filter((e) => !this.hasFulltext(e.key)) : wanted;
+        this.fulltextItemsScanned = wanted.length - todo.length;
         for (let i = 0; i < todo.length && !token.cancelled; i += PAGE_GROUP) {
           const group = todo.slice(i, i + PAGE_GROUP);
           const texts = await this.fulltextForKeys(group, opts, token, fulltextLimit);
@@ -699,6 +918,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         // complete, and be silently missing most of its body text for good: the items it
         // never read are unchanged in Zotero, so no `?since=` delta will ever revisit them.
         const failures = opts.fulltextFailures?.() ?? 0;
+        fulltextFailures = failures;
         if (failures > 0 && !token.cancelled) {
           fulltextPassFailed = failures >= todo.length;
           this.fulltextUnavailable =
@@ -729,8 +949,19 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.versionBackend;
       }
+      // The other sequence's cursor, and it is withheld one notch more strictly than the
+      // stamp: an item whose body could not be read holds no passages, and leaving the
+      // cursor where it was is exactly what sends the next update back for it (#26).
+      if (!token.cancelled && worklist && fulltextFailures === 0) {
+        this.fulltextVersion = opts.fulltextVersion?.() ?? this.fulltextVersion;
+      }
+      // A finished build has nothing left to resume; a stopped one is the whole point of
+      // keeping this, and its checkpoint has to reach disk in the same write as its rows.
+      if (token.cancelled) noteCheckpoint();
+      else this.checkpoint = undefined;
       await persistNow();
       this.buildState = 'done';
+      if (resume) noteResumed();
       const final = this.buildStatus();
       this.opts.logger?.info(`index build ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`);
       opts.onProgress?.(final);
@@ -739,7 +970,10 @@ export abstract class SearchIndexBase implements SearchIndex {
       this.buildState = 'error';
       this.lastBuildError = e instanceof Error ? e.message : String(e);
       this.opts.logger?.error(`index build failed: ${this.lastBuildError}`);
-      // Keep whatever partial data we already indexed, and persist it best-effort.
+      // Keep whatever partial data we already indexed, and persist it best-effort, with the
+      // checkpoint that says where to pick it up: a build that died on page 400 of a crawl
+      // must not send the next one back to page 0.
+      noteCheckpoint();
       await persistNow().catch(() => {});
       opts.onProgress?.(this.buildStatus());
       return this.buildStatus();
@@ -760,7 +994,13 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
     if (this.isEmpty) return 'the index is empty';
     if (!this.libraryVersion) {
-      return 'this index carries no library version stamp (it predates incremental updates, or its last build was cancelled)';
+      // Two different situations behind one missing stamp, and only one of them means the
+      // committed rows are about to be thrown away: an interrupted build left a checkpoint,
+      // so the rebuild this refusal sends the caller to carries on from it (#24).
+      return this.checkpoint
+        ? 'this index carries no library version stamp because the build that would have written one was ' +
+            'interrupted; the full build below RESUMES that one rather than starting over'
+        : 'this index carries no library version stamp (it predates incremental updates, or its last build was cancelled)';
     }
     if (this.libraryBackend && this.libraryBackend !== backend) {
       return (
@@ -827,12 +1067,16 @@ export abstract class SearchIndexBase implements SearchIndex {
     // check ("is this item already indexed?") and, at the end, the left side of the
     // deletion diff, so the store is walked once rather than per item.
     const known = new Set(this.listItemKeys());
+    /** Items this delta re-indexed, which therefore already carry their newest body text. */
+    const refreshed = new Set<string>();
     let start = 0;
     let crawlVersion = 0;
     let itemsSinceLog = 0;
     let lastLogAt = Date.now();
     let skippedByCap = 0;
     let reconciled = false;
+    let fulltextCursor = this.fulltextVersion;
+    let caughtUp = 0;
 
     const maybeLog = (): void => {
       if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
@@ -869,6 +1113,7 @@ export abstract class SearchIndexBase implements SearchIndex {
           this.deleteItem(key);
           this.addOneItem(item, pending, texts?.[i]);
           known.add(key);
+          refreshed.add(key);
           this.itemsFetched++;
           itemsSinceLog++;
         }
@@ -878,6 +1123,12 @@ export abstract class SearchIndexBase implements SearchIndex {
         if (start >= page.totalResults) break;
       }
       if (!token.cancelled) await this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, true);
+
+      if (!token.cancelled && opts.fulltextCatchUp && opts.fulltextFor) {
+        const catchUp = await this.fulltextCatchUp(opts, known, refreshed, pending, token, fulltextLimit);
+        fulltextCursor = catchUp.version;
+        caughtUp = catchUp.items;
+      }
 
       if (!token.cancelled) {
         const live = await opts.liveKeys();
@@ -909,6 +1160,9 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.backend;
       }
+      // The full-text cursor advances under the same rule as the stamp, and for the same
+      // reason: an update that did not finish must repeat this delta, not skip past it.
+      if (!token.cancelled && reconciled) this.fulltextVersion = fulltextCursor;
       // Persisted once, at the end: the delta is small by construction, and one commit is
       // what makes "the stamp advanced" and "the rows are on disk" a single durable fact.
       try {
@@ -923,6 +1177,12 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.updateNotice =
           `Updated ${this.itemsFetched} changed and removed ${this.itemsRemoved} deleted items since ` +
           `${opts.backend} library version ${fromVersion}.` +
+          // Reported apart from the changed count because it is a different question
+          // answered by a different sequence: these items did not change at all, Zotero
+          // merely finished extracting their text after the build (#26).
+          (caughtUp
+            ? ` ${caughtUp} unchanged item(s) gained newly extracted attachment full text.`
+            : '') +
           (skippedByCap
             ? ` ${skippedByCap} new items were left out because the index is at its item cap.`
             : '') +
@@ -958,6 +1218,77 @@ export abstract class SearchIndexBase implements SearchIndex {
     } finally {
       this.cancelToken = null;
     }
+  }
+
+  /**
+   * Index the body text Zotero extracted since this index's full-text cursor, for items
+   * the delta itself never saw.
+   *
+   * The gap this closes: Zotero versions extracted text on a sequence of its own. Opening a
+   * PDF for the first time makes Zotero extract it and touches no item version at all, so
+   * that item appears in no `?since=` delta, ever, and until now an index's full-text
+   * coverage was frozen at build time with a rebuild as the only remedy (#26).
+   *
+   * Costs one request on a library where nothing has been extracted since. Items the delta
+   * already refreshed are skipped: they were re-read whole, body text included.
+   */
+  private async fulltextCatchUp(
+    opts: IncrementalUpdateOptions,
+    known: Set<string>,
+    refreshed: Set<string>,
+    pending: ChunkRecord[],
+    token: { cancelled: boolean },
+    limit: Semaphore,
+  ): Promise<{ version: number; items: number }> {
+    const since = this.fulltextVersion;
+    let answer;
+    try {
+      answer = await opts.fulltextCatchUp!(since);
+    } catch (e) {
+      // A probe of the other sequence must not fail the delta: the items that DID change
+      // are correctly indexed either way, and the cursor stays put so the next update asks
+      // again.
+      this.opts.logger?.warn(
+        `Zotero's full-text index could not be consulted (${e instanceof Error ? e.message : String(e)}), so ` +
+          'newly extracted attachment text was not picked up by this update.',
+      );
+      return { version: since, items: 0 };
+    }
+    const version = Math.max(since, answer.version);
+    // An index written before this cursor existed cannot say which text is new, so the
+    // catch-up is narrowed to its coverage GAP: items holding no body passages at all. It
+    // is a one-off, because this update stores a cursor. And it is only run for an index
+    // that already holds body text: turning `action:"update"` into the days-long full-text
+    // crawl a metadata-only index has never had is not an update.
+    const gapOnly = since === 0;
+    if (gapOnly && this.counts().fulltextPassages === 0) return { version, items: 0 };
+    const targets = [...answer.itemKeys].filter(
+      (key) => known.has(key) && !refreshed.has(key) && !(gapOnly && this.hasFulltext(key)),
+    );
+    const batchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
+    const delayMs = opts.embedBatchDelayMs ?? 0;
+    let items = 0;
+    for (let i = 0; i < targets.length && !token.cancelled; i += PAGE_GROUP) {
+      const group = targets
+        .slice(i, i + PAGE_GROUP)
+        .map((key) => ({ key, title: this.itemTitle(key) ?? '(untitled)' }));
+      const texts = await this.fulltextForKeys(group, opts, token, limit);
+      for (let j = 0; j < group.length; j++) {
+        if (token.cancelled) break;
+        const text = texts?.[j];
+        if (!text) continue;
+        // The item's own metadata passages are untouched: nothing about the item changed.
+        // Its body passages are replaced wholesale, because their ids (`<key>#f<n>`) are
+        // reused by the new text and a second attachment's arrival would otherwise collide
+        // with the first's.
+        this.clearFulltext(group[j]!.key);
+        this.addFulltext(group[j]!.key, group[j]!.title, text, pending);
+        items++;
+      }
+      await this.embedPending(pending, token, batchSize, delayMs, false);
+    }
+    if (!token.cancelled) await this.embedPending(pending, token, batchSize, delayMs, true);
+    return { version, items };
   }
 
   /**
@@ -1171,7 +1502,13 @@ export class MemorySearchIndex extends SearchIndexBase {
   private bm25 = new BM25Index();
   private vectors = new VectorStore();
   private chunks = new Map<string, ChunkRecord>();
-  private items = new Set<string>();
+  /**
+   * Indexed items and their titles, in crawl order. A map rather than a set because a
+   * resumed build and a full-text catch-up both need an item's title without holding the
+   * item, and reading it off one of that item's passages would tie the title to whether
+   * the item happened to produce any.
+   */
+  private items = new Map<string, string>();
   /** Passage ids per item, so a delete does not scan every chunk in the index. */
   private byItem = new Map<string, Set<string>>();
   /** Items with at least one full-text passage, and how many such passages exist. */
@@ -1198,19 +1535,21 @@ export class MemorySearchIndex extends SearchIndexBase {
     this.bm25 = new BM25Index();
     this.vectors = new VectorStore();
     this.chunks = new Map();
-    this.items = new Set();
+    this.items = new Map();
     this.byItem = new Map();
     this.fulltextItems = new Set();
     this.fulltextPassages = 0;
   }
 
-  protected putItem(itemKey: string): void {
-    this.items.add(itemKey);
+  protected putItem(itemKey: string, title: string): void {
+    this.items.set(itemKey, title);
   }
 
   protected putPassage(rec: ChunkRecord): void {
     this.chunks.set(rec.id, rec);
-    this.items.add(rec.itemKey);
+    // A passage restored from disk arrives without its item having been announced, so this
+    // is also where a reloaded index learns its items and their titles.
+    if (!this.items.has(rec.itemKey)) this.items.set(rec.itemKey, rec.title);
     const ids = this.byItem.get(rec.itemKey);
     if (ids) ids.add(rec.id);
     else this.byItem.set(rec.itemKey, new Set([rec.id]));
@@ -1235,7 +1574,35 @@ export class MemorySearchIndex extends SearchIndexBase {
   }
 
   protected listItemKeys(): string[] {
-    return [...this.items];
+    return [...this.items.keys()];
+  }
+
+  protected listItems(): Array<{ key: string; title: string }> {
+    return [...this.items].map(([key, title]) => ({ key, title }));
+  }
+
+  protected itemTitle(itemKey: string): string | undefined {
+    return this.items.get(itemKey);
+  }
+
+  protected hasFulltext(itemKey: string): boolean {
+    return this.fulltextItems.has(itemKey);
+  }
+
+  /** The body half of `deleteItem`: same bookkeeping, metadata passages left in place. */
+  protected clearFulltext(itemKey: string): void {
+    const ids = this.byItem.get(itemKey);
+    if (!ids) return;
+    for (const id of [...ids]) {
+      const rec = this.chunks.get(id);
+      if (rec?.source !== 'fulltext') continue;
+      this.fulltextPassages--;
+      this.chunks.delete(id);
+      this.bm25.removeDoc(id);
+      this.vectors.remove(id);
+      ids.delete(id);
+    }
+    this.fulltextItems.delete(itemKey);
   }
 
   protected putVector(id: string, vector: number[]): void {
@@ -1292,8 +1659,14 @@ export class MemorySearchIndex extends SearchIndexBase {
       // The real library version, and the API whose sequence it belongs to: an update
       // reads them back to decide whether a `?since=` delta is even addressable.
       libraryVersion: this.libraryVersion,
+      // The other sequence's cursor: what an update hands to `/fulltext?since=` to find
+      // the text Zotero extracted after this index was built (#26).
+      fulltextVersion: this.fulltextVersion,
     };
     if (this.libraryBackend) snapshot.libraryBackend = this.libraryBackend;
+    // Present only while a build is unfinished, which is exactly when the next one has
+    // somewhere to pick up from (#24).
+    if (this.checkpoint) snapshot.checkpoint = this.checkpoint;
     return snapshot;
   }
 
@@ -1319,5 +1692,12 @@ export class MemorySearchIndex extends SearchIndexBase {
     // update, which is the safe answer (the first action:"update" rebuilds once and stamps).
     this.libraryVersion = data.libraryVersion ?? 0;
     this.libraryBackend = data.libraryBackend;
+    // Absent in files written before the full-text cursor existed. 0 then means "unknown",
+    // and the first update that wants full text closes the coverage gap once and stores a
+    // real cursor; see `fulltextCatchUp` (#26).
+    this.fulltextVersion = data.fulltextVersion ?? 0;
+    // Absent in files written before resume existed, and in any file a finished build
+    // wrote: both mean there is nothing to resume, which is what undefined says (#24).
+    this.checkpoint = data.checkpoint;
   }
 }

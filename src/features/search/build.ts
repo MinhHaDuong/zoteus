@@ -191,6 +191,12 @@ export interface BuildFulltextOptions {
    * prologue resets the status it would otherwise be written on.
    */
   note?: string;
+  /**
+   * Start the crawl over rather than resume an interrupted build. `action:"refresh"` is
+   * what asks for it; `action:"build"` deliberately does not, because throwing away work
+   * already committed and paid for is the complaint behind #24.
+   */
+  fresh?: boolean;
 }
 
 /**
@@ -213,6 +219,13 @@ export interface BuildFulltextOptions {
  * a mismatch sends the update back through this function. `builtFromVersion` keeps its
  * older, unrelated meaning (the item count the crawl fetched); the version stamp lives in
  * `libraryVersion` / `libraryBackend`.
+ *
+ * A build that finds an interrupted one's checkpoint carries on from it rather than
+ * crawling from 0 again, on either API. That is deliberately NOT keyed on the version
+ * stamp: a stopped build has none by design (it covers an unknown prefix of the library),
+ * and the desktop app frequently issues no version at all, so keying resume on the stamp
+ * meant an interrupted local-API build could only ever start over (#24). `opts.fresh`
+ * asks for the old behaviour, and `action:"refresh"` is what passes it.
  */
 export function startIndexBuild(
   ctx: ToolContext,
@@ -244,6 +257,7 @@ export function startIndexBuild(
   const job = ctx.search.buildIncremental(fetchPage, {
     maxItems: cap,
     versionBackend: backend,
+    ...(opts.fresh ? { fresh: true } : {}),
     ...crawlOptions(ctx, lib, opts, backend),
   });
   job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
@@ -270,8 +284,9 @@ export function startIndexUpdate(
     return startIndexBuild(ctx, lib, maxItems, {
       ...opts,
       note:
-        `An incremental update was not possible (${blocker}), so the whole library is being rebuilt instead. ` +
-        'The rebuild records a version stamp, so the next action:"update" is a cheap delta.',
+        `An incremental update was not possible (${blocker}), so a full build is running instead. It picks up ` +
+        'where an interrupted build left off when one is on disk, and records a version stamp, so the next ' +
+        'action:"update" is a cheap delta.',
     });
   }
 
@@ -315,8 +330,13 @@ export function startIndexUpdate(
 
 /**
  * The options a build and an update share: full text (resolved lazily, because both
- * starters are synchronous by contract and must return a status for the caller to poll)
- * and the embedding batch dials.
+ * starters are synchronous by contract and must return a status for the caller to poll),
+ * the two full-text cursors of #26, and the embedding batch dials.
+ *
+ * `fulltextCatchUp` is an update's option alone; a build has no cursor to catch up from,
+ * having just consumed the whole census. It rides along here because it needs the same
+ * memoized source as everything else, and `buildIncremental` ignores what it is not asked
+ * about.
  */
 function crawlOptions(
   ctx: ToolContext,
@@ -340,13 +360,35 @@ function crawlOptions(
     }));
   const fulltextFor = wantFulltext ? async (itemKey: string) => (await openSource()).textFor(itemKey) : undefined;
   const fulltextKeys = wantFulltext ? async () => (await openSource()).itemKeys : undefined;
-  // Read straight off the resolved source. It is set by the time anything asks: the only
+  // Read straight off the resolved source. Both are set by the time anything asks: the only
   // caller is the end of the full-text pass, which got there by awaiting `fulltextFor`.
   const fulltextFailures = wantFulltext ? () => opened?.readFailures() ?? 0 : undefined;
+  const fulltextVersion = wantFulltext ? () => opened?.maxVersion ?? 0 : undefined;
+  /**
+   * What Zotero's full-text sequence has extracted since the cursor this index stored, and
+   * which indexed items that text belongs to (#26).
+   *
+   * The probe comes first and on its own: on a library where nothing has been extracted
+   * since, that one request answers with nothing and the update stops there, having cost
+   * no attachment crawl at all. Only a non-empty answer is worth the map behind
+   * `fulltextFor`, and by then the map is usually open anyway, because the delta's own
+   * items went through it.
+   */
+  const fulltextCatchUp = wantFulltext
+    ? async (since: number) => {
+        const extracted = (await ctx.router.fullTextSince(since, { library: lib, backend })) ?? {};
+        const keys = Object.keys(extracted);
+        if (!keys.length) return { itemKeys: new Set<string>(), version: since };
+        const version = Object.values(extracted).reduce((hi, v) => (v > hi ? v : hi), since);
+        return { itemKeys: (await openSource()).itemsFor(keys), version };
+      }
+    : undefined;
   return {
     fulltextFor,
     fulltextKeys,
     fulltextFailures,
+    fulltextVersion,
+    fulltextCatchUp,
     ...(opts.note ? { note: opts.note } : {}),
     // Passages per embedding request, and the pause between requests: the dials an API
     // provider's per-request token cap and per-minute rate limit are tuned against.

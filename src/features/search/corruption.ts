@@ -118,6 +118,18 @@ export class CorruptSearchIndex extends SearchIndexBase {
   protected listItemKeys(): string[] {
     return [];
   }
+  protected listItems(): Array<{ key: string; title: string }> {
+    return [];
+  }
+  protected itemTitle(): undefined {
+    return undefined;
+  }
+  protected hasFulltext(): boolean {
+    return false;
+  }
+  protected clearFulltext(): void {
+    throw this.failure;
+  }
   protected vectorDimension(): number | undefined {
     return undefined;
   }

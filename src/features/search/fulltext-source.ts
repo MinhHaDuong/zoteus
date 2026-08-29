@@ -35,6 +35,18 @@ export interface FulltextSource {
    * have extracted text, not by the size of the library.
    */
   itemKeys: Set<string>;
+  /**
+   * The items those attachment keys belong to. Zotero's `/fulltext?since=` answers in
+   * attachment keys, and everything the index holds is keyed by the parent item, so the
+   * map this source already built is what turns one into the other (#26). Attachments the
+   * map does not know are dropped: they belong to items outside this library view.
+   */
+  itemsFor(attachmentKeys: Iterable<string>): Set<string>;
+  /**
+   * Highest version in Zotero's full-text sequence this source saw, i.e. the cursor to
+   * store once its text has been indexed. 0 when the library has no extracted text.
+   */
+  maxVersion: number;
   /** Set when full text cannot be indexed at all; the build then stays metadata-only. */
   unavailable?: string;
   /**
@@ -55,6 +67,8 @@ function emptySource(unavailable?: string): FulltextSource {
     attachments: 0,
     items: 0,
     itemKeys: new Set(),
+    itemsFor: () => new Set(),
+    maxVersion: 0,
     readFailures: () => 0,
   };
   if (unavailable) src.unavailable = unavailable;
@@ -105,7 +119,13 @@ export async function createFulltextSource(
     );
   }
 
+  // The census is versioned on Zotero's own full-text sequence, so its high-water mark is
+  // the cursor a later update hands back to `/fulltext?since=` (#26).
+  const maxVersion = Object.values(withText).reduce((hi, v) => (v > hi ? v : hi), 0);
+
   const byItem = new Map<string, string[]>();
+  /** The reverse of `byItem`: what `/fulltext?since=` answers in, mapped to what we index. */
+  const parentOf = new Map<string, string>();
   let mapped = 0;
   try {
     let start = 0;
@@ -128,6 +148,7 @@ export async function createFulltextSource(
         const list = byItem.get(parent);
         if (list) list.push(key);
         else byItem.set(parent, [key]);
+        parentOf.set(key, parent);
         mapped++;
       }
       start += items.length;
@@ -177,6 +198,15 @@ export async function createFulltextSource(
     attachments: mapped,
     items: byItem.size,
     itemKeys: new Set(byItem.keys()),
+    itemsFor: (attachmentKeys) => {
+      const items = new Set<string>();
+      for (const key of attachmentKeys) {
+        const parent = parentOf.get(key);
+        if (parent) items.add(parent);
+      }
+      return items;
+    },
+    maxVersion,
     readFailures: () => failures,
   };
 }

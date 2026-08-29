@@ -6,7 +6,14 @@ import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { tokenize } from './tokenize.js';
 import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
-import type { ChunkRecord, IndexCounts, IndexSnapshot, RankedId, SearchIndexOptions } from './backend.js';
+import type {
+  BuildCheckpoint,
+  ChunkRecord,
+  IndexCounts,
+  IndexSnapshot,
+  RankedId,
+  SearchIndexOptions,
+} from './backend.js';
 
 /**
  * Required through createRequire rather than imported: `sqlite` is absent from
@@ -64,9 +71,13 @@ interface Statements {
   insertFts: StatementSync;
   deleteFts: StatementSync;
   itemPassages: StatementSync;
+  itemFulltext: StatementSync;
   deletePassages: StatementSync;
+  deleteFulltext: StatementSync;
   deleteItemRow: StatementSync;
   itemKeys: StatementSync;
+  itemRows: StatementSync;
+  itemTitle: StatementSync;
   setVector: StatementSync;
   selectPassage: StatementSync;
   keyword: StatementSync;
@@ -313,9 +324,17 @@ export class SqliteSearchIndex extends SearchIndexBase {
       itemPassages: db.prepare(
         'SELECT pid, text, source, vector IS NOT NULL AS has_vector FROM passages WHERE item_key = ?',
       ),
+      itemFulltext: db.prepare(
+        "SELECT pid, text, vector IS NOT NULL AS has_vector FROM passages WHERE item_key = ? AND source = 'fulltext'",
+      ),
       deletePassages: db.prepare('DELETE FROM passages WHERE item_key = ?'),
+      deleteFulltext: db.prepare("DELETE FROM passages WHERE item_key = ? AND source = 'fulltext'"),
       deleteItemRow: db.prepare('DELETE FROM items WHERE item_key = ?'),
       itemKeys: db.prepare('SELECT item_key AS k FROM items'),
+      // Ordered by rowid, which is insertion order, so a resumed build's full-text worklist
+      // is in the order the interrupted crawl indexed them rather than in key order.
+      itemRows: db.prepare('SELECT item_key AS k, title AS t FROM items ORDER BY rowid'),
+      itemTitle: db.prepare('SELECT title AS t FROM items WHERE item_key = ?'),
       setVector: db.prepare('UPDATE passages SET vector = ? WHERE id = ?'),
       selectPassage: db.prepare('SELECT id, item_key, title, text, source FROM passages WHERE id = ?'),
       // Deliberately never selects `vector`: a keyword query must not pull vectors into JS.
@@ -361,6 +380,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.libraryVersion = Number(this.meta('libraryVersion') ?? 0) || 0;
     const backend = this.meta('libraryBackend');
     this.libraryBackend = backend === 'local' || backend === 'cloud' ? backend : undefined;
+    // Absent in databases written before the full-text cursor existed; 0 then means the
+    // coverage gap is unknown, which the first update closes once (#26).
+    this.fulltextVersion = Number(this.meta('fulltextVersion') ?? 0) || 0;
+    this.checkpoint = parseCheckpoint(this.meta('checkpoint'));
     // An index that HOLDS full-text passages counts as full-text-enabled, even before this
     // process runs a build of its own (same rule as the JSON backend's load).
     this.fulltextEnabled = this.c.fulltextPassages > 0;
@@ -375,6 +398,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
     set.run('embedderId', this.vectorEmbedderId ?? '');
     set.run('libraryVersion', String(this.libraryVersion));
     set.run('libraryBackend', this.libraryBackend ?? '');
+    set.run('fulltextVersion', String(this.fulltextVersion));
+    // One JSON row rather than a column per field, deliberately: the checkpoint's shape
+    // belongs to the build loop and will grow with it, and the meta table is exactly the
+    // place a value can be added without a schema version bump: an older build ignores a
+    // key it does not know, so a database written here still opens there.
+    set.run('checkpoint', this.checkpoint ? JSON.stringify(this.checkpoint) : '');
   }
 
   private refreshCounts(): void {
@@ -436,6 +465,11 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.itemsTotal = snapshot.itemsTotal ?? 0;
     this.itemsAvailable = snapshot.itemsAvailable ?? 0;
     this.vectorEmbedderId = snapshot.embedderId;
+    // The build cursors travel with the rows they describe: a JSON index whose build was
+    // interrupted is resumable once it is in SQLite too, and one migrated mid-coverage
+    // keeps knowing how far into Zotero's full-text sequence it read.
+    this.fulltextVersion = snapshot.fulltextVersion ?? 0;
+    this.checkpoint = snapshot.checkpoint;
     this.writeMeta();
     this.commit();
     this.storeNotice =
@@ -506,6 +540,38 @@ export class SqliteSearchIndex extends SearchIndexBase {
 
   protected listItemKeys(): string[] {
     return (this.stmts.itemKeys.all() as Array<{ k: string }>).map((r) => r.k);
+  }
+
+  protected listItems(): Array<{ key: string; title: string }> {
+    return (this.stmts.itemRows.all() as Array<{ k: string; t: string }>).map((r) => ({ key: r.k, title: r.t }));
+  }
+
+  protected itemTitle(itemKey: string): string | undefined {
+    return (this.stmts.itemTitle.get(itemKey) as { t?: string } | undefined)?.t;
+  }
+
+  protected hasFulltext(itemKey: string): boolean {
+    // The resident set refreshCounts/putPassage maintain, so a resume's worklist filter
+    // costs no query per item.
+    return this.fulltextKeys.has(itemKey);
+  }
+
+  /**
+   * The body half of `deleteItem`: the same external-content FTS5 protocol, applied to
+   * this item's `source = 'fulltext'` rows only, so its metadata passages (and the item
+   * row itself) stay exactly where they are.
+   */
+  protected clearFulltext(itemKey: string): void {
+    this.begin();
+    const rows = this.stmts.itemFulltext.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
+    for (const row of rows) {
+      this.stmts.deleteFts.run(row.pid, row.text);
+      this.c.documents--;
+      this.c.fulltextPassages--;
+      if (row.has_vector) this.c.vectors--;
+    }
+    this.stmts.deleteFulltext.run(itemKey);
+    if (this.fulltextKeys.delete(itemKey)) this.c.fulltextItems--;
   }
 
   /**
@@ -644,6 +710,41 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.db.close();
     this.db = undefined;
   }
+}
+
+/**
+ * The build checkpoint back out of its meta row.
+ *
+ * Validated rather than cast: this row is written by a build loop whose shape changes, and
+ * a half-recognised checkpoint would resume a crawl at `undefined`, an offset that reads
+ * as 0 and quietly re-indexes the library. Anything unrecognisable means "nothing to
+ * resume", which is the state every index was in before this existed.
+ */
+function parseCheckpoint(raw: string | undefined): BuildCheckpoint | undefined {
+  if (!raw) return undefined;
+  let data: any;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!data || typeof data !== 'object') return undefined;
+  if (data.phase !== 'metadata' && data.phase !== 'fulltext') return undefined;
+  if (!Number.isInteger(data.crawlOffset)) return undefined;
+  return {
+    phase: data.phase,
+    crawlOffset: data.crawlOffset,
+    itemsAvailable: Number(data.itemsAvailable) || 0,
+    itemsTotal: Number(data.itemsTotal) || 0,
+    maxItems: Number(data.maxItems) || 0,
+    crawlVersion: Number(data.crawlVersion) || 0,
+    fulltext: Boolean(data.fulltext),
+    ...(data.backend === 'local' || data.backend === 'cloud' ? { backend: data.backend } : {}),
+    ...(typeof data.embedderId === 'string' && data.embedderId ? { embedderId: data.embedderId } : {}),
+    ...(Array.isArray(data.pendingPassages)
+      ? { pendingPassages: data.pendingPassages.filter((id: unknown) => typeof id === 'string') }
+      : {}),
+  };
 }
 
 /**
