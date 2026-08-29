@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { defaultDataDir, defaultZoteroDataDir } from './lib/paths.js';
 import { isUnset, looksUnexpanded } from './lib/env.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from './features/search/fulltext-source.js';
-import { DEFAULT_INDEX_MAX_ITEMS } from './features/search/limits.js';
+import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE, DEFAULT_INDEX_MAX_ITEMS } from './features/search/limits.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
@@ -33,6 +33,15 @@ export interface ZoteusConfig {
    * legacy JSON file), or `auto` to take SQLite whenever the runtime provides it.
    */
   indexBackend: 'auto' | 'sqlite' | 'memory';
+  /**
+   * Two-stage vector search on the SQLite backend: binary codes scanned first, then an
+   * exact cosine rescore of the candidates. False forces the exact scan of every vector.
+   */
+  indexAnn: boolean;
+  /** Candidates the code stage hands that rescore, per vector hit asked for. */
+  indexAnnOversample: number;
+  /** Floor on that candidate set, so a small page still rescores a real neighbourhood. */
+  indexAnnMinCandidates: number;
   scholarProviders: string[];
   dataDir: string;
   /**
@@ -164,6 +173,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
           .default(DEFAULT_FULLTEXT_MAX_CHARS),
         ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
         ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
+        ZOTEUS_INDEX_ANN: bool(true),
+        ZOTEUS_INDEX_ANN_OVERSAMPLE: z.coerce.number().int().positive().default(DEFAULT_ANN_OVERSAMPLE),
+        ZOTEUS_INDEX_ANN_MIN_CANDIDATES: z.coerce.number().int().positive().default(DEFAULT_ANN_MIN_CANDIDATES),
         ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
         ZOTEUS_DATA_DIR: z.string().min(1).optional(),
         ZOTERO_DATA_DIR: z.string().min(1).optional(),
@@ -299,6 +311,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     indexBackend: parsed.ZOTEUS_INDEX_BACKEND,
+    indexAnn: parsed.ZOTEUS_INDEX_ANN,
+    indexAnnOversample: parsed.ZOTEUS_INDEX_ANN_OVERSAMPLE,
+    indexAnnMinCandidates: parsed.ZOTEUS_INDEX_ANN_MIN_CANDIDATES,
     scholarProviders: parsed.ZOTEUS_SCHOLAR_PROVIDERS.split(',')
       .map((s) => s.trim())
       .filter(Boolean),

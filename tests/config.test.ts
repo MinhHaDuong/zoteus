@@ -17,6 +17,11 @@ describe('loadConfig', () => {
     // Full-text indexing is opt-in: it multiplies build time and index size.
     expect(cfg.indexFulltext).toBe(false);
     expect(cfg.indexFulltextMaxChars).toBe(40000);
+    // Two-stage vector search is on by default: it is what keeps a semantic query on a
+    // large index from scanning every vector (#30).
+    expect(cfg.indexAnn).toBe(true);
+    expect(cfg.indexAnnOversample).toBe(16);
+    expect(cfg.indexAnnMinCandidates).toBe(500);
     expect(cfg.allowDelete).toBe(false);
     expect(cfg.readOnly).toBe(false);
     expect(cfg.scholarProviders).toEqual(['openalex']);
@@ -37,6 +42,9 @@ describe('loadConfig', () => {
       ZOTEUS_EMBEDDING_MODEL: 'text-embedding-3-large',
       ZOTEUS_EMBED_BATCH_SIZE: '16',
       ZOTEUS_EMBED_BATCH_DELAY_MS: '500',
+      ZOTEUS_INDEX_ANN: 'false',
+      ZOTEUS_INDEX_ANN_OVERSAMPLE: '32',
+      ZOTEUS_INDEX_ANN_MIN_CANDIDATES: '2000',
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.apiKey).toBe('abc');
     expect(cfg.libraryId).toBe(19552201);
@@ -50,6 +58,9 @@ describe('loadConfig', () => {
     expect(cfg.embeddingModel).toBe('text-embedding-3-large');
     expect(cfg.embedBatchSize).toBe(16);
     expect(cfg.embedBatchDelayMs).toBe(500);
+    expect(cfg.indexAnn).toBe(false);
+    expect(cfg.indexAnnOversample).toBe(32);
+    expect(cfg.indexAnnMinCandidates).toBe(2000);
   });
 
   it('falls back on an invalid enum value, and says which', () => {
