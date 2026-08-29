@@ -43,7 +43,9 @@ can never time out the MCP client, even on very large libraries.
   Three more fields describe the store rather than the embedder: `storage` (`sqlite` or
   `memory`, see [Storage backends](#storage-backends)), `storageNotice` (present when
   opening it imported a JSON index, or refused to), and `persistError` (present when the
-  index could not be written).
+  index could not be written). Two more describe how the last semantic query ranked
+  vectors: `vectorScan` (`codes` or `exact`) and `vectorScanNotice`, see
+  [Two-stage vector search](#two-stage-vector-search).
 - `action: "stop"` cooperatively cancels a running job. A build halts between
   pages/batches and the partial index is kept and stays searchable; a stopped **update**
   keeps what it applied but leaves the version stamp where it was, so the next update
@@ -259,9 +261,10 @@ about 5.4 GB of heap to parse and OOMs stock Node. Measured on the same 7540-ite
 
 The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 2`,
 ranked with `bm25()`) and vectors as per-passage `BLOB`s, so a keyword search reads only
-the rows it ranks and never materializes the library. One consequence worth knowing: a
-semantic search still scans the vectors, one row at a time, so it is the semantic path
-that grows with the library.
+the rows it ranks and never materializes the library. The semantic path used to be the one
+that grew with the library, because it read every vector; it now reads a binary code per
+vector instead and fetches the float32 vectors of a few hundred candidates. See
+[Two-stage vector search](#two-stage-vector-search).
 
 **Diacritics.** Searches are diacritics-insensitive in both directions and on both
 backends: `Bronte` finds `Brontë` and `Brontë` finds `Bronte`. The document side of the
@@ -322,6 +325,65 @@ reports the reason and asks for one `action:"build"`. Either way the outcome is 
 `ExperimentalWarning: SQLite is an experimental feature and might change at any time` the
 first time the module loads. It comes from Node, not from Zoteus, and stdio clients are
 unaffected (the MCP stream is stdout).
+
+## Two-stage vector search
+
+A semantic query used to read every stored vector: on a 255,703-passage index at 3072
+dimensions that is 3.1 GB decoded and multiplied per query, and it took **90 to 105
+seconds** whatever was asked (issue #30). The cost was never the store, it was the bytes:
+number of vectors x bytes per vector x cost per byte, and at 3072 dimensions the middle
+term is 12,288 bytes a passage.
+
+The SQLite backend now shrinks that middle term. Beside each vector it keeps a **binary
+code**: one bit per dimension, set where that coordinate is above the corpus mean, so a
+3072-dimensional vector becomes 384 bytes. A query is centred on the same mean, reduced to
+the same 384 bytes, and compared against every code by **Hamming distance** (a XOR and a
+popcount over `Uint32Array`s, which is cheap enough to do a quarter of a million times).
+That first pass produces a *candidate pool*, and only those candidates' real float32
+vectors are read and ranked by the exact cosine the full scan used.
+
+Two properties follow, and they are the whole design:
+
+- **Every score you see is exact.** The codes decide which rows get scored, never how they
+  rank. The page returned is ordered by exact cosine over real vectors, so scores are
+  comparable with anything the full scan produced and no index needs rebuilding.
+- **What can be lost is recall, not correctness.** A relevant passage the codes rank
+  outside the pool is not seen at all. Measured on real embeddings against the exact
+  ranking, a pool of 8x the result set recovered 0.953 of it and 16x recovered 0.986, and
+  the codes get *better* as vectors get wider (0.953 at 384 dimensions, 0.997 at 1024),
+  because a wider vector makes a longer code. Binary codes with no rescore recovered only
+  0.592, which is why the float32 vectors stay in the index.
+
+**This makes queries fast; it does not reclaim disk or memory.** The vectors are still
+there, and they must be: the rescore is what buys the accuracy back. The codes are an
+addition, about 3% of the size of the vectors they describe.
+
+**Where the codes live.** In the index file, in a `vector_codes` table, beside the corpus
+mean they were centred on. They are written by `zotero_index action:"build"` and kept
+current by `action:"update"`, which codes the passages it adds and drops the codes of the
+items it removes. An index built by an older Zoteus has none: the first semantic query
+builds them in one pass over the vectors (the same pass that query was going to make
+anyway) and says so in `vectorScanNotice`. Nothing is rebuilt and no re-embedding
+happens; the codes are derived from vectors that are already on disk. They are held in
+memory while the server runs (dimensions ÷ 8 bytes per passage: about 98 MB for 255k
+passages at 3072 dimensions) and dropped whenever the index is written to.
+
+**When it does not apply.** An index with fewer vectors than the candidate pool would
+cover is scanned exactly, and gets no codes at all: there is nothing to narrow, and small
+libraries were never slow. A build or update in progress also leaves the codes alone, so
+queries during a build take the exact path. Whichever path served the last query is
+reported by `zotero_index action:"status"` as `vectorScan` (`codes` or `exact`), with
+`vectorScanNotice` explaining anything that needs explaining: the fallback, or the
+one-time backfill.
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `ZOTEUS_INDEX_ANN` | `true` | The escape hatch. `false` turns the coded path off entirely: every semantic query scans every vector, exactly as before, and no codes are written. |
+| `ZOTEUS_INDEX_ANN_OVERSAMPLE` | `16` | Candidates rescored per vector hit the fusion asks for. Higher is more accurate and slower; the measured recall at 4x/8x/16x was 0.884/0.953/0.986. |
+| `ZOTEUS_INDEX_ANN_MIN_CANDIDATES` | `500` | Floor on that pool, so a small `limit` still rescores a real neighbourhood. It is also the size below which an index is simply scanned exactly. |
+
+`bench/two-stage-search.ts` measures both paths over a synthetic index of any shape
+(`npx tsx bench/two-stage-search.ts --vectors 255703 --dim 3072`).
 
 ## Embedding backends (privacy-first)
 

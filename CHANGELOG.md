@@ -15,6 +15,36 @@ All notable changes to Zoteus are documented here. The format is based on
   changes about which requests succeed.
 
 ### Changed
+- **A semantic query no longer reads every vector in the index** (#30). On a 255,703-passage
+  index at 3072 dimensions, every `zotero_semantic_search` took 90 to 105 seconds whatever
+  was asked, because ranking meant decoding 3.1 GB of float32 vectors one row at a time. The
+  SQLite backend now keeps a **binary code** beside each vector, one sign bit per dimension
+  after the corpus mean is subtracted, and ranks in two stages: a Hamming scan over the
+  codes (384 bytes a passage instead of 12,288, XOR and a SWAR popcount over `Uint32Array`s)
+  picks a candidate pool, and only those candidates' real vectors are read and ranked by the
+  exact cosine as before. Measured on a synthetic index of exactly that shape, a query goes
+  from 2,107 ms to 50 ms on the same machine, **42x**, and the codes cost 94 MB beside 3.1 GB
+  of vectors.
+
+  What the codes decide is which rows get scored, never how they rank: every score returned
+  comes from a float32 vector, so the page is ordered by exact cosine and nothing needs
+  rebuilding. What an approximation can cost is recall, and the candidate pool is the dial
+  for it: against the exact ranking on real embeddings, a pool of 4x the result set recovers
+  0.884 of it, 8x recovers 0.953 and the default 16x recovers 0.986, and the codes get
+  better as vectors get wider, because a wider vector is a longer code. Centring on the
+  corpus mean is what buys the last few points, the same move Zotero's own semantic search
+  makes (`modelCalibration.meanVector`).
+
+  Existing indexes are neither rebuilt nor re-embedded: the codes are derived from vectors
+  already on disk, the schema stamp does not move, and an index that has none is searched
+  exactly as before until the first semantic query builds them in one pass, which is the
+  pass that query was going to make anyway. Builds and updates keep them current from then on.
+  `zotero_index action:"status"` reports which path served the last query (`vectorScan`:
+  `codes` or `exact`) and why, when there is a why (`vectorScanNotice`). Three new knobs:
+  `ZOTEUS_INDEX_ANN` (`true`; `false` forces the old exact scan and writes no codes),
+  `ZOTEUS_INDEX_ANN_OVERSAMPLE` (`16`) and `ZOTEUS_INDEX_ANN_MIN_CANDIDATES` (`500`), which
+  is also the size below which an index is small enough that the exact scan is simply kept.
+  `bench/two-stage-search.ts` measures both paths over a synthetic index of any shape.
 - **On-device model weights now cache under the data directory** (`<ZOTEUS_DATA_DIR>/models`)
   instead of inside the transformers package's own install, so deleting the data directory
   removes everything the index ever wrote — including its largest artifact, and including

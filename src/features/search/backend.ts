@@ -80,6 +80,19 @@ export interface SearchIndexStatus {
   embedderReason?: string;
   /** Set when stored vectors were discarded because another embedder had produced them. */
   vectorsStaleReason?: string;
+  /**
+   * How the last semantic query of this process ranked vectors, on a backend that has more
+   * than one way to: `codes` is the two-stage path (binary codes scanned by Hamming
+   * distance, then an exact cosine rescore of the candidates), `exact` is a full scan of
+   * every stored vector. Absent until a semantic query has run.
+   */
+  vectorScan?: 'exact' | 'codes';
+  /**
+   * What that path had to do, or why the two-stage one could not serve the query. Reported
+   * for the same reason as `embedderReason`: an index that quietly fell back to the scan
+   * this exists to avoid is otherwise indistinguishable from one that is simply slow.
+   */
+  vectorScanNotice?: string;
   /** True when this build was asked to index attachment full text (opt-in). */
   fulltextEnabled: boolean;
   /** Items whose attachment full text is in the index. */

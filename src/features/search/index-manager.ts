@@ -166,6 +166,14 @@ export abstract class SearchIndexBase implements SearchIndex {
   vectorEmbedderId: string | undefined = undefined;
   /** Set when a load discarded vectors another embedder had produced. */
   protected vectorsStale: string | undefined = undefined;
+  /**
+   * How the last semantic query ranked vectors, and anything that path had to say. Written
+   * by whichever backend has a choice to make (today the SQLite one, which ranks through
+   * binary codes and falls back to a full scan); left unset by a backend that has only one
+   * way to search, since reporting a choice nobody made would be noise.
+   */
+  protected vectorScan: 'exact' | 'codes' | undefined = undefined;
+  protected vectorScanNotice: string | undefined = undefined;
   /** What opening the store had to do or refused to do (JSON migration; see #10). */
   protected storeNotice: string | undefined = undefined;
 
@@ -265,6 +273,15 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected abstract putVector(id: string, vector: number[]): void;
   /** Discard every stored vector, keeping the passages. */
   protected abstract clearVectors(): void;
+  /**
+   * Bring whatever a store derives from its vectors level with them, once a build or an
+   * update has finished writing and before the final persist, so the derived rows commit
+   * with the rows they were derived from. The SQLite backend rebuilds its binary search
+   * codes here; a store that derives nothing does nothing, which is why this is not
+   * abstract. Must not throw: a derived cache that could not be built is a slower index,
+   * never a failed build.
+   */
+  protected finalizeVectors(): void {}
   /** Width of the stored vectors (undefined when none are stored). Their embedder's fingerprint. */
   protected abstract vectorDimension(): number | undefined;
   /** Keyword candidates, best first. */
@@ -445,6 +462,8 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (reason) s.embedderReason = reason;
     if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
     if (this.vectorsStale) s.vectorsStaleReason = this.vectorsStale;
+    if (this.vectorScan) s.vectorScan = this.vectorScan;
+    if (this.vectorScanNotice) s.vectorScanNotice = this.vectorScanNotice;
     if (this.storeNotice) s.storageNotice = this.storeNotice;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
     return s;
@@ -507,6 +526,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       }
     }
     this.builtFromVersion = opts.version ?? 0;
+    this.finalizeVectors();
     return this.status();
   }
 
@@ -729,6 +749,11 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.versionBackend;
       }
+      // Before the persist, so the codes derived from these vectors are committed by the
+      // same transaction that makes the vectors durable. A cancelled build gets them too:
+      // its partial index stays searchable, and it would otherwise pay for them on the
+      // first query instead.
+      this.finalizeVectors();
       await persistNow();
       this.buildState = 'done';
       const final = this.buildStatus();
@@ -909,6 +934,10 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.backend;
       }
+      // Inside the update's single transaction, like every other write it made: a delta
+      // adds codes for the passages it added and nothing else, and a failure below rolls
+      // them back with the rest.
+      this.finalizeVectors();
       // Persisted once, at the end: the delta is small by construction, and one commit is
       // what makes "the stamp advanced" and "the rows are on disk" a single durable fact.
       try {

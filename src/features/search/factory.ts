@@ -15,6 +15,14 @@ export interface CreateSearchIndexOptions extends SearchIndexOptions {
    * Empty means "no artifact": an index that lives only for this process.
    */
   jsonPath: string;
+  /**
+   * Two-stage vector search and its candidate pool (ZOTEUS_INDEX_ANN and friends). Only
+   * the SQLite backend has two ways to rank vectors; the JSON one holds every vector
+   * resident already, so it has nothing to choose between and is not given the choice.
+   */
+  annEnabled?: boolean;
+  annOversample?: number;
+  annMinCandidates?: number;
 }
 
 /** The SQLite database that pairs with a given search-index.json path. */
@@ -47,7 +55,7 @@ export function nodeSqliteAvailable(): boolean {
  * asked for the durable backend must not be quietly given the one with the ceiling.
  */
 export async function createSearchIndex(opts: CreateSearchIndexOptions): Promise<SearchIndex> {
-  const { backend, jsonPath, ...indexOpts } = opts;
+  const { backend, jsonPath, annEnabled, annOversample, annMinCandidates, ...indexOpts } = opts;
   if (backend !== 'memory') {
     if (nodeSqliteAvailable()) {
       const { SqliteSearchIndex } = await import('./sqlite-index.js');
@@ -55,6 +63,9 @@ export async function createSearchIndex(opts: CreateSearchIndexOptions): Promise
         ...indexOpts,
         path: jsonPath ? sqliteIndexPath(jsonPath) : ':memory:',
         ...(jsonPath ? { migrateFrom: jsonPath } : {}),
+        ...(annEnabled === undefined ? {} : { annEnabled }),
+        ...(annOversample === undefined ? {} : { annOversample }),
+        ...(annMinCandidates === undefined ? {} : { annMinCandidates }),
       });
       try {
         await index.open();

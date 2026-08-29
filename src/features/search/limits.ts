@@ -20,3 +20,21 @@ export const DEFAULT_INDEX_MAX_ITEMS = 5000;
  * that ceiling far sooner than metadata ones.
  */
 export const DEFAULT_EMBED_BATCH_SIZE = 32;
+
+/**
+ * How many candidates the binary-code stage of a semantic query hands the exact rescore,
+ * per vector hit the fusion asks for. The pool decides the accuracy of the whole two-stage
+ * search: measured on real embeddings against the exact ranking, recall@30 was 0.884 at a
+ * 4x pool, 0.953 at 8x and 0.986 at 16x, and rises with the width of the vectors (#30).
+ * 16 buys the accurate end of that curve while still reading a few hundred vectors instead
+ * of every one. `ZOTEUS_INDEX_ANN_OVERSAMPLE` overrides it.
+ */
+export const DEFAULT_ANN_OVERSAMPLE = 16;
+
+/**
+ * Floor on that candidate pool, so a small page still rescores a meaningful neighbourhood:
+ * `limit:1` would otherwise ask the codes to order 48 rows on their own, which is exactly
+ * what they are bad at. 500 rows cost about a millisecond to rescore.
+ * `ZOTEUS_INDEX_ANN_MIN_CANDIDATES` overrides it.
+ */
+export const DEFAULT_ANN_MIN_CANDIDATES = 500;

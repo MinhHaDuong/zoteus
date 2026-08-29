@@ -6,6 +6,7 @@ import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { tokenize } from './tokenize.js';
 import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
+import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE } from './limits.js';
 import type { ChunkRecord, IndexCounts, IndexSnapshot, RankedId, SearchIndexOptions } from './backend.js';
 
 /**
@@ -27,8 +28,44 @@ export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
  * Bumped only when the schema below changes shape; a file at any other version is rebuilt,
  * not patched. Enforced in open(): the stamp is read before any DDL or write touches the
  * file, and a database this build does not understand is moved aside, never written into.
+ *
+ * `vector_codes` is deliberately NOT a bump, and the difference is worth naming. The stamp
+ * exists to stop a build from misreading rows it does not understand; that table holds no
+ * rows of its own, only a cache derived from the vectors beside it. An older build neither
+ * reads nor writes it (every statement it issues names its columns), a newer build creates
+ * it on demand and refills it in one pass, and an index that has neither is searched
+ * exactly as it was before. Bumping would have sidelined every index in existence and
+ * charged its owner a full re-embed (hours, and real API spend) for a cache the server
+ * can rebuild from what is already on disk.
  */
 const SCHEMA_VERSION = 1;
+
+/**
+ * Passage rowids per rescore statement. The exact stage fetches its candidates by rowid in
+ * one `IN (...)` rather than a statement per row: on the measured shape the per-row spelling
+ * was about half the cost of the whole two-stage query (#30). Batched rather than one
+ * statement of any width so the prepared-statement cache stays two entries deep whatever
+ * the candidate count is.
+ */
+const RESCORE_BATCH = 512;
+
+/**
+ * Vectors the corpus mean is averaged over before the sign bits are taken. The mean only
+ * has to be close: it recentres the codes so the sign bits carry more information (measured
+ * at +2.7 recall points at a quarter width, and Zotero's own semantic search centres the
+ * same way, zotero/zotero#6012 `modelCalibration.meanVector`), and every score the search
+ * returns comes from the exact rescore afterwards. So it is taken from a strided sample
+ * rather than from a second full pass over a corpus this exists to stop reading.
+ */
+const MEAN_SAMPLE = 20_000;
+
+/**
+ * Where that mean lives: base64 of its float32 bytes, beside the width it was taken at.
+ * In `meta` rather than in a table of its own because it is one row that is read once per
+ * process, and because a build that does not understand these keys leaves them alone.
+ */
+const CODE_MEAN = 'codeMean';
+const CODE_DIM = 'codeDim';
 
 /**
  * How long a statement waits on another connection's lock before giving up. SQLite's
@@ -47,6 +84,33 @@ export interface SqliteSearchIndexOptions extends SearchIndexOptions {
   migrateFrom?: string;
   /** Override for MAX_MIGRATION_BYTES (tests exercise the refusal without a 200 MB fixture). */
   maxMigrationBytes?: number;
+  /** Two-stage vector search; false forces the exact scan (ZOTEUS_INDEX_ANN). */
+  annEnabled?: boolean;
+  /** Candidates the code stage hands the rescore, per hit asked for (ZOTEUS_INDEX_ANN_OVERSAMPLE). */
+  annOversample?: number;
+  /** Floor on that candidate set (ZOTEUS_INDEX_ANN_MIN_CANDIDATES). */
+  annMinCandidates?: number;
+}
+
+/**
+ * The binary codes, resident. Built from `vector_codes` on the first semantic query and
+ * kept until something writes to the index, because the scan that makes a query fast has to
+ * read them all: 3072 sign bits is 384 bytes a passage, so a 255k-passage library costs
+ * about 98 MB here, against the ~3.1 GB its float32 vectors would.
+ */
+interface CodeCache {
+  /** Vector width the codes were taken from. A query of another width cannot use them. */
+  dim: number;
+  /** 32-bit words per code. Codes are padded to a whole number of words. */
+  words: number;
+  /** Passage rowids, ascending, one per code and parallel to `codes`. */
+  pids: Float64Array;
+  /** `pids.length × words` mean-centred sign bits, packed little-endian. */
+  codes: Uint32Array;
+  /** The corpus mean they were centred on; the query is centred by the same one. */
+  mean: Float32Array;
+  /** Hamming distances, allocated once and rewritten by each query. */
+  dists: Uint16Array;
 }
 
 interface PassageRow {
@@ -74,6 +138,16 @@ interface Statements {
   vectorWidth: StatementSync;
   setMeta: StatementSync;
   getMeta: StatementSync;
+  // The two-stage vector path (#30). Everything below reads or maintains `vector_codes`.
+  insertCode: StatementSync;
+  deleteItemCodes: StatementSync;
+  deletePassageCode: StatementSync;
+  anyCode: StatementSync;
+  allCodes: StatementSync;
+  vectorRows: StatementSync;
+  vectorByPid: StatementSync;
+  uncodedPids: StatementSync;
+  sampleVectors: StatementSync;
 }
 
 /**
@@ -104,12 +178,30 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private readonly file: string;
   private readonly migrateFrom: string | undefined;
   private readonly maxMigrationBytes: number;
+  private readonly annEnabled: boolean;
+  private readonly annOversample: number;
+  private readonly annMinCandidates: number;
+  /** The resident codes, built on demand and dropped by anything that writes vectors. */
+  private codeCache: CodeCache | undefined;
+  /**
+   * Why the codes cannot serve queries in the state the index is in now. Sticky until a
+   * write changes that state, so a corpus the codes cannot cover (two generations of
+   * vectors, say) costs one pass to discover rather than one per query.
+   */
+  private codesUnusable: string | undefined;
+  /** Whether the database holds any code at all, so a fresh build skips 255k no-op deletes. */
+  private hasCodes = false;
+  /** Rescore statements by candidate count; see RESCORE_BATCH. */
+  private rescoreStmts = new Map<number, StatementSync>();
 
   constructor(opts: SqliteSearchIndexOptions) {
     super(opts);
     this.file = opts.path;
     this.migrateFrom = opts.migrateFrom;
     this.maxMigrationBytes = opts.maxMigrationBytes ?? MAX_MIGRATION_BYTES;
+    this.annEnabled = opts.annEnabled ?? true;
+    this.annOversample = Math.max(1, Math.trunc(opts.annOversample ?? DEFAULT_ANN_OVERSAMPLE));
+    this.annMinCandidates = Math.max(1, Math.trunc(opts.annMinCandidates ?? DEFAULT_ANN_MIN_CANDIDATES));
   }
 
   /** Open (creating it if needed) the database, importing a legacy JSON index once. */
@@ -281,6 +373,14 @@ export class SqliteSearchIndex extends SearchIndexBase {
       );
       CREATE INDEX IF NOT EXISTS passages_item ON passages(item_key);
       CREATE INDEX IF NOT EXISTS passages_source ON passages(source);
+      -- One binary code per vector: its sign bits after the corpus mean is subtracted,
+      -- packed 8 dimensions to a byte. Kept in its own table rather than in a column of
+      -- passages for one reason: a column would sit behind the 12 KB vector in the row,
+      -- so reading every code would mean reading every vector's overflow pages too, which
+      -- is the 3.1 GB this table exists to stop reading. Alone in a table, the codes are
+      -- 98 MB read sequentially. Derived from passages.vector and rebuilt from it, so
+      -- losing this table costs a pass, never data.
+      CREATE TABLE IF NOT EXISTS vector_codes (pid INTEGER PRIMARY KEY, code BLOB NOT NULL);
       -- External content: the passage text is stored once, in the passages table, and the
       -- index points back at it by rowid. remove_diacritics 2 folds accents, so "Bronte"
       -- finds "Brontë". The query side folds to match, in tokenize.ts, which is where the
@@ -299,6 +399,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
 
   private prepareStatements(): void {
     const db = this.handle;
+    // Rescore statements are prepared on demand against this handle, so none may outlive it.
+    this.rescoreStmts.clear();
     this.stmts = {
       insertItem: db.prepare('INSERT OR IGNORE INTO items(item_key, title) VALUES (?, ?)'),
       insertPassage: db.prepare(
@@ -330,6 +432,29 @@ export class SqliteSearchIndex extends SearchIndexBase {
       vectorWidth: db.prepare('SELECT length(vector) AS bytes FROM passages WHERE vector IS NOT NULL LIMIT 1'),
       setMeta: db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)'),
       getMeta: db.prepare('SELECT value FROM meta WHERE key = ?'),
+      insertCode: db.prepare('INSERT OR REPLACE INTO vector_codes(pid, code) VALUES (?, ?)'),
+      // Codes are keyed by rowid, and SQLite hands a deleted row's rowid to the next
+      // insert once it is the largest one free. So a code MUST leave with the passage it
+      // was taken from: left behind, it would eventually describe a different passage.
+      deleteItemCodes: db.prepare('DELETE FROM vector_codes WHERE pid IN (SELECT pid FROM passages WHERE item_key = ?)'),
+      deletePassageCode: db.prepare('DELETE FROM vector_codes WHERE pid = (SELECT pid FROM passages WHERE id = ?)'),
+      anyCode: db.prepare('SELECT 1 AS present FROM vector_codes LIMIT 1'),
+      allCodes: db.prepare('SELECT pid, code FROM vector_codes ORDER BY pid'),
+      vectorRows: db.prepare('SELECT pid, vector FROM passages WHERE vector IS NOT NULL'),
+      vectorByPid: db.prepare('SELECT vector FROM passages WHERE pid = ?'),
+      // The rows an update appended since the codes were last built. The join is answered
+      // from the row headers of `passages` (whether `vector` is NULL is in the header) and
+      // a rowid probe into the small codes table, so it does not read the vectors of the
+      // rows it skips, which is every row when a delta added a handful.
+      uncodedPids: db.prepare(`
+        SELECT p.pid AS pid
+        FROM passages p LEFT JOIN vector_codes c ON c.pid = p.pid
+        WHERE p.vector IS NOT NULL AND c.pid IS NULL
+        ORDER BY p.pid
+      `),
+      // Every stride-th vector, for the mean. `pid % 1 = 0` selects all of them, which is
+      // what a corpus smaller than the sample gets.
+      sampleVectors: db.prepare('SELECT vector FROM passages WHERE vector IS NOT NULL AND pid % ? = 0'),
     };
   }
 
@@ -393,6 +518,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
       }>).map((r) => r.k),
     );
     this.c.fulltextItems = this.fulltextKeys.size;
+    // One rowid probe, not a count: all this decides is whether a write has a code to
+    // invalidate. Counting them would read the whole codes table on every rollback.
+    this.hasCodes = this.stmts.anyCode.get() !== undefined;
+    this.invalidateCodes();
   }
 
   /**
@@ -455,6 +584,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.handle.exec("INSERT INTO passages_fts(passages_fts) VALUES('delete-all')");
     this.handle.exec('DELETE FROM passages');
     this.handle.exec('DELETE FROM items');
+    this.dropCodes();
     this.c = { documents: 0, vectors: 0, items: 0, fulltextItems: 0, fulltextPassages: 0 };
     this.fulltextKeys = new Set();
   }
@@ -487,6 +617,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
    */
   protected deleteItem(itemKey: string): void {
     this.begin();
+    // Before the passages go: the codes are keyed by their rowids, and after the delete
+    // there is nothing left to name them by.
+    if (this.hasCodes) this.stmts.deleteItemCodes.run(itemKey);
+    this.invalidateCodes();
     const rows = this.stmts.itemPassages.all(itemKey) as Array<{
       pid: number;
       text: string;
@@ -529,11 +663,17 @@ export class SqliteSearchIndex extends SearchIndexBase {
     const blob = Buffer.from(Float32Array.from(vector).buffer);
     // Each passage is embedded once per build, so a changed row is a new vector.
     if (Number(this.stmts.setVector.run(blob, id).changes) > 0) this.c.vectors++;
+    // A code describes the vector it was taken from, so a new vector retires it. Skipped
+    // while the database holds no code at all, which is the whole of a fresh build: it
+    // would otherwise be a statement per passage to delete nothing.
+    if (this.hasCodes) this.stmts.deletePassageCode.run(id);
+    this.invalidateCodes();
   }
 
   protected clearVectors(): void {
     this.begin();
     this.handle.exec('UPDATE passages SET vector = NULL');
+    this.dropCodes();
     this.c.vectors = 0;
   }
 
@@ -583,11 +723,33 @@ export class SqliteSearchIndex extends SearchIndexBase {
   }
 
   /**
-   * Cosine over the stored vectors, streamed one row at a time and kept to the top K, so
-   * a semantic query costs the size of its result set rather than the size of the index.
+   * Vector candidates, best first, through whichever of the two paths can serve this query.
+   *
+   * The exact scan below reads every stored vector, which is linear in the size of the
+   * index and in the width of the vectors: 255,703 passages at 3072 dimensions is 3.1 GB
+   * decoded and multiplied per query, measured at 90 to 105 seconds (#30). The coded path
+   * reads 98 MB of sign bits instead and only fetches the float32 vectors of the few
+   * hundred candidates it hands the exact rescore, so the ranking it returns is exact
+   * cosine over a neighbourhood the codes found. `codesFor` decides between them, and
+   * records which one served the query on the status.
    */
   protected vectorSearch(query: number[], topK: number): RankedId[] {
     this.vectorScans++;
+    const wanted = Math.max(topK * this.annOversample, this.annMinCandidates);
+    const cache = this.codesFor(wanted, query.length);
+    if (!cache) {
+      this.vectorScan = 'exact';
+      return this.exactVectorSearch(query, topK);
+    }
+    this.vectorScan = 'codes';
+    return this.codedVectorSearch(query, topK, cache, wanted);
+  }
+
+  /**
+   * Cosine over the stored vectors, streamed one row at a time and kept to the top K, so
+   * a semantic query costs the size of its result set rather than the size of the index.
+   */
+  private exactVectorSearch(query: number[], topK: number): RankedId[] {
     const qn = norm(query);
     if (qn === 0) return [];
     const top: RankedId[] = [];
@@ -601,6 +763,363 @@ export class SqliteSearchIndex extends SearchIndexBase {
       if (top.length > topK) top.pop();
     }
     return top;
+  }
+
+  /**
+   * The two-stage search: Hamming over the resident codes for a candidate pool, then the
+   * exact cosine over those candidates' real vectors.
+   *
+   * The second stage is not an optimization, it is what makes the first one usable. Binary
+   * codes alone recalled 0.592 of the exact top 30 on real embeddings; the same codes with
+   * this rescore recalled 0.953 at an 8x pool and 0.986 at 16x (#30). The codes find the
+   * neighbourhood and cannot order inside it, so every score returned here comes from the
+   * float32 vector, and the page this returns is ordered by exact cosine.
+   */
+  private codedVectorSearch(query: number[], topK: number, cache: CodeCache, wanted: number): RankedId[] {
+    const qn = norm(query);
+    if (qn === 0) return [];
+    // The query is centred and thresholded exactly as every stored vector was. Through
+    // Float32Array so it meets `packCode` in the same shape the rows do, and because
+    // rounding a coordinate to float32 cannot move it across zero.
+    const words = new Uint32Array(cache.words);
+    unpackCode(packCode(Float32Array.from(query), cache.mean, cache.words), words, 0, cache.words);
+
+    const picked = this.nearestByHamming(words, cache, wanted);
+    const hits: RankedId[] = [];
+    for (let at = 0; at < picked.length; at += RESCORE_BATCH) {
+      const batch = picked.slice(at, at + RESCORE_BATCH);
+      const rows = this.rescoreStatement(batch.length).all(...batch) as Array<{ id: string; vector: Uint8Array }>;
+      for (const row of rows) {
+        const score = cosine(query, toFloats(row.vector), qn);
+        if (score > 0) hits.push({ id: row.id, score });
+      }
+    }
+    // Sorted rather than threaded through a running top-K: this is a few hundred rows, not
+    // a quarter of a million, and V8's sort is stable, so rows of equal score keep the
+    // rowid order SQLite returned them in, which is the order the exact scan ranks them in.
+    hits.sort((a, b) => b.score - a.score);
+    return hits.length > topK ? hits.slice(0, topK) : hits;
+  }
+
+  /**
+   * The rowids of the `want` codes nearest the query, in rowid order.
+   *
+   * Distances are counted into a histogram and cut at a threshold rather than pushed
+   * through a heap: a Hamming distance is a small integer bounded by the width of a code,
+   * so counting sort answers "the best N of them" in one more pass over an array of
+   * 16-bit integers, with no comparisons and no allocation per row.
+   */
+  private nearestByHamming(query: Uint32Array, cache: CodeCache, want: number): number[] {
+    const { codes, words, dists } = cache;
+    const n = dists.length;
+    const histogram = new Uint32Array(cache.words * 32 + 1);
+    for (let i = 0, at = 0; i < n; i++, at += words) {
+      let d = 0;
+      for (let w = 0; w < words; w++) {
+        // SWAR popcount of one XOR word (Hacker's Delight): five masked shifts, no lookup
+        // table and no BigInt. The BigInt spelling is the obvious one in JavaScript and it
+        // is a trap: measured at 18,635 ms against 97 ms for this loop over the same
+        // 255k 3072-bit codes, which is slower than the exact float scan it replaces (#30).
+        let x = (codes[at + w]! ^ query[w]!) >>> 0;
+        x -= (x >>> 1) & 0x55555555;
+        x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+        x = (x + (x >>> 4)) & 0x0f0f0f0f;
+        d += Math.imul(x, 0x01010101) >>> 24;
+      }
+      dists[i] = d;
+      histogram[d]!++;
+    }
+    // The first distance whose bucket would overflow the pool: everything nearer is taken
+    // whole, and that bucket fills what is left.
+    let cutoff = 0;
+    let nearer = 0;
+    while (cutoff < histogram.length && nearer + histogram[cutoff]! <= want) {
+      nearer += histogram[cutoff]!;
+      cutoff++;
+    }
+    let room = want - nearer;
+    const picked: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const d = dists[i]!;
+      if (d < cutoff) picked.push(cache.pids[i]!);
+      else if (d === cutoff && room > 0) {
+        picked.push(cache.pids[i]!);
+        room--;
+      }
+    }
+    return picked;
+  }
+
+  /**
+   * The statement that fetches one batch of candidates by rowid. One statement per batch
+   * rather than one per row: on the measured shape, issuing a statement per candidate was
+   * about half the cost of the entire two-stage query (#30).
+   */
+  private rescoreStatement(size: number): StatementSync {
+    let stmt = this.rescoreStmts.get(size);
+    if (!stmt) {
+      // Sizes come from RESCORE_BATCH and one remainder, so this holds two entries for a
+      // given `limit`. Cleared rather than grown without bound if a caller sweeps limits.
+      if (this.rescoreStmts.size >= 8) this.rescoreStmts.clear();
+      stmt = this.handle.prepare(`SELECT id, vector FROM passages WHERE pid IN (${'?, '.repeat(size - 1)}?)`);
+      this.rescoreStmts.set(size, stmt);
+    }
+    return stmt;
+  }
+
+  /**
+   * The resident codes, if they can serve a query for `wanted` candidates at this width,
+   * building them first where that is this process's job. Every path that returns nothing
+   * says why on the status, because an index that quietly went back to the scan this
+   * exists to avoid is indistinguishable from one that is simply slow.
+   */
+  private codesFor(wanted: number, queryWidth: number): CodeCache | undefined {
+    const decline = (why: string): undefined => {
+      this.vectorScanNotice = why;
+      return undefined;
+    };
+    if (!this.annEnabled) {
+      return decline('Two-stage vector search is off (ZOTEUS_INDEX_ANN=false), so every stored vector was scanned.');
+    }
+    if (this.c.vectors <= wanted) {
+      return decline(
+        `The index holds ${this.c.vectors} vectors, no more than the ${wanted} candidates the code stage would ` +
+          'hand the exact rescore, so every vector was scanned: there is nothing for the codes to narrow.',
+      );
+    }
+    if (this.codesUnusable) return decline(this.codesUnusable);
+    let note: string | undefined;
+    if (!this.codeCache) {
+      if (this.isBuilding) {
+        // A refusal to write, not to search. Building the codes here would commit the
+        // transaction the running build or update is holding open, and an update that
+        // failed afterwards could no longer be rolled back.
+        return decline(
+          'An index build or update is running, so the binary codes were left untouched and every vector was scanned.',
+        );
+      }
+      note = this.buildCodes();
+      if (!this.codeCache) {
+        return decline(this.codesUnusable ?? 'The binary codes are unavailable, so every vector was scanned.');
+      }
+    }
+    const cache = this.codeCache;
+    if (queryWidth !== cache.dim) {
+      return decline(
+        `The query has ${queryWidth} dimensions and the codes were taken from ${cache.dim}-dimensional vectors, ` +
+          'so every vector was scanned.',
+      );
+    }
+    this.vectorScanNotice = note;
+    return cache;
+  }
+
+  /**
+   * Write whatever codes are missing, commit them, and load them into this process.
+   *
+   * Returns the sentence to report when this had to be done inside a query, which is the
+   * upgrade path: an index built before the codes existed pays one vector scan to gain
+   * them, once, and that scan is the same one every query was paying until now. Failure is
+   * recorded and never thrown: the codes are a cache, and an index without them is slow
+   * rather than broken.
+   */
+  private buildCodes(): string | undefined {
+    const dim = this.vectorDimension();
+    if (dim === undefined || dim === 0) {
+      this.codesUnusable = 'The stored vectors have no readable width, so every vector was scanned.';
+      return undefined;
+    }
+    const started = Date.now();
+    let written = 0;
+    try {
+      written = this.refreshCodes(dim);
+      // Committed straight away, for the same reason dropStaleVectors is: this runs inside
+      // a query, and an open write transaction would hold the writer lock for the rest of
+      // the process, against a second Zoteus sharing the data dir (#18).
+      this.flush();
+    } catch (e) {
+      if (isCorruptionError(e)) throw this.noteCorruption(e);
+      this.codesUnusable =
+        `The binary search codes could not be built (${e instanceof Error ? e.message : String(e)}), so every ` +
+        'stored vector is being scanned instead.';
+      this.opts.logger?.warn(this.codesUnusable);
+      return undefined;
+    }
+    const loaded = this.loadCodes(dim);
+    if (typeof loaded === 'string') {
+      this.codesUnusable = `${loaded} Every stored vector is being scanned instead; zotero_index action:"build" rebuilds the codes.`;
+      this.opts.logger?.warn(this.codesUnusable);
+      return undefined;
+    }
+    this.codeCache = loaded;
+    if (!written) return undefined;
+    const seconds = ((Date.now() - started) / 1000).toFixed(1);
+    const notice =
+      `Binary search codes were built for ${written} vectors in ${seconds}s, once, inside this query: this index ` +
+      'was written before it carried them. They are stored in the index file and every later query uses them.';
+    this.opts.logger?.info(notice);
+    return notice;
+  }
+
+  /**
+   * Bring `vector_codes` level with the stored vectors, and return how many were written.
+   *
+   * Two shapes of work, and the difference is the whole cost model. With a mean already
+   * taken at this width, only the vectors that carry no code are read: that is a delta
+   * update's handful of passages, found without touching the vectors of the rows it skips.
+   * Without one (a first build, or vectors that changed width) every code is taken again,
+   * one pass, which is what the very first semantic query on an upgraded index pays.
+   */
+  private refreshCodes(dim: number): number {
+    if (this.c.vectors === 0) return 0;
+    const words = Math.ceil(dim / 32);
+    const mean = this.storedMean(dim);
+    this.begin();
+    let written = 0;
+    if (mean) {
+      // Materialized before the first insert: a statement that reads `vector_codes` must
+      // not still be open while this writes into it.
+      const pids = (this.stmts.uncodedPids.all() as Array<{ pid: number }>).map((r) => Number(r.pid));
+      for (const pid of pids) {
+        const row = this.stmts.vectorByPid.get(pid) as { vector?: Uint8Array } | undefined;
+        if (!row?.vector) continue;
+        const v = toFloats(row.vector);
+        // A vector of another width cannot be coded against this mean. Left alone rather
+        // than coded wrongly: the coverage check below then keeps the whole path off.
+        if (v.length !== dim) continue;
+        this.stmts.insertCode.run(pid, packCode(v, mean, words));
+        written++;
+      }
+    } else {
+      this.dropCodes();
+      const fresh = this.sampleMean(dim);
+      this.stmts.setMeta.run(CODE_MEAN, encodeMean(fresh));
+      this.stmts.setMeta.run(CODE_DIM, String(dim));
+      // Reading `passages` while writing `vector_codes`: different tables, so the scan is
+      // not walking a b-tree these inserts are changing under it.
+      for (const row of this.stmts.vectorRows.iterate() as Iterable<{ pid: number; vector: Uint8Array }>) {
+        const v = toFloats(row.vector);
+        if (v.length !== dim) continue;
+        this.stmts.insertCode.run(Number(row.pid), packCode(v, fresh, words));
+        written++;
+      }
+    }
+    if (written) this.hasCodes = true;
+    this.invalidateCodes();
+    return written;
+  }
+
+  /**
+   * Read every code into one Uint32Array, or say why they cannot be used.
+   *
+   * The check that matters is the count: one code per stored vector, no more and no fewer.
+   * Fewer means a writer added vectors without coding them; more means one deleted passages
+   * without deleting their codes, and a code left behind eventually describes whichever
+   * passage inherits its rowid. Neither can produce a wrong score (every score comes from a
+   * real vector fetched by rowid), but both cost recall silently, so both send the query
+   * back to the exact scan until a build or an update rebuilds the codes.
+   */
+  private loadCodes(dim: number): CodeCache | string {
+    const mean = this.storedMean(dim);
+    if (!mean) return `No corpus mean is stored for ${dim}-dimensional vectors, so the binary codes cannot be read.`;
+    const words = Math.ceil(dim / 32);
+    const n = this.c.vectors;
+    const codes = new Uint32Array(n * words);
+    const pids = new Float64Array(n);
+    let i = 0;
+    let width: number | undefined;
+    for (const row of this.stmts.allCodes.iterate() as Iterable<{ pid: number; code: Uint8Array }>) {
+      if (i >= n) {
+        i++;
+        break;
+      }
+      if (row.code.byteLength !== words * 4) {
+        width = row.code.byteLength;
+        break;
+      }
+      pids[i] = Number(row.pid);
+      unpackCode(row.code, codes, i * words, words);
+      i++;
+    }
+    if (width !== undefined) {
+      return `A stored binary code is ${width} bytes where ${dim}-dimensional vectors need ${words * 4}.`;
+    }
+    if (i > n) return `There are more binary codes than the ${n} stored vectors they must describe.`;
+    if (i !== n) return `The binary codes cover ${i} of the ${n} stored vectors.`;
+    return { dim, words, pids, codes, mean, dists: new Uint16Array(n) };
+  }
+
+  /**
+   * The corpus mean, averaged over a strided sample of the vectors. Every stride-th rowid
+   * rather than the first N: passages are stored in the order they were indexed, so a
+   * prefix is the first few hundred items of the library and carries their subjects with it.
+   */
+  private sampleMean(dim: number): Float32Array {
+    const stride = Math.max(1, Math.floor(this.c.vectors / MEAN_SAMPLE));
+    const sum = new Float64Array(dim);
+    let n = 0;
+    for (const row of this.stmts.sampleVectors.iterate(stride) as Iterable<{ vector: Uint8Array }>) {
+      const v = toFloats(row.vector);
+      if (v.length !== dim) continue;
+      for (let i = 0; i < dim; i++) sum[i]! += v[i]!;
+      n++;
+    }
+    const mean = new Float32Array(dim);
+    // Centring on nothing is centring on zero, which is the plain sign bits: worse codes,
+    // never wrong ones.
+    if (n === 0) return mean;
+    for (let i = 0; i < dim; i++) mean[i] = sum[i]! / n;
+    return mean;
+  }
+
+  /** The stored mean, when one was taken from vectors of exactly this width. */
+  private storedMean(dim: number): Float32Array | undefined {
+    if (Number(this.meta(CODE_DIM) ?? 0) !== dim) return undefined;
+    const encoded = this.meta(CODE_MEAN);
+    if (!encoded) return undefined;
+    return decodeMean(encoded, dim);
+  }
+
+  /** Forget the resident codes, and any verdict about them. Any write to a vector does this. */
+  private invalidateCodes(): void {
+    this.codeCache = undefined;
+    this.codesUnusable = undefined;
+  }
+
+  /** Drop every code and the mean they were centred on, so the next refresh takes both again. */
+  private dropCodes(): void {
+    this.begin();
+    this.handle.exec('DELETE FROM vector_codes');
+    this.stmts.setMeta.run(CODE_MEAN, '');
+    this.stmts.setMeta.run(CODE_DIM, '0');
+    this.hasCodes = false;
+    this.invalidateCodes();
+  }
+
+  /**
+   * Rebuild the codes for whatever a build or an update has just written, inside that
+   * job's own transaction. Never throws: a cache that could not be built leaves a slower
+   * index, and failing a build over it would be losing the library to save the cache.
+   */
+  protected finalizeVectors(): void {
+    // An index too small for the codes to narrow anything never reads them, so it is not
+    // made to carry them either: below the candidate floor, every query scans exactly.
+    if (!this.db || !this.annEnabled || this.c.vectors <= this.annMinCandidates) return;
+    const dim = this.vectorDimension();
+    if (dim === undefined || dim === 0) return;
+    try {
+      const written = this.refreshCodes(dim);
+      if (written) this.opts.logger?.debug(`search index: ${written} binary vector codes written`);
+    } catch (e) {
+      if (isCorruptionError(e)) {
+        this.noteCorruption(e);
+        return;
+      }
+      this.opts.logger?.warn(
+        `The binary search codes could not be built (${e instanceof Error ? e.message : String(e)}); ` +
+          'semantic queries will scan every vector instead.',
+      );
+    }
   }
 
   protected passage(id: string): ChunkRecord | undefined {
@@ -654,6 +1173,70 @@ export class SqliteSearchIndex extends SearchIndexBase {
  */
 function ftsTerm(term: string): string {
   return `"${term.replace(/"/g, '""')}"`;
+}
+
+/** Whether this machine stores a Uint32 low byte first, which decides how a code is read. */
+const LITTLE_ENDIAN = new Uint8Array(Uint32Array.of(1).buffer)[0] === 1;
+
+/**
+ * One vector as sign bits: bit i is set when coordinate i is above the corpus mean.
+ *
+ * The comparison IS the subtraction, done without performing it: `v[i] > mean[i]` is the
+ * sign of `v[i] - mean[i]` with no rounding of its own, and a NaN coordinate compares false
+ * and clears its bit rather than setting one from nothing. Bits go least-significant-first
+ * within each byte, and the code is padded to a whole number of 32-bit words so reading it
+ * back is one word at a time with no tail. Centring on the corpus mean is what makes these
+ * bits informative: measured at nothing lost at full width and +2.7 to +4.5 recall points
+ * at narrower ones, and it is what Zotero's own semantic search does
+ * (zotero/zotero#6012's `modelCalibration.meanVector`).
+ */
+export function packCode(v: Float32Array, mean: Float32Array, words: number): Uint8Array {
+  const out = new Uint8Array(words * 4);
+  const n = Math.min(v.length, mean.length);
+  for (let i = 0; i < n; i++) {
+    if (v[i]! > mean[i]!) out[i >> 3]! |= 1 << (i & 7);
+  }
+  return out;
+}
+
+/**
+ * One stored code into the resident word array, little-endian on every machine.
+ *
+ * The fast path is the same bytes reinterpreted, which is what the byte order makes true
+ * here and nowhere else: a code written on a big-endian machine and scanned on a
+ * little-endian one would compare bits of one dimension against bits of another. The
+ * arithmetic below is what any machine falls back to, and both spellings produce the same
+ * words, so a code stays readable wherever the index file is opened.
+ */
+export function unpackCode(code: Uint8Array, into: Uint32Array, at: number, words: number): void {
+  if (LITTLE_ENDIAN && code.byteOffset % Uint32Array.BYTES_PER_ELEMENT === 0) {
+    into.set(new Uint32Array(code.buffer, code.byteOffset, words), at);
+    return;
+  }
+  for (let w = 0; w < words; w++) {
+    const o = w * 4;
+    into[at + w] = ((code[o]! | (code[o + 1]! << 8) | (code[o + 2]! << 16) | (code[o + 3]! << 24)) >>> 0);
+  }
+}
+
+/**
+ * The corpus mean as base64, and back. Written coordinate by coordinate in little-endian
+ * rather than as a view over its own bytes, for the reason `unpackCode` spells out: the
+ * mean and the codes have to agree about a vector, and they only do if both travel in a
+ * byte order the reader does not have to guess.
+ */
+function encodeMean(mean: Float32Array): string {
+  const bytes = Buffer.alloc(mean.length * Float32Array.BYTES_PER_ELEMENT);
+  for (let i = 0; i < mean.length; i++) bytes.writeFloatLE(mean[i]!, i * Float32Array.BYTES_PER_ELEMENT);
+  return bytes.toString('base64');
+}
+
+function decodeMean(encoded: string, dim: number): Float32Array | undefined {
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.byteLength !== dim * Float32Array.BYTES_PER_ELEMENT) return undefined;
+  const mean = new Float32Array(dim);
+  for (let i = 0; i < dim; i++) mean[i] = bytes.readFloatLE(i * Float32Array.BYTES_PER_ELEMENT);
+  return mean;
 }
 
 /** Float32 view over a BLOB, copying only when the buffer is not 4-byte aligned. */
