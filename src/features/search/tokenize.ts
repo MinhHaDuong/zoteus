@@ -147,8 +147,12 @@ const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
  * passed, and the FTS5 document side (unicode61) has no stoplist at all, so the index held
  * the very tokens the query side was throwing away. bm25 already down-weights ubiquitous
  * terms, which is the honest version of what a stoplist approximates; what the list added
- * was queries that could not say what they mean — "to be or not to be" tokenized to
- * nothing. Existing indexes need no rebuild: terms are OR-ed, so queries keep matching
+ * was queries that could not say what they mean, and it did so in the way that is hardest
+ * to notice. "to be or not to be" survived the list as `not` alone — the one word of it
+ * the list happens to omit — so the search silently became a one-term query for an
+ * incidental function word and answered it with twenty confidently ranked passages about
+ * nothing in particular. An empty result would at least have said something was wrong.
+ * Existing indexes need no rebuild: terms are OR-ed, so queries keep matching
  * through their content words, and the JSON backend re-derives its postings from raw
  * passage text on every load anyway.
  */

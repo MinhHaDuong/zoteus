@@ -192,8 +192,10 @@ describe('tokenize', () => {
     // while "le", "der" and "và" sailed through, and the FTS5 document side (unicode61)
     // never had a stoplist at all, so the index held the very tokens the query side was
     // quietly throwing away. bm25 already down-weights ubiquitous terms; what a stoplist
-    // adds on top is queries that cannot say what they mean — "to be or not to be"
-    // tokenized to nothing at all.
+    // adds on top is queries that cannot say what they mean: "to be or not to be" came
+    // through the list as `not` alone, the one word of it the list happens to omit, so
+    // the search became a one-term query for an incidental function word and answered it
+    // with confident, unrelated hits rather than with nothing.
     expect(tokenize('the a of neural x networks')).toEqual(['the', 'of', 'neural', 'networks']);
     expect(tokenize('to be or not to be')).toEqual(['to', 'be', 'or', 'not', 'to', 'be']);
   });
