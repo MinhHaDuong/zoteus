@@ -28,6 +28,11 @@ export interface ZoteusConfig {
   indexOwnWords: boolean;
   /** Cap on indexed full-text characters per item (0 = no cap). */
   indexFulltextMaxChars: number;
+  /**
+   * Run the full-text pass even under Electron, where it takes the server process down
+   * (#37). Off by default; see `features/search/electron.ts` for what is and is not known.
+   */
+  allowElectronFulltext: boolean;
   /** Cap on items per index build. Raise it for libraries larger than the default. */
   indexMaxItems: number;
   /**
@@ -177,6 +182,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
           .int()
           .nonnegative()
           .default(DEFAULT_FULLTEXT_MAX_CHARS),
+        // The escape hatch for #37, not a tuning knob: under Electron the full-text pass is
+        // refused because it kills the process, and this is how a user who wants to try it
+        // anyway says so. A tolerated-and-defaulted boolean like the rest, so a desktop host
+        // that substitutes nothing for an empty field still starts.
+        ZOTEUS_ALLOW_ELECTRON_FULLTEXT: bool(false),
         ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
         ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
         ZOTEUS_INDEX_ANN: bool(true),
@@ -316,6 +326,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
     indexOwnWords: parsed.ZOTEUS_INDEX_OWN_WORDS,
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
+    allowElectronFulltext: parsed.ZOTEUS_ALLOW_ELECTRON_FULLTEXT,
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     indexBackend: parsed.ZOTEUS_INDEX_BACKEND,
     indexAnn: parsed.ZOTEUS_INDEX_ANN,

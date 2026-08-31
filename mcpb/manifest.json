@@ -34,6 +34,7 @@
         "ZOTEUS_TRANSFORMERS_PATH": "${user_config.transformers_path}",
         "ZOTEUS_INDEX_FULLTEXT": "${user_config.index_fulltext}",
         "ZOTEUS_INDEX_FULLTEXT_MAX_CHARS": "${user_config.index_fulltext_max_chars}",
+        "ZOTEUS_ALLOW_ELECTRON_FULLTEXT": "${user_config.allow_electron_fulltext}",
         "ZOTEUS_INDEX_MAX_ITEMS": "${user_config.index_max_items}",
         "ZOTEUS_DIST": "mcpb"
       }
@@ -84,7 +85,7 @@
     "index_fulltext": {
       "type": "boolean",
       "title": "Index PDF full text",
-      "description": "Also index the body text Zotero extracted from your PDFs, so semantic search can match a claim buried inside a paper and not just its title and abstract. Off by default because it is expensive: roughly 9x the passages, index size and embedding time. You can also turn it on for a single build with zotero_index fulltext:true.",
+      "description": "Also index the body text Zotero extracted from your PDFs, so semantic search can match a claim buried inside a paper and not just its title and abstract. Off by default because it is expensive: roughly 9x the passages, index size and embedding time. You can also turn it on for a single build with zotero_index fulltext:true. NOTE: the build itself cannot run inside the Claude app right now (it kills the extension partway through, issue #37), so Zoteus refuses it there and tells you how to build the index once from a terminal instead; keeping it up to date with zotero_index action:\"update\" works normally from in here.",
       "default": false,
       "required": false
     },
@@ -93,6 +94,13 @@
       "title": "Full-text characters per item",
       "description": "How much of each item's extracted body text gets indexed when the setting above is on. The default, 40000 characters (roughly 13 pages of dense text), truncates long documents: only the beginning of a book or a long thesis is searchable. Set 0 for no cap and full coverage, at the cost of a bigger index and a longer build. Leave empty to keep the default.",
       "min": 0,
+      "required": false
+    },
+    "allow_electron_fulltext": {
+      "type": "boolean",
+      "title": "Allow full-text builds inside the app (risky)",
+      "description": "A full-text index build reliably kills the Zoteus extension partway through when it runs inside the Claude app, with no error message anywhere (issue #37). The same build finishes normally outside the app, and the cause is not yet understood, so Zoteus refuses that one step in here rather than dying in it. Tick this to try it anyway: the extension may stop mid-build, but everything it indexed up to that point is kept and searchable, and running the build again carries on from there. Leave it off unless you are helping to track the bug down.",
+      "default": false,
       "required": false
     },
     "index_max_items": {
