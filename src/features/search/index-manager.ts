@@ -343,6 +343,19 @@ export abstract class SearchIndexBase implements SearchIndex {
   abstract readonly supportsDelete: boolean;
   /** Attach a vector to an already-stored passage. */
   protected abstract putVector(id: string, vector: number[]): void;
+  /**
+   * Give the store a chance to answer a passage's vector from something it already holds,
+   * before the embedder is asked for one. True means the passage now carries a vector and
+   * must not be queued for embedding.
+   *
+   * The one implementation today is the SQLite backend reading an index a schema change
+   * moved aside: an embedding is a function of the text and the model, so a rebuild forced
+   * by a table-layout change would otherwise re-buy vectors it already owns (#34). Default
+   * false, because a backend with nothing to reuse must not be made to pretend otherwise.
+   */
+  protected adoptVector(_rec: ChunkRecord): boolean {
+    return false;
+  }
   /** Discard every stored vector, keeping the passages. */
   protected abstract clearVectors(): void;
   /**
@@ -593,8 +606,11 @@ export abstract class SearchIndexBase implements SearchIndex {
       const text = extra ? `${base}. ${extra}` : base;
       for (const ch of chunkText(text)) {
         const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
-        records.push(rec);
         this.putPassage(rec);
+        // Same rule as the incremental path: a vector the store can produce for itself is
+        // never bought from the embedder a second time (#34).
+        if (this.hasEmbedder && this.adoptVector(rec)) continue;
+        records.push(rec);
       }
     }
     if (this.opts.embedder && records.length) {
@@ -1479,7 +1495,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     for (const ch of chunkText(itemText(d))) {
       const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title, text: ch.text };
       this.putPassage(rec);
-      if (this.hasEmbedder) pending.push(rec);
+      if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
     }
     return { key, title };
   }
@@ -1499,7 +1515,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         source: 'fulltext',
       };
       this.putPassage(rec);
-      if (this.hasEmbedder) pending.push(rec);
+      if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
     }
   }
 

@@ -385,14 +385,33 @@ resets before it parses, the next clean shutdown wrote that emptiness back over 
 A JSON artifact that fails to parse is now refused, left untouched on disk, and repaired by
 the same `action:"build"`.
 
-**A database from a different schema version is moved aside, never written into.** The
+**An older schema version is upgraded in place.** When Zoteus bumps the index schema, a
+database stamped with an earlier version of *this* schema is migrated where it lies: the
+ladder of upgrade steps runs inside one transaction with the new stamp, so the file is
+either fully upgraded or fully unchanged, and nothing is re-crawled or re-embedded.
+`storageNotice` says what moved it forward. A step that fails rolls the whole thing back
+and the database is moved aside instead, exactly as an unmigratable one is.
+
+**A database from an unreachable schema version is moved aside, never written into.** The
 schema stamp is read before anything touches the file. A database stamped with a version
-this build does not understand — typically one written by a newer Zoteus after a downgrade
-— is renamed to `search-index.sqlite.incompatible-<timestamp>` (its write-ahead sidecars
-with it, nothing deleted), a fresh index is created in its place, and `storageNotice` says
-what moved and where. The moved file stays a complete database, readable by the build that
-stamped it; rebuild with `zotero_index action:"build"`, and a later re-upgrade finds the
-moved file intact.
+this build cannot reach — one written by a newer Zoteus after a downgrade, a file with no
+stamp at all, or a version no ladder covers — is renamed to
+`search-index.sqlite.incompatible-<timestamp>` (its write-ahead sidecars with it, nothing
+deleted), a fresh index is created in its place, and `storageNotice` says what moved and
+where. The moved file stays a complete database, readable by the build that stamped it;
+rebuild with `zotero_index action:"build"`, and a later re-upgrade finds the moved file
+intact.
+
+**A sideline hands its vectors to the rebuild that replaces it.** The expensive half of a
+rebuild is not the crawl but the embedding — hours of local CPU on a large library, or real
+spend on a hosted provider — and none of that cost is inherent: an embedding is a function
+of the passage text and the model, neither of which a schema change touches. So the
+moved-aside database stays open as a read-only vector source, and every passage the rebuild
+re-reads with the same id and byte-identical text takes its vector from there instead of
+being embedded again. Only genuinely new or edited text costs embedding time. The reuse is
+refused outright when the embedder has changed (`embedderId` covers provider *and* model),
+and `storageNotice` prices the rebuild either way: how many passages must be re-indexed, how
+many vectors that involves, and whether they have to be paid for.
 
 **Migration is automatic and lossless.** The first time the SQLite backend opens a data dir
 that holds a `search-index.json` and no database, it imports the JSON index and leaves the
