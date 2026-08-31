@@ -6,6 +6,27 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **The search index has a migration path, so the next schema bump does not re-embed every
+  library from zero (#34).** `SCHEMA_VERSION` has been 1 since the SQLite backend landed,
+  and the open path accepted exactly two states: no tables, or this build's own stamp.
+  Everything else was moved aside and rebuilt — *including a database stamped with an older
+  version of our own schema*. That has never fired for anyone, which is exactly why it was
+  worth fixing now: the first bump is the one that charges every index in the field a full
+  rebuild, and the expensive half of a rebuild is re-embedding (a measured 5.5 hours of
+  local CPU for 255k passages, or a hosted provider's bill). Two things change. A ladder of
+  upgrade steps now carries an older index forward in place: each step runs inside the one
+  transaction that stamps the new version, so a database is either fully upgraded or fully
+  untouched, and a step that throws rolls back and falls through to the sideline. And where
+  a sideline is still the right answer — a newer build's database, an unstamped file, a gap
+  in the ladder — the moved-aside index becomes a read-only vector source for the rebuild
+  that replaces it: any passage that comes back with the same id and byte-identical text
+  takes its stored vector instead of being embedded again, so only genuinely new or edited
+  text costs embedding time. Reuse is refused when the embedder identity (provider *and*
+  model) differs, and `storageNotice` now prices the rebuild it prescribes — how many
+  passages, how many vectors, and whether they must be paid for — instead of only saying
+  where the old file went.
+
 ### Fixed
 - **A build for one library no longer erases another library's index.** The index file is
   keyed by the data dir, never by the library — which is right, and had a sharp edge: the

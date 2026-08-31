@@ -6,6 +6,7 @@ import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { tokenize } from './tokenize.js';
 import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
+import { VectorSalvage } from './vector-salvage.js';
 import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE } from './limits.js';
 import type {
   BuildCheckpoint,
@@ -46,6 +47,44 @@ export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
  * can rebuild from what is already on disk.
  */
 const SCHEMA_VERSION = 1;
+
+/**
+ * One rung of the upgrade ladder: how a database stamped `to - 1` becomes one stamped `to`.
+ *
+ * The stamp above says what a build must not misread. This says what it can read anyway,
+ * and it exists because the two are not the same question. Most schema changes add a
+ * column or an index, neither of which invalidates a single stored row — yet without a
+ * rung to carry them across, the bump that adds one costs every user in the field a full
+ * rebuild, and the expensive half of a rebuild is re-embedding: five and a half hours of
+ * local CPU on a 255k-passage library, or real spend on a hosted embedder (#34).
+ *
+ * The contract for whoever bumps SCHEMA_VERSION next:
+ *
+ *  - add a rung whose `to` is the new version, or deliberately do not, and understand
+ *    that not adding one sidelines every existing index and charges it a re-embed;
+ *  - `up` runs inside the transaction that stamps the new version, so a step that throws
+ *    leaves the database exactly as it was, at its old stamp, and the sideline takes over;
+ *  - the ladder must be contiguous. A database is migrated only when every rung from its
+ *    stamp to this one exists, because a gap means some version's rows were never
+ *    accounted for by anything.
+ */
+export interface SchemaMigration {
+  /** Version this rung produces. It upgrades a database stamped `to - 1`. */
+  to: number;
+  /** What it changes, in a few words, for the notice a migrated index reports. */
+  what: string;
+  /** DDL and backfill. Runs inside the transaction that stamps `to`. */
+  up(db: Database): void;
+}
+
+/**
+ * The ladder, in ascending order. Empty because SCHEMA_VERSION has never been bumped: the
+ * stamp was introduced as 1 with the SQLite backend and is still 1. That is precisely why
+ * this is here now — a migration path is cheap to build before the first bump and
+ * expensive to wish for afterwards, when every index in the field has already been
+ * sidelined by it.
+ */
+export const SCHEMA_MIGRATIONS: SchemaMigration[] = [];
 
 /**
  * Passage rowids per rescore statement. The exact stage fetches its candidates by rowid in
@@ -91,6 +130,14 @@ export interface SqliteSearchIndexOptions extends SearchIndexOptions {
   migrateFrom?: string;
   /** Override for MAX_MIGRATION_BYTES (tests exercise the refusal without a 200 MB fixture). */
   maxMigrationBytes?: number;
+  /**
+   * Schema stamp this instance writes and upgrades to, with the ladder that gets there.
+   * Overridable because SCHEMA_VERSION has never been bumped, so the only way to exercise
+   * a bump — the migration, its rollback, and the sideline that catches what cannot
+   * migrate — is for a test to play the part of the build that makes one.
+   */
+  schemaVersion?: number;
+  migrations?: SchemaMigration[];
   /** Two-stage vector search; false forces the exact scan (ZOTEUS_INDEX_ANN). */
   annEnabled?: boolean;
   /** Candidates the code stage hands the rescore, per hit asked for (ZOTEUS_INDEX_ANN_OVERSAMPLE). */
@@ -189,6 +236,16 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private readonly file: string;
   private readonly migrateFrom: string | undefined;
   private readonly maxMigrationBytes: number;
+  private readonly schemaVersion: number;
+  private readonly migrations: SchemaMigration[];
+  /**
+   * Vectors from an index this open had to move aside, kept as a source for the rebuild
+   * that follows. Armed only when the sidelined file was written by the same embedder;
+   * see VectorSalvage for the rest of the identity a reused vector has to satisfy.
+   */
+  private salvage: VectorSalvage | undefined;
+  /** The sideline's own sentence, so the reuse count can be appended without repeating it. */
+  private sidelineNotice: string | undefined;
   private readonly annEnabled: boolean;
   private readonly annOversample: number;
   private readonly annMinCandidates: number;
@@ -210,6 +267,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.file = opts.path;
     this.migrateFrom = opts.migrateFrom;
     this.maxMigrationBytes = opts.maxMigrationBytes ?? MAX_MIGRATION_BYTES;
+    this.schemaVersion = opts.schemaVersion ?? SCHEMA_VERSION;
+    this.migrations = opts.migrations ?? SCHEMA_MIGRATIONS;
     this.annEnabled = opts.annEnabled ?? true;
     this.annOversample = Math.max(1, Math.trunc(opts.annOversample ?? DEFAULT_ANN_OVERSAMPLE));
     this.annMinCandidates = Math.max(1, Math.trunc(opts.annMinCandidates ?? DEFAULT_ANN_MIN_CANDIDATES));
@@ -225,8 +284,9 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // connection pragma touches it. Doing it the other way around — createSchema first —
       // re-stamped a database written by a newer build and then misread it, destroying the
       // one piece of evidence the stamp exists to carry at exactly the moment it mattered.
-      if (existed) await this.sidelineIfIncompatible();
-      this.openHandle();
+      // A migration may leave the handle already open, having earned the right to write.
+      if (existed) await this.reconcileSchema();
+      if (!this.db) this.openHandle();
       this.createSchema();
       this.prepareStatements();
       // `existed` deliberately still gates the import after a sideline: the legacy JSON
@@ -235,6 +295,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       if (!existed && this.migrateFrom) await this.importJson(this.migrateFrom);
       this.refreshCounts();
       this.loadMeta();
+      this.syncSalvage();
     } catch (e) {
       if (!isCorruptionError(e) && !(e instanceof SearchIndexCorruptError)) throw e;
       // The handle may exist, so this object owns it and must release it before handing
@@ -301,6 +362,129 @@ export class SqliteSearchIndex extends SearchIndexBase {
   }
 
   /**
+   * What an existing database holds, for the sentence a sideline owes its owner.
+   *
+   * Read from the same read-only probe as the stamp, because it answers the question the
+   * old notice left the user to discover by watching: what a rebuild is going to cost.
+   * The counts are what must be re-indexed and the embedder id is what says whether the
+   * expensive half — re-embedding — can be avoided by reusing the vectors already here.
+   */
+  private probeContents(db: Database): { passages: number; vectors: number; embedderId?: string } {
+    try {
+      const row = db
+        .prepare('SELECT COUNT(*) AS p, COUNT(vector) AS v FROM passages')
+        .get() as { p: number; v: number };
+      const id = db.prepare("SELECT value FROM meta WHERE key = 'embedderId'").get() as
+        | { value?: string }
+        | undefined;
+      return { passages: Number(row?.p ?? 0), vectors: Number(row?.v ?? 0), ...(id?.value ? { embedderId: id.value } : {}) };
+    } catch {
+      // A file whose shape this build cannot read is exactly the file being moved aside;
+      // it owes no census, and failing the open over one would be absurd.
+      return { passages: 0, vectors: 0 };
+    }
+  }
+
+  /**
+   * Decide what an existing database is to this build — current, upgradable, or foreign —
+   * and act on it, leaving either a migrated file (handle open) or a moved-aside one.
+   *
+   * The read-only probe comes first and stays genuinely read-only: journal_mode=WAL can
+   * rewrite bytes in the database header, so even the normal writable connection pragmas
+   * must wait until the stamp has been accepted. What is new is that "accepted" now has
+   * two forms. A database at an OLDER version of this schema is ours, we know exactly what
+   * it holds, and a ladder of migrations exists to bring it forward without re-reading a
+   * single item from Zotero (#34). Only a version nothing on the ladder reaches — a newer
+   * build's, an unstamped file, a gap in the ladder — is still moved aside.
+   */
+  private async reconcileSchema(): Promise<void> {
+    const probe = new DatabaseSync(this.file, { readOnly: true });
+    let stored: number | 'fresh' | 'unstamped';
+    let contents: { passages: number; vectors: number; embedderId?: string };
+    try {
+      probe.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      stored = this.storedSchemaVersion(probe);
+      contents = stored === 'fresh' || stored === this.schemaVersion ? { passages: 0, vectors: 0 } : this.probeContents(probe);
+    } finally {
+      probe.close();
+    }
+    if (stored === 'fresh' || stored === this.schemaVersion) return;
+    const ladder = typeof stored === 'number' ? this.migrationPath(stored) : undefined;
+    if (ladder) {
+      const failure = this.runMigrations(stored as number, ladder);
+      if (!failure) return;
+      // A migration that threw rolled itself back, so the file is untouched at its old
+      // stamp — which is the one state the sideline below was written for.
+      await this.sideline(stored, contents, failure);
+      return;
+    }
+    await this.sideline(stored, contents);
+  }
+
+  /**
+   * The contiguous run of rungs from `stored` up to this build's version, or undefined
+   * when there is no complete one. Contiguity is the whole check: a missing rung means
+   * some version's rows were never accounted for, and stepping over it would hand this
+   * build rows nothing ever claimed to understand.
+   */
+  private migrationPath(stored: number): SchemaMigration[] | undefined {
+    // Only forwards. A database from a NEWER build may hold columns and rows this one
+    // cannot read at all, and no downgrade step exists to consult about them.
+    if (stored >= this.schemaVersion || stored < 0) return undefined;
+    const steps: SchemaMigration[] = [];
+    for (let v = stored + 1; v <= this.schemaVersion; v++) {
+      const step = this.migrations.find((m) => m.to === v);
+      if (!step) return undefined;
+      steps.push(step);
+    }
+    return steps;
+  }
+
+  /**
+   * Run the ladder, and stamp the new version in the same transaction. Returns undefined
+   * on success, or the reason to sideline instead.
+   *
+   * One transaction over every rung, and the stamp inside it: a database is either fully
+   * at the new version or still fully at the old one, never at some half-applied state
+   * between two that no build has a schema for. The handle is opened here (and kept, so
+   * open() does not open a second one) because migrating IS writing, and the ordering
+   * rule the probe protects is "do not write into a database this build does not
+   * understand" — a rung that exists is this build saying it understands this one.
+   */
+  private runMigrations(stored: number, steps: SchemaMigration[]): string | undefined {
+    this.openHandle();
+    const db = this.handle;
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      for (const step of steps) step.up(db);
+      db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run(
+        'schemaVersion',
+        String(this.schemaVersion),
+      );
+      db.exec('COMMIT');
+    } catch (e) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // Nothing to roll back (the BEGIN itself failed), which is the same outcome.
+      }
+      // Released before the sideline that follows: on Windows an open handle refuses the
+      // rename, and this object must not block the recovery it is about to prescribe.
+      // Closed raw rather than through close(), which would flush through statements this
+      // failure means were never prepared.
+      this.db?.close();
+      this.db = undefined;
+      return e instanceof Error ? e.message : String(e);
+    }
+    const what = steps.map((s) => s.what).join('; ');
+    this.storeNotice =
+      `The search index at ${this.file} was upgraded in place from schema version ${stored} to ` +
+      `${this.schemaVersion} (${what}). Nothing was re-indexed and no vectors were re-computed.`;
+    this.opts.logger?.info(this.storeNotice);
+    return undefined;
+  }
+
+  /**
    * Move a database this build must not write into out of the way, and open fresh.
    *
    * Sideline, never delete: the moved file is a complete database, evidence of the skew
@@ -310,20 +494,18 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * file that no longer exists — and in sidecarsOf order, database last, so an interruption
    * mid-move can only strand sidecars beside the moved file, never beside the fresh one.
    * One notice, on the channel status already reports storage decisions on.
+   *
+   * The moved file is also, from here on, a vector source. Its embeddings were computed
+   * from text and a model, neither of which a schema change touches, so every passage the
+   * rebuild re-reads unchanged can take its vector from here instead of paying for it a
+   * second time (#34). Armed only when the same embedder wrote it, and only then does the
+   * notice promise it.
    */
-  private async sidelineIfIncompatible(): Promise<void> {
-    // A genuinely read-only probe makes the ordering enforceable rather than documentary:
-    // in particular, journal_mode=WAL can rewrite bytes in the database header, so even
-    // the normal writable connection pragmas must wait until the stamp has been accepted.
-    const probe = new DatabaseSync(this.file, { readOnly: true });
-    let stored: number | 'fresh' | 'unstamped';
-    try {
-      probe.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-      stored = this.storedSchemaVersion(probe);
-    } finally {
-      probe.close();
-    }
-    if (stored === 'fresh' || stored === SCHEMA_VERSION) return;
+  private async sideline(
+    stored: number | 'unstamped',
+    contents: { passages: number; vectors: number; embedderId?: string },
+    migrationFailure?: string,
+  ): Promise<void> {
     const dest = `${this.file}.incompatible-${new Date().toISOString().replace(/[:.]/g, '-')}`;
     try {
       for (const src of sidecarsOf(this.file)) {
@@ -342,12 +524,123 @@ export class SqliteSearchIndex extends SearchIndexBase {
     const said =
       stored === 'unstamped'
         ? 'carries tables but no schema stamp — an interrupted creation, or not a Zoteus index at all'
-        : `is stamped schema version ${stored}, which this build does not understand`;
+        : `is stamped schema version ${stored}, which this build does not understand` +
+          (migrationFailure ? ` and could not be upgraded (${migrationFailure})` : '');
     this.storeNotice =
       `The search index at ${this.file} ${said}. ` +
       `It was moved aside to ${dest} (nothing was deleted) and a fresh index was created; ` +
-      `rebuild it with zotero_index action:"build".`;
+      `rebuild it with zotero_index action:"build".` +
+      this.priceOf(dest, contents);
+    this.sidelineNotice = this.storeNotice;
     this.opts.logger?.warn(this.storeNotice);
+  }
+
+  /**
+   * What the rebuild a sideline just prescribed is going to cost, and how much of it the
+   * moved-aside file can pay.
+   *
+   * The old notice said an index had been moved and a rebuild was needed, and stopped
+   * there — leaving the one number that matters (five hours of local embedding on a large
+   * library, or a hosted provider's bill) to be discovered by watching a progress line
+   * (#34). Re-embedding is the expensive half, so this says how many passages it covers,
+   * and whether they have to be paid for at all: the salvage is armed here, and only when
+   * it is does the sentence promise anything.
+   */
+  private priceOf(dest: string, contents: { passages: number; vectors: number; embedderId?: string }): string {
+    if (contents.passages === 0) return '';
+    const scale = ` That rebuild re-indexes ${contents.passages} passage(s)`;
+    if (contents.vectors === 0) {
+      return `${scale}, none of which carried vectors, so it costs a crawl of the library and no embedding.`;
+    }
+    const embedder = contents.embedderId ?? 'an unrecorded embedder';
+    if (!contents.embedderId || contents.embedderId !== this.embedderId) {
+      return (
+        `${scale} and re-computes ${contents.vectors} vector(s), which is the expensive half: the moved-aside ` +
+        `index was embedded by ${embedder} and this server embeds with ${this.embedderId ?? 'no embedder'}, so ` +
+        'its vectors cannot be reused. Budget for a full re-embed.'
+      );
+    }
+    this.salvage = VectorSalvage.openIfUsable(dest, this.opts.logger);
+    if (!this.salvage) {
+      return (
+        `${scale} and re-computes ${contents.vectors} vector(s): the moved-aside index was embedded by the same ` +
+        'provider, but its vectors could not be opened for reuse. Budget for a full re-embed.'
+      );
+    }
+    return (
+      `${scale}, but not their vectors: ${contents.vectors} of them were embedded by ${embedder}, which is what ` +
+      'this server still uses, so every passage whose text is unchanged takes its vector from the moved-aside ' +
+      'index instead of being embedded again. Only genuinely new or edited text costs embedding time.'
+    );
+  }
+
+  /**
+   * Carry the salvage across process lifetimes, in both directions.
+   *
+   * The rebuild a sideline prescribes is not usually run by the process that prescribed
+   * it: the notice reaches a user through `zotero_index action:"status"`, and by the time
+   * they act the server may well have restarted. An in-process-only salvage would then
+   * have quietly expired between the sentence promising reuse and the rebuild that needed
+   * it — the worst version of this, because the promise was made in writing.
+   *
+   * So the sideline's destination is recorded in the fresh index's own meta table, and a
+   * later open re-arms from it. Two rules keep the pointer honest: it is only followed
+   * while the embedder is still the one that wrote those vectors, and a pointer that no
+   * longer resolves (the user deleted the moved-aside file, as they were told they may)
+   * is cleared rather than retried on every open.
+   */
+  private syncSalvage(): void {
+    if (this.salvage) {
+      this.storeSalvagePointer(this.salvage.path, this.embedderId);
+      return;
+    }
+    const from = this.meta('salvageFrom');
+    if (!from) return;
+    // Kept, not cleared, when the embedder differs: switching ZOTEUS_EMBEDDING_MODEL back
+    // makes those vectors usable again, and nothing about the file has changed meanwhile.
+    if ((this.meta('salvageEmbedderId') || undefined) !== this.embedderId) return;
+    this.salvage = VectorSalvage.openIfUsable(from, this.opts.logger);
+    if (!this.salvage) this.storeSalvagePointer(undefined, undefined);
+  }
+
+  /**
+   * Write (or clear) the pointer. Outside the build's transaction deliberately: it is one
+   * fact about where this index came from, and it has to be durable the moment the
+   * sideline happens rather than whenever the next build commits.
+   */
+  private storeSalvagePointer(path: string | undefined, embedderId: string | undefined): void {
+    try {
+      this.stmts.setMeta.run('salvageFrom', path ?? '');
+      this.stmts.setMeta.run('salvageEmbedderId', embedderId ?? '');
+    } catch (e) {
+      // A pointer that could not be stored costs a re-embed if the server restarts before
+      // the rebuild, which is the outcome that existed before it. Not worth an open().
+      this.opts.logger?.debug(`Could not record the vector salvage pointer: ${String(e)}`);
+    }
+  }
+
+  /**
+   * Take a passage's vector from the sidelined index rather than embedding it, when that
+   * file holds one for this exact id and this exact text. See VectorSalvage.
+   */
+  protected adoptVector(rec: ChunkRecord): boolean {
+    if (!this.salvage) return false;
+    const blob = this.salvage.vectorFor(rec.id, rec.text);
+    if (!blob) return false;
+    this.begin();
+    // The same write putVector makes, minus the float round-trip: the blob is already in
+    // the storage encoding, and decoding it to re-encode it byte-for-byte would only be a
+    // way to introduce a difference. The code bookkeeping is identical, because what makes
+    // a code stale is the vector changing, not where the vector came from.
+    if (Number(this.stmts.setVector.run(blob, rec.id).changes) > 0) this.c.vectors++;
+    if (this.hasCodes) this.stmts.deletePassageCode.run(rec.id);
+    this.invalidateCodes();
+    return true;
+  }
+
+  /** Vectors this open reused from a sidelined index instead of re-embedding them. */
+  get salvagedVectors(): number {
+    return this.salvage?.reused ?? 0;
   }
 
   /**
@@ -405,7 +698,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     `);
     this.handle
       .prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)')
-      .run('schemaVersion', String(SCHEMA_VERSION));
+      .run('schemaVersion', String(this.schemaVersion));
   }
 
   private prepareStatements(): void {
@@ -1172,6 +1465,16 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * index, and failing a build over it would be losing the library to save the cache.
    */
   protected finalizeVectors(): void {
+    // What the salvage actually spared, reported where the numbers are final rather than
+    // promised in the future tense the sideline had to use. Rewritten from the sideline's
+    // own sentence each time, so a second job over the same index updates the figure
+    // instead of appending a second one.
+    if (this.salvage && this.salvagedVectors > 0) {
+      const preamble = this.sidelineNotice ? `${this.sidelineNotice} ` : '';
+      this.storeNotice =
+        `${preamble}So far ${this.salvagedVectors} vector(s) have been reused from ${this.salvage.path} rather ` +
+        'than re-embedded.';
+    }
     // An index too small for the codes to narrow anything never reads them, so it is not
     // made to carry them either: below the candidate floor, every query scans exactly.
     if (!this.db || !this.annEnabled || this.c.vectors <= this.annMinCandidates) return;
@@ -1223,6 +1526,11 @@ export class SqliteSearchIndex extends SearchIndexBase {
   }
 
   async close(): Promise<void> {
+    // Released whether or not this object ever opened a database of its own: the salvage
+    // is a second handle on a second file, and a server that keeps it would keep a lock
+    // on the very file it told the user they may delete.
+    this.salvage?.close();
+    this.salvage = undefined;
     if (!this.db) return;
     // Whatever was indexed is worth keeping; an abandoned transaction would discard it.
     try {
