@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
-import { tokenize } from './tokenize.js';
+import { DROPLIST_DF_RATIO, pruneByDocumentFrequency, tokenize } from './tokenize.js';
 import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
 import { VectorSalvage } from './vector-salvage.js';
 import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE } from './limits.js';
@@ -112,6 +112,35 @@ const MEAN_SAMPLE = 20_000;
  */
 const CODE_MEAN = 'codeMean';
 const CODE_DIM = 'codeDim';
+
+/**
+ * The corpus-derived list of terms a query stops sending, and the passage count it was
+ * derived at. In `meta` for the same reasons the code mean is: one row, read once per
+ * process, and a build that does not understand the key leaves it alone — so an index this
+ * version writes still opens on an older one, which simply filters nothing.
+ *
+ * 18 terms and 65 bytes on a 477,512-passage library. Stored space-separated because the
+ * token class is `\p{L}\p{N}`, which cannot produce a space.
+ *
+ * One-character terms are left off it: `tokenize` already drops them, so they could never
+ * match a query term. They are a real part of the answer at this granularity — the digits
+ * `1`, `2` and `3` clear 30% on their own, since page numbers and dates are everywhere —
+ * and storing them would only make the list look like it drops numerals, which it does
+ * not: `2019` is four characters and nowhere near the threshold.
+ */
+const DROPLIST = 'droplist';
+const DROPLIST_PASSAGES = 'droplistPassages';
+
+/**
+ * How far the corpus has to move before an incremental update pays for a fresh derivation.
+ *
+ * The scan below costs ~2.1 s warm on 639,888 terms, which is under 1% of a 263.7 s build
+ * and invisible — but it is the whole cost of a small update, which is the one way
+ * this becomes something a user can feel. A handful of new items cannot move a 30%
+ * threshold, so the recompute is amortised against the drift that could actually change
+ * the list.
+ */
+const DROPLIST_DRIFT = 0.1;
 
 /**
  * How long a statement waits on another connection's lock before giving up. SQLite's
@@ -249,6 +278,11 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private ownWordsKeys = new Set<string>();
   /** Vector scans performed. A keyword-only query must never cause one (#10). */
   private vectorScans = 0;
+  /**
+   * Terms this corpus says are too common to send, read from `meta` at open. Empty until a
+   * build derives one, which is exactly how an index written by an older version behaves.
+   */
+  private droplist: ReadonlySet<string> = new Set<string>();
   private readonly file: string;
   private readonly migrateFrom: string | undefined;
   private readonly maxMigrationBytes: number;
@@ -814,6 +848,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
   }
 
   private loadMeta(): void {
+    // Absent in databases written before this rule existed, and absent is the safe answer:
+    // an empty droplist filters nothing, so an index built by an older version keeps
+    // answering exactly as it did until something rebuilds it.
+    this.droplist = new Set((this.meta(DROPLIST) ?? '').split(' ').filter(Boolean));
     this.builtFromVersion = Number(this.meta('builtFromVersion') ?? 0) || 0;
     this.itemsTotal = Number(this.meta('itemsTotal') ?? 0) || 0;
     this.itemsAvailable = Number(this.meta('itemsAvailable') ?? 0) || 0;
@@ -1132,7 +1170,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * scale of their scores.
    */
   protected keywordSearch(q: string, topK: number): RankedId[] {
-    const terms = [...new Set(tokenize(q))];
+    // Query-side only. The document side indexes every term it holds: filtering there would
+    // make the stored index a function of the threshold, so changing the threshold — or
+    // reading the index with a version that has a different one — would need a rebuild.
+    const terms = pruneByDocumentFrequency([...new Set(tokenize(q))], this.droplist);
     if (!terms.length) return [];
     const match = terms.map(ftsTerm).join(' OR ');
     try {
@@ -1526,6 +1567,66 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.stmts.setMeta.run(CODE_DIM, '0');
     this.hasCodes = false;
     this.invalidateCodes();
+  }
+
+  protected queryDroplist(): ReadonlySet<string> {
+    return this.droplist;
+  }
+
+  /**
+   * Re-derive the droplist from the vocabulary of the index just written, inside the job's
+   * own transaction. Never throws: a list that could not be derived leaves a slower index,
+   * and failing a build over it would be losing the library to save an optimisation.
+   *
+   * **Why a scan, and why here.** FTS5 already holds every term's document frequency, but
+   * `fts5vocab` is ordered by term rather than by document count, so a threshold needs the
+   * whole table: ~2.1 s over 639,888 terms, measured. That is too slow for query time and
+   * too slow for every server start, which is what makes this derived
+   * state with a home rather than something computed on demand. A build already walks the
+   * whole corpus, so it is the one moment the scan is free.
+   *
+   * The vocabulary table is created in `temp`, per connection: it stores nothing, it is a
+   * view over the index that already exists, and putting it in `main` would make an
+   * optimisation into a schema change that every reader would have to understand.
+   */
+  protected finalizeTerms(full: boolean): void {
+    if (!this.db) return;
+    try {
+      const passages = Number(
+        (this.handle.prepare('SELECT COUNT(*) AS n FROM passages').get() as { n: number } | undefined)?.n ?? 0,
+      );
+      if (!passages) return;
+      const derivedAt = Number(this.meta(DROPLIST_PASSAGES) ?? 0) || 0;
+      // A full build always re-derives; an index carrying no list adopts one; an update
+      // pays only once the corpus has moved far enough that the threshold could have.
+      const drifted = derivedAt === 0 || Math.abs(passages - derivedAt) > derivedAt * DROPLIST_DRIFT;
+      if (!full && !drifted) return;
+      this.handle.exec(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS temp.passages_vocab USING fts5vocab(main, passages_fts, 'row')",
+      );
+      // `doc` is the number of PASSAGES holding the term, which is the granularity the
+      // query runs at. The same threshold read at item granularity is a different quantity
+      // and a much larger list: measured against Zotero's own item-level full-text index,
+      // 777 terms where this corpus gives 23, headed by the bare digits every document
+      // carries in its page numbers and dates. A list derived anywhere but here would drop
+      // every numeral from every query.
+      const rows = this.handle
+        .prepare('SELECT term FROM temp.passages_vocab WHERE doc >= ?')
+        .all(Math.ceil(passages * DROPLIST_DF_RATIO)) as Array<{ term: string }>;
+      const terms = rows.map((r) => r.term).filter((t) => t.length > 1);
+      this.stmts.setMeta.run(DROPLIST, terms.join(' '));
+      this.stmts.setMeta.run(DROPLIST_PASSAGES, String(passages));
+      this.droplist = new Set(terms);
+      this.opts.logger?.debug(`search index: ${terms.length} term(s) above the query droplist threshold`);
+    } catch (e) {
+      if (isCorruptionError(e)) {
+        this.noteCorruption(e);
+        return;
+      }
+      this.opts.logger?.warn(
+        `search index: could not derive the query droplist: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   /**

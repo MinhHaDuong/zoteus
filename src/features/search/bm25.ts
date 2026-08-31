@@ -1,4 +1,4 @@
-import { tokenize } from './tokenize.js';
+import { DROPLIST_DF_RATIO, pruneByDocumentFrequency, tokenize } from './tokenize.js';
 
 interface Doc {
   id: string;
@@ -23,6 +23,14 @@ export class BM25Index {
   private readonly docs = new Map<string, Doc>();
   private readonly df = new Map<string, number>();
   private totalLength = 0;
+  /**
+   * Terms this index's own corpus says are too common to send, memoised until the corpus
+   * moves. This backend needs no derivation step and stores nothing: it already keeps `df`
+   * for scoring, so the same rule the SQLite backend pays a vocabulary scan for is a walk
+   * over a map that is always current — including for an index just reloaded from disk,
+   * which re-derives its postings anyway.
+   */
+  private common: Set<string> | undefined;
 
   constructor(
     private readonly k1 = 1.5,
@@ -43,6 +51,7 @@ export class BM25Index {
     for (const term of tf.keys()) this.df.set(term, (this.df.get(term) ?? 0) + 1);
     this.docs.set(id, { id, tokens, length: tokens.length, tf });
     this.totalLength += tokens.length;
+    this.common = undefined;
   }
 
   /** Remove one document and its postings. Returns false when the id was not indexed. */
@@ -56,12 +65,25 @@ export class BM25Index {
     }
     this.totalLength -= doc.length;
     this.docs.delete(id);
+    this.common = undefined;
     return true;
+  }
+
+  /** Terms appearing in at least DROPLIST_DF_RATIO of the documents. */
+  commonTerms(): ReadonlySet<string> {
+    if (!this.common) {
+      const floor = this.docs.size * DROPLIST_DF_RATIO;
+      this.common = new Set<string>();
+      for (const [term, n] of this.df) if (n >= floor) this.common.add(term);
+    }
+    return this.common;
   }
 
   search(query: string, topK = 10): BM25Hit[] {
     if (this.docs.size === 0) return [];
-    const qTerms = [...new Set(tokenize(query))];
+    // Deduplicated BEFORE pruning: the fallback counts surviving terms, and a repeated
+    // word would otherwise buy the query a survivor it does not have.
+    const qTerms = pruneByDocumentFrequency([...new Set(tokenize(query))], this.commonTerms());
     const avgdl = this.totalLength / this.docs.size;
     const N = this.docs.size;
 

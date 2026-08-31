@@ -187,8 +187,11 @@ describe('tokenize', () => {
     expect(tokenize('日本語の研究')).toEqual(['日本語の研究']);
   });
 
-  it('still drops stopwords and one-character tokens', () => {
-    expect(tokenize('the a of neural x networks')).toEqual(['neural', 'networks']);
+  it('drops one-character tokens, and no longer drops English function words', () => {
+    // `a` and `x` go for being one character, which is a property of the token. `the` and
+    // `of` stay: what a term costs is the corpus's business now, decided per index by
+    // document frequency and applied query-side, not a word list one language pays for.
+    expect(tokenize('the a of neural x networks')).toEqual(['the', 'of', 'neural', 'networks']);
   });
 });
 

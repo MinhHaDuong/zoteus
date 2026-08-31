@@ -1,7 +1,7 @@
 import { BM25Index } from './bm25.js';
 import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
-import { normalizeForSearch, tokenize } from './tokenize.js';
+import { normalizeForSearch, pruneByDocumentFrequency, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
 import {
   DEFAULT_EMBED_BATCH_SIZE,
@@ -147,7 +147,10 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
 }
 
 /** Build a readable, query-centred snippet trimmed to word boundaries. */
-export function makeSnippet(text: string, query: string, max = 240): string {
+/** No corpus consulted: filter nothing. */
+const EMPTY_DROPLIST: ReadonlySet<string> = new Set<string>();
+
+export function makeSnippet(text: string, query: string, max = 240, drop: ReadonlySet<string> = EMPTY_DROPLIST): string {
   // NFC first: the fold below is length-preserving on precomposed text, so folded
   // offsets carry straight over — on decomposed text every stripped mark shifts them,
   // and a passage with a few hundred marks before the hit (ordinary NFD Vietnamese at
@@ -160,7 +163,11 @@ export function makeSnippet(text: string, query: string, max = 240): string {
   // start at character 0.
   const folded = normalizeForSearch(clean);
   let pos = -1;
-  for (const t of tokenize(query)) {
+  // The same pruning the keyword search applies, and for a sharper reason: this centres the
+  // window on the EARLIEST matching token, so one common word anywhere near the start of a
+  // passage decides the whole snippet. A query carrying `the` would open every window on
+  // character 0 and show the reader nothing they searched for.
+  for (const t of pruneByDocumentFrequency(tokenize(query), drop)) {
     const i = folded.indexOf(t);
     if (i >= 0 && (pos < 0 || i < pos)) pos = i;
   }
@@ -428,6 +435,23 @@ export abstract class SearchIndexBase implements SearchIndex {
    * never a failed build.
    */
   protected finalizeVectors(): void {}
+  /**
+   * Bring the store's derived view of its own vocabulary level with its passages, under the
+   * same rule and at the same moment as finalizeVectors: after the writing, before the
+   * persist, so the derived row commits with the rows it was derived from.
+   *
+   * `full` says whether every passage in the index was just written, which is what decides
+   * whether the derivation is worth its cost — a delta of a few items cannot move a
+   * corpus-wide threshold. A store that derives nothing does nothing.
+   */
+  protected finalizeTerms(_full: boolean): void {}
+  /**
+   * Terms this index's corpus says are too common to send to it. Empty where nothing has
+   * been derived, which filters nothing.
+   */
+  protected queryDroplist(): ReadonlySet<string> {
+    return EMPTY_DROPLIST;
+  }
   /** Width of the stored vectors (undefined when none are stored). Their embedder's fingerprint. */
   protected abstract vectorDimension(): number | undefined;
   /** Keyword candidates, best first. */
@@ -724,6 +748,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       }
     }
     this.builtFromVersion = opts.version ?? 0;
+    this.finalizeTerms(true);
     this.finalizeVectors();
     return this.status();
   }
@@ -1158,6 +1183,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       // same transaction that makes the vectors durable. A cancelled build gets them too:
       // its partial index stays searchable, and it would otherwise pay for them on the
       // first query instead.
+      this.finalizeTerms(true);
       this.finalizeVectors();
       await persistNow();
       this.buildState = 'done';
@@ -1395,6 +1421,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       // Inside the update's single transaction, like every other write it made: a delta
       // adds codes for the passages it added and nothing else, and a failure below rolls
       // them back with the rest.
+      this.finalizeTerms(false);
       this.finalizeVectors();
       // Persisted once, at the end: the delta is small by construction, and one commit is
       // what makes "the stamp advanced" and "the rows are on disk" a single durable fact.
@@ -1886,7 +1913,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       const rec = this.passage(id);
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
-      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
+      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q, 240, this.queryDroplist()), score };
       // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
       // zotero_get_fulltext, whereas a metadata one is just the abstract — and a note or
       // annotation is the reader's own, which is a different thing again to be told.
@@ -2072,6 +2099,17 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   protected vectorDimension(): number | undefined {
     return this.vectors.dimension;
+  }
+
+  /**
+   * Derived live rather than at build end, and never persisted: `df` is already resident
+   * and already maintained by every add and delete, so this backend has no scan to amortise
+   * and nothing to stale. finalizeTerms therefore stays a no-op here — the asymmetry with
+   * the SQLite backend is real, and it is the whole difference between holding postings in
+   * memory and reading them off a file.
+   */
+  protected queryDroplist(): ReadonlySet<string> {
+    return this.bm25.commonTerms();
   }
 
   protected keywordSearch(q: string, topK: number): RankedId[] {

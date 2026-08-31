@@ -1,7 +1,41 @@
-const STOPWORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were',
-  'be', 'by', 'as', 'at', 'that', 'this', 'it', 'from', 'we', 'our', 'their', 'its', 'these', 'those',
-]);
+/**
+ * The share of the corpus a term has to appear in before a query stops sending it.
+ *
+ * Measured on a 477,512-passage library, sweeping the threshold: the working point sits in
+ * a 25-35% window. Above it the cost is not recovered — at 50% only 9 terms drop and warm
+ * p95 is still 820.7 ms. Below it content terms start to disappear, and at 20% a query in
+ * the sample loses every term it had.
+ *
+ * At 30%, end-to-end warm p95 over 20 queries is 550.3 ms, against 1,053.1 ms with no
+ * filtering at all and 379.4 ms for the hardcoded English list this replaces. It is
+ * therefore SLOWER than that list, by 171 ms of p95 and 54 ms of median, and what it buys
+ * is that the answer is the right one: ordered results identical to an unfiltered search
+ * rise from 9 of 20 queries to 13, and mean Jaccard from 0.835 to 0.964.
+ *
+ * The cutoff is justified by COST, never by ranking quality: each dropped term is a posting
+ * list not walked. BM25 already down-weights common terms continuously, and does it better
+ * than any hard cutoff can.
+ */
+export const DROPLIST_DF_RATIO = 0.3;
+
+/**
+ * Drop the terms this corpus says are too common to be worth walking, and send the query
+ * unfiltered when that would leave it with nothing to ask.
+ *
+ * **Why a fallback at two rather than at zero.** `to be or not to be` survives an English
+ * stoplist as `not` alone, and one term is not a degenerate query the caller can see: it is
+ * a confident answer to a question nobody asked, ranked and returned like any other. An
+ * empty-set guard never fires on it. Below two survivors the raw token set goes to the
+ * index instead, which at least answers the question that was asked.
+ *
+ * `drop` empty means nothing has been derived yet: an index that has never been built by a
+ * version that knows this rule filters nothing, exactly as it did before.
+ */
+export function pruneByDocumentFrequency(terms: string[], drop: ReadonlySet<string>): string[] {
+  if (drop.size === 0) return terms;
+  const kept = terms.filter((t) => !drop.has(t));
+  return kept.length >= 2 ? kept : terms;
+}
 
 /**
  * Combining marks sitting on a **Latin** base, which is the only place
@@ -140,7 +174,18 @@ function shield(chars: string, base: number): { hide: (s: string) => string; sho
 const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
 
 /**
- * Fold, split on non-alphanumerics, drop stopwords and 1-char tokens.
+ * Fold, split on non-alphanumerics, drop 1-char tokens.
+ *
+ * **No word list.** This used to end by subtracting 29 hardcoded English words, which
+ * penalised exactly one language: `the` was dropped while `le`, `der` and `và` were kept,
+ * so a French or Vietnamese query paid the full cost of its function words and an English
+ * one lost terms it might have needed. It is not repairable by adding languages either -
+ * the index holds one token space, so a per-language list would have to drop German `die`
+ * while keeping English `die`, an intent nothing here can see.
+ *
+ * What a term costs is a property of the corpus, not of the language, and `pruneByDocumentFrequency`
+ * asks the corpus. Tokenisation stays language-agnostic, and the filtering is query-side
+ * only: the document side indexes every term it holds.
  *
  * The token class is `\p{L}\p{N}`, not `[a-z0-9]`, and that half earns its place on its
  * own: it keeps `théorie`, `Θεωρία`, `теория` and `日本語` single tokens instead of
@@ -148,7 +193,5 @@ const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
  * misses cleanly, a fragment matches a high-frequency English string.
  */
 export function tokenize(text: string): string[] {
-  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-    (t) => t.length > 1 && !STOPWORDS.has(t),
-  );
+  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1);
 }
