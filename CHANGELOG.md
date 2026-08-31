@@ -4,6 +4,48 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The desktop instructions for on-device embeddings named an install Claude Desktop
+  cannot see (#38).** The "Local embeddings path" field told users to run `npm i -g
+  @huggingface/transformers` and paste what `npm root -g` prints. Claude Desktop does not
+  run the server with the Node on the user's `PATH`; it uses its own built-in one
+  (`isUsingBuiltInNodeForMcp is true`, in the app's `main.log`). So under nvm, which is how
+  most people have Node, the global root belongs to a runtime that never executes this
+  server and holds onnxruntime binaries compiled for that other runtime: the documented
+  path steered users straight into the failure branch the code already anticipates, and a
+  later nvm switch silently broke a path that had been working. The manifest, the README,
+  `.env.example` and both docs now recommend a directory of its own instead
+  (`mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps && npm init -y && npm i
+  @huggingface/transformers`, then point the setting at `~/.zoteus-deps/node_modules`),
+  which belongs to no version manager and survives extension updates and Node upgrades
+  alike.
+- **The size warning was low by about 300 MB (#38).** "onnxruntime's native binaries run to
+  ~380 MB across platforms" priced the binaries alone; the resolved dependency tree measures
+  686 MB on Linux x64 against `@huggingface/transformers` 4.2.0. Anyone planning disk space
+  got a number off by nearly half. Every copy now says about 700 MB, and says it is the
+  whole installed tree rather than the native part of it.
+- **A local-embeddings failure now names the path it was given.**
+  `ZOTEUS_TRANSFORMERS_PATH` lives in a settings pane and appeared in no message the reader
+  could see, which made "not installed" unfalsifiable: an absent package and one sitting in
+  another directory produced the same sentence. The unavailable reason (`zotero_index
+  action:"status"`, `zotero_whoami`, and every `zotero_semantic_search` notice) now quotes
+  the configured directory and the `lib/node_modules` reading of it, and the branch for a
+  package that resolves but throws on import reports the file it loaded plus the Node
+  version, platform and architecture it loaded it under. That last pair is the whole
+  diagnosis for a package installed under the wrong Node: it resolves perfectly, then fails
+  on a binary built for a runtime that is not this one.
+- **"Set 0 for no cap" looked like a rejected value in Claude Desktop (#38).** The number
+  input will not render or retain a displayed `0`, so "Full-text characters per item"
+  blanks itself the moment you leave it and users reasonably concluded the setting had not
+  taken. It had: the value persists and the server reads it as "no cap". The field
+  description and `docs/configuration.md` now say so, and offer a very large number to
+  anyone who would rather read back the value they set. Blank deliberately keeps meaning
+  *the default*, 40000, whether or not full-text indexing is on: reading it as "no cap"
+  would have uncapped every install that turned full text on and never touched the dial,
+  turning a bounded build into a crawl of whole books.
+
 ## [1.11.0] - 2026-08-31
 
 ### Added
