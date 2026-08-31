@@ -91,7 +91,7 @@
     "index_fulltext_max_chars": {
       "type": "number",
       "title": "Full-text characters per item",
-      "description": "How much of each item's extracted body text gets indexed when the setting above is on. The default, 40000 characters (roughly 13 pages of dense text), truncates long documents: only the beginning of a book or a long thesis is searchable. Set 0 for no cap and full coverage, at the cost of a bigger index and a longer build. Leave empty to keep the default.",
+      "description": "How much of each item's extracted body text gets indexed when the setting above is on. The default, 40000 characters (roughly 13 pages of dense text), truncates long documents: only the beginning of a book or a long thesis is searchable. Set 0 for no cap and full coverage, at the cost of a bigger index and a longer build; this box will not display a 0 you type, but the value is saved and does take effect, so an empty-looking field after typing 0 is not a rejection. Type a very large number (10000000) instead if you would rather read back the value you set. Leave empty to keep the default.",
       "min": 0,
       "required": false
     },

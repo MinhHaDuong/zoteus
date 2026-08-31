@@ -103,6 +103,30 @@ describe('loadConfig', () => {
     expect(cfg.warnings).toEqual([]);
   });
 
+  it('keeps the full-text cap at its default when the field is blank and full text is ON', () => {
+    // Claude Desktop's number input will not display a 0 the user types, so the box looks
+    // blank and the setting looks rejected (#38). It is not: 0 persists and does mean "no
+    // cap". Blank must keep meaning "the default", though, and this pins that it does even
+    // with full-text indexing turned on, the one combination where reading blank as "no
+    // cap" would have been tempting. It would also have uncapped every existing install
+    // that turned full text on and never touched this dial, turning a documented 40000
+    // into an unbounded crawl of every book in the library.
+    const cfg = loadConfig({
+      ZOTEUS_INDEX_FULLTEXT: 'true',
+      ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(cfg.indexFulltext).toBe(true);
+    expect(cfg.indexFulltextMaxChars).toBe(40000);
+    expect(cfg.warnings).toEqual([]);
+
+    // ...and 0, whatever the box shows, still means no cap.
+    const uncapped = loadConfig({
+      ZOTEUS_INDEX_FULLTEXT: 'true',
+      ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: '0',
+    } as unknown as NodeJS.ProcessEnv);
+    expect(uncapped.indexFulltextMaxChars).toBe(0);
+  });
+
   it('keeps every other default when its env var is blank', () => {
     const cfg = loadConfig({
       ZOTERO_LIBRARY_ID: '',

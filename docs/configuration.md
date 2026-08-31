@@ -53,9 +53,18 @@ environment once, at startup).
 | Pause between embedding calls (ms) | `ZOTEUS_EMBED_BATCH_DELAY_MS` |
 | Index your notes and annotations | `ZOTEUS_INDEX_OWN_WORDS` |
 | Index PDF full text | `ZOTEUS_INDEX_FULLTEXT` |
-| Full-text characters per item | `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` (set `0` for no cap, i.e. index whole documents) |
+| Full-text characters per item | `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` (set `0` for no cap, i.e. index whole documents; see the note below) |
 | Max items per index build | `ZOTEUS_INDEX_MAX_ITEMS` |
 | Local embeddings path | `ZOTEUS_TRANSFORMERS_PATH` |
+
+**A `0` you type into "Full-text characters per item" looks like it was rejected, and was
+not.** Claude Desktop's number input will not render or retain a displayed `0`, so the box
+goes blank again the moment you leave it. The value is saved and does reach the server,
+which reads it as "no cap" exactly as documented. If reading back the value you set matters
+more than the round number, type a very large one instead (`10000000` caps nothing in
+practice). Blank keeps meaning *the default*, 40000, whether or not full-text indexing is
+on: it has to, or every install that turned full text on and never touched this dial would
+silently start crawling whole books.
 
 Any variable *not* in that list is out of reach of the bundle: use a manual install
 (Option B in [`getting-started.md`](./getting-started.md)) or a self-hosted run, both of

@@ -342,7 +342,10 @@ dominates the build. Ways to bound it:
 
 - `fulltext_max_chars` / `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` — characters indexed per item
   (default 40000, about 13 pages of dense text; `0` disables the cap). Passages per item
-  land near `max_chars / 1200`.
+  land near `max_chars / 1200`. In Claude Desktop's settings pane the number input will not
+  display a `0` you type, so the field blanks itself and looks like it refused the value; it
+  did not, and the server reads it as "no cap" (see
+  [`configuration.md`](./configuration.md#desktop-extension-settings-mcpb)).
 - `limit` — index fewer items.
 - Body passages are chunked at 1200 characters (against 512 for metadata), which keeps the
   vector count down and gives each passage enough context to embed usefully.
