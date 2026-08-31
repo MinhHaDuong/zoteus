@@ -324,6 +324,15 @@ export interface IndexBuildStatus extends SearchIndexStatus {
    * status the starter returns already says a resume is what began (#24).
    */
   resumedFrom?: number;
+  /**
+   * When Zotero's local API stopped answering while THIS job was reading from it (ISO
+   * timestamp), and absent when it did not. Present means the job saturated the desktop
+   * app: from that moment every read and write in the session falls back to the Zotero Web
+   * API, which is slower and rate-limited, so the rest of the build takes far longer than
+   * its start suggested. Until #39 the only trace was one INFO line on stderr, which
+   * desktop hosts discard, so the slowdown had no visible cause at all.
+   */
+  localApiDegradedAt?: string;
 }
 
 /** One page of library items plus the library-wide total (for progress). */
@@ -387,7 +396,12 @@ export interface IncrementalBuildOptions {
    */
   persistEveryItemsFulltext?: number;
   persistEveryMsFulltext?: number;
-  /** Concurrent full-text fetches while indexing one page of items (default 4). */
+  /**
+   * Concurrent full-text fetches while indexing one page of items. `startIndexBuild` picks
+   * it from the API serving the crawl (see DEFAULT_FULLTEXT_CONCURRENCY_LOCAL / _CLOUD):
+   * the desktop app is one process that can be saturated, the Web API is a fleet that
+   * rate-limits instead. Unset falls back to the cloud number.
+   */
   fulltextConcurrency?: number;
   /**
    * The library's notes and annotations, if they are being indexed. Passages built from
@@ -542,6 +556,12 @@ export interface SearchIndex {
   noteFulltextUnavailable(reason: string): void;
   /** Why this index holds no notes or annotations although they were asked for. */
   noteOwnWordsUnavailable(reason: string): void;
+  /**
+   * Zotero's local API stopped answering while the running job was reading from it. Backs
+   * the full-text crawl off to one fetch at a time and records the moment on the status;
+   * a no-op when nothing is running (#39).
+   */
+  noteLocalApiDegraded(at: number): void;
   status(): SearchIndexStatus;
   /** Full live status: index size + build progress. */
   buildStatus(): IndexBuildStatus;

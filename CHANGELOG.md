@@ -45,6 +45,31 @@ All notable changes to Zoteus are documented here. The format is based on
   *the default*, 40000, whether or not full-text indexing is on: reading it as "no cap"
   would have uncapped every install that turned full text on and never touched the dial,
   turning a bounded build into a crawl of whole books.
+- **A full-text build no longer drives Zotero's local API into the ground, and says so if
+  it ever does (#39).** The full-text pass fetched attachment bodies four at a time
+  whichever API was serving it, and the two do not tolerate load the same way. The cloud
+  Web API is a fleet that answers a burst with a `429` and a `Backoff` header the fetcher
+  already honours; the desktop local API is a *single process*, sharing itself with
+  Zotero's UI, its sync engine and its own PDF indexer, with no rate limiter at all. Four
+  continuous body reads were enough to stop Zotero 10 answering on port 23119 within 60 to
+  90 seconds on a 358-attachment library, and because local-API reachability is a
+  session-wide capability, that dropped *every* read and write onto the Web API: slower,
+  rate-limited, needing a cloud key, and liable to leave the startup capability probe
+  rate-limited too. So the default is now chosen by the API serving the crawl, 2 for the
+  desktop app and 4 for the cloud, with `ZOTEUS_INDEX_FULLTEXT_CONCURRENCY` to override
+  both. That number is still a guess about somebody else's machine, so it is not the whole
+  fix: a build that watches the local API go down while it is reading from it backs off to
+  one fetch at a time for the rest of the job, without restarting, so the app can recover
+  instead of being held down for however many hours the crawl has left.
+- **A build that degraded to the Web API stops being invisible.** The fallback works, which
+  is exactly the problem: nothing errors, nothing fails, and all the user sees is a build
+  that has quietly become several times slower, explained only by one `INFO` line on stderr
+  that desktop hosts discard. `zotero_index action:"status"` now reports
+  `localApiDegradedAt`, the moment this job saturated the desktop app, and the summary says
+  in words that the session fell back to the Web API, that the crawl has throttled itself,
+  and which dial to reach for if it keeps happening. It is scoped to the running job: a
+  crawl the cloud was serving never reports it, an app closed between builds is nobody's
+  degradation, and each build reports on itself rather than inheriting the last one's.
 
 ## [1.11.0] - 2026-08-31
 

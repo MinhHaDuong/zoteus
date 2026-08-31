@@ -31,7 +31,9 @@ can never time out the MCP client, even on very large libraries.
   the index has read, see [Text extracted after the
   build](#text-extracted-after-the-build)), `resumedFrom` (items inherited when a build
   resumed an interrupted one), `updateNotice` (what the last update did, or why a rebuild
-  replaced it), and `lastError` when
+  replaced it), `localApiDegradedAt` (present only when this job saturated Zotero's local
+  API and the session fell back to the Web API; see [Full-text
+  indexing](#full-text-indexing-opt-in)), and `lastError` when
   `state` is `error`. Backward-compatible fields (`documents`, `vectors`, `items`,
   `embedder`, `builtFromVersion`) are still present. Progress is also logged on the
   server (every 500 items / 10s).
@@ -316,6 +318,25 @@ whole library. A single unindexed attachment is still readable on demand through
 **Local-first, key-free.** Zotero 7+ serves `/fulltext` from the desktop app, so full-text
 indexing works with no cloud API key, exactly like the metadata build. Group libraries (and
 everything else when the app is closed) go to the cloud Web API.
+
+**How hard the crawl leans on Zotero.** Body reads run concurrently, and how many at once
+depends on which API is serving them: **2** for the desktop app, **4** for the cloud Web
+API. The two tolerate load in opposite ways. The Web API is a fleet that answers a burst
+with a `429` and a `Backoff` header the fetcher honours, so overshooting costs latency and
+nothing else. The local API is one desktop application, sharing a process with Zotero's UI,
+its sync engine and its own PDF indexer, and it has no rate limiter: it answers everything
+until it cannot. Four continuous body reads were enough to stop Zotero 10 answering on port
+23119 at all, 60 to 90 seconds into a 358-attachment crawl. That is worse than a slow build,
+because local-API reachability is a session-wide fact: the moment it goes, *every* read and
+write falls back to the Web API, which is the slower, rate-limited path the crawl was
+avoiding in the first place.
+
+Two things follow. `ZOTEUS_INDEX_FULLTEXT_CONCURRENCY` overrides the number for anyone who
+has measured their own machine. And if it happens anyway, the crawl notices and backs off to
+one read at a time for the rest of the job, so the app can recover, rather than holding it
+down for the hours the crawl has left to run. `zotero_index action:"status"` then reports
+`localApiDegradedAt` (an ISO timestamp) and explains, in the summary, that the job fell back
+to the Web API and why the rest of it is slower.
 
 **Passages are attributed to the parent item.** A body-text hit is reported as the item
 that owns the attachment, with the item's title, and de-duplicated against its metadata
