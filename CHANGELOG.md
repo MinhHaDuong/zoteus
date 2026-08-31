@@ -4,6 +4,22 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A build for one library no longer erases another library's index.** The index file is
+  keyed by the data dir, never by the library — which is right, and had a sharp edge: the
+  build path clears the store before crawling, so `zotero_index` pointed at a group library
+  silently replaced the personal library's index (or any other), reported `done`, and said
+  nothing. Resume gave that a second shape: a build that finds a checkpoint carries on from
+  it instead of clearing, and the resume conditions never look at the library — so the same
+  mistake against an interrupted index appended one library's items to another's rows and
+  still reported `done`. The index now stamps the library it holds (the personal library is one identity
+  however it is addressed, `users/0` locally or by user id on the cloud, so the local/cloud
+  seam never trips it), and a build or update for a different library refuses up front,
+  naming both and the way forward. Indexes written before the stamp existed refuse nothing —
+  their first stamped build adopts them.
+
 ## [1.10.0] - 2026-08-29
 
 ### Added

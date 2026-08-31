@@ -74,6 +74,15 @@ index built against the desktop app stays valid when a later lookup goes to the 
 and the index file is keyed by the Zoteus data dir (plus the authenticated user in
 multi-tenant mode), never by the library id the read happened to use.
 
+**One index file, one library.** Because the file is keyed by the data dir, a build for a
+*different* library than the one the index holds would silently erase it — or, where an
+interrupted build left a checkpoint, resume into it and leave one file holding two
+libraries' rows. The index
+therefore stamps the library it was built for (the personal library counts as one library
+however it is addressed, `users/0` or by user id), and a build or update for another one
+refuses up front, naming both. To index a second library, run Zoteus with its own
+`ZOTEUS_DATA_DIR` for it — or delete the index file to hand the data dir over.
+
 **Incremental, crash-safe persistence.** Partial progress is persisted as the build runs
 (roughly every 200 items or 10s), so a timeout, crash, or `stop` can never leave a corrupt
 index: the JSON backend writes to a temp file and renames over the target, the SQLite one
