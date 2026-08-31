@@ -187,8 +187,13 @@ describe('tokenize', () => {
     expect(tokenize('日本語の研究')).toEqual(['日本語の研究']);
   });
 
-  it('still drops stopwords and one-character tokens', () => {
-    expect(tokenize('the a of neural x networks')).toEqual(['neural', 'networks']);
+  it('drops one-character tokens and nothing else', () => {
+    // The 29 English function words this used to drop are gone: they were a language rule
+    // in a token space that holds every language at once, and what replaces them is a
+    // measurement of the library, applied query-side. See droplist.ts and
+    // search-droplist.test.ts. Only the length rule is left, and it belongs here because it
+    // is about the token, not about the corpus.
+    expect(tokenize('the a of neural x networks')).toEqual(['the', 'of', 'neural', 'networks']);
   });
 });
 

@@ -1,3 +1,4 @@
+import { highDfMinimum, pruneTerms, MIN_MATCH_TERMS } from './droplist.js';
 import { tokenize } from './tokenize.js';
 
 interface Doc {
@@ -59,9 +60,26 @@ export class BM25Index {
     return true;
   }
 
+  /**
+   * Whether a term appears in enough documents to be worth pruning off a query.
+   *
+   * This backend needs no stored droplist and no cadence rule, unlike the SQLite one: `df`
+   * is already exact and already resident, and it is rebuilt from the raw passage text on
+   * every load exactly as the postings are. So the answer is live by construction — an
+   * index written before this existed adopts it the moment it is read back, with no
+   * migration and nothing to recompute.
+   *
+   * Query side only. `addDoc` keeps indexing every term, because dropping them from the
+   * documents would both destroy the df this reads and make the degeneracy fallback — which
+   * exists precisely to search on those terms — unable to match anything.
+   */
+  isHighDf(term: string): boolean {
+    return (this.df.get(term) ?? 0) >= highDfMinimum(this.docs.size);
+  }
+
   search(query: string, topK = 10): BM25Hit[] {
     if (this.docs.size === 0) return [];
-    const qTerms = [...new Set(tokenize(query))];
+    const qTerms = pruneTerms([...new Set(tokenize(query))], (t) => this.isHighDf(t), MIN_MATCH_TERMS);
     const avgdl = this.totalLength / this.docs.size;
     const N = this.docs.size;
 

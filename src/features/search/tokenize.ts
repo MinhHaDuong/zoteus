@@ -1,8 +1,3 @@
-const STOPWORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were',
-  'be', 'by', 'as', 'at', 'that', 'this', 'it', 'from', 'we', 'our', 'their', 'its', 'these', 'those',
-]);
-
 /**
  * Combining marks sitting on a **Latin** base, which is the only place
  * `unicode61 remove_diacritics 2` removes them: measured, Greek tonos and Cyrillic breve
@@ -140,15 +135,20 @@ function shield(chars: string, base: number): { hide: (s: string) => string; sho
 const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
 
 /**
- * Fold, split on non-alphanumerics, drop stopwords and 1-char tokens.
+ * Fold, split on non-alphanumerics, drop 1-char tokens.
  *
  * The token class is `\p{L}\p{N}`, not `[a-z0-9]`, and that half earns its place on its
  * own: it keeps `théorie`, `Θεωρία`, `теория` and `日本語` single tokens instead of
  * fragments, and it would have prevented this defect even without the fold — a whole token
  * misses cleanly, a fragment matches a high-frequency English string.
+ *
+ * **Language-agnostic, and now without exception.** This function used to hold 29 English
+ * function words and drop them from every text it saw, in a token space shared by every
+ * language a library holds: German `die` and English `die` are one string here, so no such
+ * list can drop one and keep the other. What replaces it is not another list but a
+ * measurement of this library — see `droplist.ts` — applied on the query side, where the
+ * cost it saves actually is. Nothing about a word's language is consulted here or there.
  */
 export function tokenize(text: string): string[] {
-  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-    (t) => t.length > 1 && !STOPWORDS.has(t),
-  );
+  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1);
 }
