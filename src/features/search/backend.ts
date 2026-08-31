@@ -36,13 +36,25 @@ export type StorageBackend = 'memory' | 'sqlite';
  */
 export type VersionBackend = 'local' | 'cloud';
 
+/**
+ * Where a passage's words came from. Absent means the item's own metadata (title,
+ * abstract, creators, tags), which is what every passage was before there was anything
+ * else, and which keeps already-persisted index files loadable.
+ *
+ * `note` and `annotation` are the reader's own words: a child note, or a highlight and
+ * its comment on a PDF. They are labelled apart from `fulltext` because they are a
+ * different kind of evidence — the only text in a library nobody else wrote — and a hit
+ * on one is worth telling the caller about (#33).
+ */
+export type PassageSource = 'fulltext' | 'note' | 'annotation';
+
 export interface SearchHit {
   itemKey: string;
   title: string;
   snippet: string;
   score: number;
-  /** Present when the snippet came from an attachment's body text, not its metadata. */
-  source?: 'fulltext';
+  /** Present when the snippet came from something other than the item's own metadata. */
+  source?: PassageSource;
 }
 
 /** One stored passage: the unit both the keyword index and the vector store rank. */
@@ -52,7 +64,52 @@ export interface ChunkRecord {
   title: string;
   text: string;
   /** Absent for metadata passages, which keeps already-persisted index files loadable. */
-  source?: 'fulltext';
+  source?: PassageSource;
+}
+
+/**
+ * One piece of a reader's own words, as the index takes it: a child note, or one
+ * annotation's highlighted passage and comment together.
+ *
+ * Carries the CHILD's key, not the parent item's, and that is what makes the update path
+ * work: the passage ids built from it name the note or annotation they came from, so the
+ * set an index holds for an item can be compared against the set the library holds and
+ * the difference re-indexed. Deleting one note of five moves no version anywhere in
+ * Zotero, so nothing else would ever notice it had gone.
+ */
+export interface OwnWordsEntry {
+  /** The note or annotation's own item key. */
+  key: string;
+  kind: 'note' | 'annotation';
+  /** Plain text, HTML already stripped for notes. */
+  text: string;
+}
+
+/**
+ * Everything the index needs to ask about a library's notes and annotations, behind one
+ * object rather than the four loose callbacks the full-text pass grew.
+ *
+ * The last two are answered from a single census — one paged crawl of the library's child
+ * items plus a batched lookup that resolves each annotation's attachment to the item it
+ * hangs off — so they are grouped here to make it obvious they share it, and that asking
+ * the second costs nothing once the first has been asked. The census is opened lazily, and
+ * `childVersions` is what lets an update decide whether to open it at all.
+ */
+export interface OwnWordsAccess {
+  /**
+   * Every note and annotation key in the library, mapped to its version. One request per
+   * 5000 keys (`?format=versions`, which both APIs honour an `itemType` filter on), and
+   * deliberately the FIRST thing an update asks: an update where nothing was written or
+   * highlighted answers from this alone and never opens the census below.
+   */
+  childVersions(): Promise<Map<string, number>>;
+  /**
+   * The items these children belong to. Opens the census, because it is the only thing
+   * that knows: an annotation names the attachment it sits on, never the item.
+   */
+  itemsFor(childKeys: Iterable<string>): Promise<Set<string>>;
+  /** The reader's own words for one indexed item, in a stable order. Opens the census. */
+  textsFor(itemKey: string): Promise<OwnWordsEntry[]>;
 }
 
 /** A candidate returned by one ranker, higher score = better. */
@@ -68,6 +125,10 @@ export interface IndexCounts {
   items: number;
   fulltextItems: number;
   fulltextPassages: number;
+  /** Items whose own notes or annotations are indexed. */
+  ownWordsItems: number;
+  /** Passages that came from them (a subset of `documents`). */
+  ownWordsPassages: number;
 }
 
 export interface SearchIndexStatus {
@@ -110,6 +171,19 @@ export interface SearchIndexStatus {
    * this exists to avoid is otherwise indistinguishable from one that is simply slow.
    */
   vectorScanNotice?: string;
+  /**
+   * True when this build indexed the library's child notes and PDF annotations. On by
+   * default (ZOTEUS_INDEX_OWN_WORDS): unlike full text, the whole corpus is one paged
+   * crawl of items the reader wrote by hand, orders of magnitude smaller than the
+   * attachment bodies it sits beside.
+   */
+  ownWordsEnabled: boolean;
+  /** Items whose notes or annotations are in the index. */
+  ownWordsItems: number;
+  /** Passages that came from them (a subset of `documents`). */
+  ownWordsPassages: number;
+  /** Why notes and annotations are not indexed although they were asked for. */
+  ownWordsReason?: string;
   /** True when this build was asked to index attachment full text (opt-in). */
   fulltextEnabled: boolean;
   /** Items whose attachment full text is in the index. */
@@ -316,6 +390,12 @@ export interface IncrementalBuildOptions {
   /** Concurrent full-text fetches while indexing one page of items (default 4). */
   fulltextConcurrency?: number;
   /**
+   * The library's notes and annotations, if they are being indexed. Passages built from
+   * them carry the PARENT item's key, so an item with forty annotations is still one
+   * search result and its own words extend the corpus rather than diluting it (#33).
+   */
+  ownWords?: OwnWordsAccess;
+  /**
    * The highest full-text version the source behind `fulltextFor` has seen, read once the
    * pass is over. Stored beside the library version so a later update can ask Zotero's
    * own full-text sequence what has been extracted since this build (#26).
@@ -460,6 +540,8 @@ export interface SearchIndex {
   readonly isEmpty: boolean;
   /** Explain why an opt-in full-text build is not producing passages. */
   noteFulltextUnavailable(reason: string): void;
+  /** Why this index holds no notes or annotations although they were asked for. */
+  noteOwnWordsUnavailable(reason: string): void;
   status(): SearchIndexStatus;
   /** Full live status: index size + build progress. */
   buildStatus(): IndexBuildStatus;

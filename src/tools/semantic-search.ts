@@ -4,6 +4,7 @@ import { ok } from '../registry/registry.js';
 import {
   embedderNotice,
   fulltextNotice,
+  ownWordsNotice,
   persistNotice,
   progressLine,
   staleVectorsNotice,
@@ -15,7 +16,7 @@ const semanticSearch: ToolDefinition = {
   name: 'zotero_semantic_search',
   title: 'Semantic / hybrid library search',
   description:
-    'Search the library by meaning, not just keywords. Combines BM25 keyword scoring with vector similarity (when an embedding provider is configured) via reciprocal-rank fusion, and returns the best-matching items with a snippet and score. By default it searches item metadata and abstracts; if the index was built with `fulltext` on (zotero_index fulltext:true, or ZOTEUS_INDEX_FULLTEXT=true) it also searches the body text of attachments, and a hit whose snippet came from a PDF body is marked source:"fulltext". `mode`: "auto" (hybrid, default), "keyword" (BM25 only), or "semantic" (vector only). "semantic" needs vectors in the index: when the configured embedder is not running (e.g. the on-device model runtime is not installed) it returns an error naming the cause instead of an empty result set, and "auto" keeps working as keyword search while saying so. The index must be built once before first use: when it is empty this tool starts a background build automatically (`auto_build`, on by default) and tells you to poll zotero_index action:"status" and retry — pass `auto_build:false` to opt out. For exact field/tag/itemType filtering use zotero_search_items instead; use this for conceptual/"papers about X" queries. To read the actual passages of a found item (with page locators) use zotero_get_fulltext.',
+    'Search the library by meaning, not just keywords. Combines BM25 keyword scoring with vector similarity (when an embedding provider is configured) via reciprocal-rank fusion, and returns the best-matching items with a snippet and score. By default it searches item metadata and abstracts; if the index was built with `fulltext` on (zotero_index fulltext:true, or ZOTEUS_INDEX_FULLTEXT=true) it also searches the body text of attachments, and a hit whose snippet came from a PDF body is marked source:"fulltext". It ALSO searches the words the reader wrote — child notes and PDF annotations (highlight text and comments) — unless that was turned off (ZOTEUS_INDEX_OWN_WORDS=false); a hit from one is marked source:"note" or source:"annotation" and is attributed to the item it hangs off, so an item with forty annotations is one result rather than forty. `mode`: "auto" (hybrid, default), "keyword" (BM25 only), or "semantic" (vector only). "semantic" needs vectors in the index: when the configured embedder is not running (e.g. the on-device model runtime is not installed) it returns an error naming the cause instead of an empty result set, and "auto" keeps working as keyword search while saying so. The index must be built once before first use: when it is empty this tool starts a background build automatically (`auto_build`, on by default) and tells you to poll zotero_index action:"status" and retry — pass `auto_build:false` to opt out. For exact field/tag/itemType filtering use zotero_search_items instead; use this for conceptual/"papers about X" queries. To read the actual passages of a found item (with page locators) use zotero_get_fulltext.',
   inputSchema: {
     q: z.string().min(1).describe('Natural-language query.'),
     limit: z.number().int().min(1).max(50).optional().describe('Max results (default 10).'),
@@ -119,6 +120,9 @@ const semanticSearch: ToolDefinition = {
         : `No matches for "${args.q}".`) +
       (args.mode === 'keyword' ? '' : embedderNotice(after) + staleVectorsNotice(after)) +
       fulltextNotice(after) +
+      // Same reasoning: a search that cannot see the reader's own notes must say so where
+      // the empty result is read, not only in zotero_index status.
+      ownWordsNotice(after) +
       // A search over a truncated index must say so here, not only in zotero_index status:
       // this is where "no matches" would otherwise be read as "the library holds nothing".
       truncationNotice(after) +
@@ -134,6 +138,8 @@ const semanticSearch: ToolDefinition = {
         ...(after.vectorsStaleReason ? { vectorsStaleReason: after.vectorsStaleReason } : {}),
         fulltextEnabled: after.fulltextEnabled,
         ...(after.fulltextReason ? { fulltextReason: after.fulltextReason } : {}),
+        ownWordsEnabled: after.ownWordsEnabled,
+        ...(after.ownWordsReason ? { ownWordsReason: after.ownWordsReason } : {}),
         ...(after.persistError ? { persistError: after.persistError } : {}),
       },
       summary,

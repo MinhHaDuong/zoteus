@@ -63,7 +63,7 @@ There are several Zotero MCP servers now. Zoteus is the one that does **everythi
 
 ## What you can do
 
-- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search over your library's titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned **with the page number**. Turn on `ZOTEUS_INDEX_FULLTEXT` (or pass `fulltext:true` to `zotero_index`) and semantic search covers the **body of every PDF** too, so a claim that never made it into an abstract is still findable.
+- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search over your library's titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned **with the page number**. Your own notes and PDF annotations are indexed too, under the item they hang off, so *"where did I object to this?"* is a question search can answer. Turn on `ZOTEUS_INDEX_FULLTEXT` (or pass `fulltext:true` to `zotero_index`) and semantic search covers the **body of every PDF** too, so a claim that never made it into an abstract is still findable.
 - **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
 - **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
 - **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
@@ -93,6 +93,7 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads + personal-library writes) |
 | `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
+| `ZOTEUS_INDEX_OWN_WORDS` | `true` | Index your own child notes and PDF annotations as searchable passages |
 | `ZOTEUS_INDEX_FULLTEXT` | `false` | Index PDF body text for semantic search (opt-in; costly) |
 | `ZOTEUS_INDEX_BACKEND` | `auto` | `auto\|sqlite\|memory` — where the search index lives. `auto` uses SQLite (FTS5) on Node 22.13+, which is what a large library needs |
 | `ZOTEUS_TRANSFORMERS_PATH` | — | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |

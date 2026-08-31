@@ -6,6 +6,27 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **The index covers the words you wrote: child notes and PDF annotations (#33).** Every
+  index crawl asked for `top: true`, so the corpus was the library's top-level items and
+  nothing hanging off them. Since `zotero_annotate` shipped in 1.10.0 that was no longer
+  only a coverage gap but a disagreement inside the server: Zoteus wrote an annotation onto
+  an attachment and could then never find it again, on any query, ever. Notes and
+  annotations (the highlighted passage together with its comment) are now indexed as
+  passages carrying the **parent item's** key, labelled `source:"note"` / `source:"annotation"`
+  on a hit, with notes stripped of their HTML. Because they carry the item's key, an item
+  with forty annotations still takes one result slot: your own words extend what an item
+  can be found by rather than crowding the page. On by default (`ZOTEUS_INDEX_OWN_WORDS`,
+  `own_words:false` per build) where full text is opt-in, because the whole corpus is one
+  paged crawl of hand-written text plus one batched lookup per fifty annotated attachments
+  — an annotation names the attachment it sits on, never the item, and that hop is what
+  attributes it. `action:"update"` keeps it current for the cost of one keys-only request:
+  notes and annotations carry ordinary versions, so comparing the library's note keys
+  against the ones the index holds finds edits, additions and — the case no `?since=` can
+  report, because deleting a note moves no version anywhere — deletions. The crawl that
+  reads note bodies is opened only when there is something to re-index. An index built
+  before this existed fills its gap on its first update, once, and says so.
+
 ### Fixed
 - **A build for one library no longer erases another library's index.** The index file is
   keyed by the data dir, never by the library — which is right, and had a sharp edge: the

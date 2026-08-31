@@ -98,7 +98,7 @@ export class LibraryRouter {
 
   /** Item keys and versions (`?format=versions`), routed like every other read. */
   async itemVersions(
-    opts: ReadOpts & { since?: number; top?: boolean; limit?: number; start?: number } = {},
+    opts: ReadOpts & { since?: number; top?: boolean; limit?: number; start?: number; itemType?: string } = {},
   ): Promise<VersionsResult> {
     const { library, backend, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();

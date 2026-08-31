@@ -18,6 +18,7 @@ A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, 
 | `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call: one API request, or one local pipeline call. Lower it when a provider rejects a batch outright (OpenAI answers `400` above 300K tokens per request, a ceiling full-text passages reach far sooner than metadata ones). |
 | `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop (unchanged behaviour); a positive value sleeps, which is how a large build stays under a provider's tokens-per-minute limit. |
 | `ZOTEUS_TRANSFORMERS_PATH` | — | Where to resolve `@huggingface/transformers` from when the install cannot see it itself (notably a `.mcpb` bundle). Point it at the directory `npm root -g` prints. See [`semantic-search.md`](./semantic-search.md). |
+| `ZOTEUS_INDEX_OWN_WORDS` | `true` | Index the words *you* wrote: every child note, and every PDF annotation (its highlighted passage and its comment), as passages carrying the parent item's key. On by default, unlike full text — the whole corpus is one paged crawl of hand-written text, orders of magnitude smaller than attachment bodies, and it is the only text in a library nobody else wrote. Can be set per build with `zotero_index own_words:false`. See [`semantic-search.md`](./semantic-search.md#your-own-notes-and-annotations). |
 | `ZOTEUS_INDEX_FULLTEXT` | `false` | Also index the body text of item attachments (what Zotero extracted from each PDF), so semantic search matches claims inside a paper and not only its title and abstract. Opt-in because it is expensive: roughly 9× the passages, index size, and embedding time. Can be set per build with `zotero_index fulltext:true`. See [`semantic-search.md`](./semantic-search.md#full-text-indexing-opt-in). |
 | `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` | `40000` | Cap on indexed full-text characters per item (~13 pages of dense text); `0` means no cap. The main dial for the cost above. |
 | `ZOTEUS_INDEX_MAX_ITEMS` | `5000` | Max top-level items a single index build will crawl. Raise it for a library that outgrows the default; a build that stops here says how many items were left unindexed, and `zotero_semantic_search` repeats the warning. `zotero_index limit:` can lower it per build but never raise it. |
@@ -50,6 +51,7 @@ environment once, at startup).
 | Embedding model | `ZOTEUS_EMBEDDING_MODEL` |
 | Embedding batch size | `ZOTEUS_EMBED_BATCH_SIZE` |
 | Pause between embedding calls (ms) | `ZOTEUS_EMBED_BATCH_DELAY_MS` |
+| Index your notes and annotations | `ZOTEUS_INDEX_OWN_WORDS` |
 | Index PDF full text | `ZOTEUS_INDEX_FULLTEXT` |
 | Full-text characters per item | `ZOTEUS_INDEX_FULLTEXT_MAX_CHARS` (set `0` for no cap, i.e. index whole documents) |
 | Max items per index build | `ZOTEUS_INDEX_MAX_ITEMS` |

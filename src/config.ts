@@ -24,6 +24,8 @@ export interface ZoteusConfig {
   transformersPath?: string;
   /** Index attachment full text (PDF bodies) alongside metadata. Opt-in: it is costly. */
   indexFulltext: boolean;
+  /** Index child notes and PDF annotations as extra passages (ZOTEUS_INDEX_OWN_WORDS). */
+  indexOwnWords: boolean;
   /** Cap on indexed full-text characters per item (0 = no cap). */
   indexFulltextMaxChars: number;
   /** Cap on items per index build. Raise it for libraries larger than the default. */
@@ -166,6 +168,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
         ZOTEUS_TRANSFORMERS_PATH: z.string().min(1).optional(),
         ZOTEUS_INDEX_FULLTEXT: bool(false),
+        // On by default, unlike full text: the whole corpus is one paged crawl of text the
+        // reader wrote by hand, orders of magnitude smaller than the attachment bodies it
+        // sits beside, and it is the one part of a library nobody else wrote (#33).
+        ZOTEUS_INDEX_OWN_WORDS: bool(true),
         ZOTEUS_INDEX_FULLTEXT_MAX_CHARS: z.coerce
           .number()
           .int()
@@ -308,6 +314,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
     transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
+    indexOwnWords: parsed.ZOTEUS_INDEX_OWN_WORDS,
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     indexBackend: parsed.ZOTEUS_INDEX_BACKEND,

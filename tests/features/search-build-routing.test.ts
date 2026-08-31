@@ -89,7 +89,10 @@ describe('index build routing (local-first)', () => {
     startIndexBuild(ctx);
     await finished(search);
     // 250 items over 100-item pages: start=0, 100, 200 — then the total stops the loop.
-    expect(local.listItems.mock.calls.map((c: any[]) => c[0].start)).toEqual([0, 100, 200]);
+    // The own-words census pages the same endpoint for the library's children, so the
+    // item crawl is the calls that asked for no particular type.
+    const itemPages = local.listItems.mock.calls.filter((c: any[]) => !c[0].itemType);
+    expect(itemPages.map((c: any[]) => c[0].start)).toEqual([0, 100, 200]);
     expect(search.buildStatus().itemsFetched).toBe(250);
     expect(search.buildStatus().itemsTotal).toBe(250);
   });
@@ -135,6 +138,8 @@ describe('index build routing (local-first)', () => {
     startIndexBuild(ctx, undefined, 5);
     await finished(search);
     expect(search.buildStatus().items).toBe(5);
-    expect(local.listItems).toHaveBeenCalledTimes(1);
+    // One page of items — the cap stops the crawl there — plus the own-words census, which
+    // asks about the library's children rather than about the items being indexed.
+    expect(local.listItems.mock.calls.filter((c: any[]) => !c[0].itemType)).toHaveLength(1);
   });
 });
