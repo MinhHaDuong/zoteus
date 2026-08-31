@@ -1771,7 +1771,9 @@ export abstract class SearchIndexBase implements SearchIndex {
           source: entry.kind,
         };
         this.putPassage(rec);
-        if (this.hasEmbedder) pending.push(rec);
+        // Through the same salvage every other passage goes through (#34): a note that has
+        // not been edited embeds to the vector a sidelined index already holds for it.
+        if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
       }
     }
   }
