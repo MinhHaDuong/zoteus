@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
@@ -64,8 +64,8 @@ export class FakeEmbeddingProvider implements EmbeddingProvider {
 
 /**
  * Directories to resolve {@link TRANSFORMERS_MODULE} from when ZOTEUS_TRANSFORMERS_PATH is
- * set. Node's own walk-up covers the two common answers (`npm root -g`, or the package
- * directory itself, whose ancestors include that root); the `lib` candidate additionally
+ * set. Node's own walk-up covers the two common answers (a `node_modules` directory, or the
+ * package directory itself, whose ancestors include one); the `lib` candidate additionally
  * accepts an npm *prefix* such as `/usr`, where globals live in `/usr/lib/node_modules`.
  */
 function overrideRoots(dir: string): string[] {
@@ -78,11 +78,11 @@ function overrideRoots(dir: string): string[] {
  * null when the package is not reachable from this process.
  *
  * This is what makes the degradation reportable *before* a build: a bundled install
- * (.mcpb) resolves only from inside its own folder, which cannot carry the package (its
- * onnxruntime native binaries are ~380 MB across platforms; see docs/semantic-search.md),
- * so status can say so up front instead of silently indexing 0 vectors.
- * ZOTEUS_TRANSFORMERS_PATH is the escape hatch: it points at an install that lives
- * outside the bundle and therefore survives extension updates.
+ * (.mcpb) resolves only from inside its own folder, which cannot carry the package (the
+ * resolved tree is roughly 700 MB, onnxruntime's native binaries included; see
+ * docs/semantic-search.md), so status can say so up front instead of silently indexing 0
+ * vectors. ZOTEUS_TRANSFORMERS_PATH is the escape hatch: it points at an install that
+ * lives outside the bundle and therefore survives extension updates.
  */
 export function resolveTransformers(transformersPath?: string): string | null {
   const dir = transformersPath?.trim();
@@ -107,29 +107,70 @@ export function resolveTransformers(transformersPath?: string): string | null {
 }
 
 /**
+ * Where the resolver was told to look, in the words of the setting that sent it there.
+ *
+ * A wrong ZOTEUS_TRANSFORMERS_PATH is the commonest way local embeddings fail on a desktop
+ * install (#38), and until now the path appeared in nothing the user could read: it lives
+ * in a settings pane, its only other copy is in an environment nobody can print, and every
+ * message said "not installed" whether the package was absent or merely somewhere else.
+ * Naming the directory turns an unfalsifiable claim into one `ls` away from an answer.
+ */
+function searchedHint(transformersPath?: string): string {
+  const dir = transformersPath?.trim();
+  if (!dir) return '';
+  return (
+    ` ZOTEUS_TRANSFORMERS_PATH is set to "${dir}", and ${TRANSFORMERS_MODULE} resolves from ` +
+    `neither it nor "${join(dir, 'lib')}".`
+  );
+}
+
+/** The same fact as {@link searchedHint}, in the middle of a sentence rather than after one. */
+function searchedFrom(transformersPath?: string): string {
+  const dir = transformersPath?.trim();
+  return dir ? ` (ZOTEUS_TRANSFORMERS_PATH=${dir})` : '';
+}
+
+/** A resolved specifier as a path someone can paste into `ls`, not as a file:// URL. */
+function modulePath(specifier: string): string {
+  try {
+    return specifier.startsWith('file:') ? fileURLToPath(specifier) : specifier;
+  } catch {
+    return specifier;
+  }
+}
+
+/**
  * Actionable, install-channel-aware explanation for "local embeddings requested but
  * unavailable". Desktop bundles get different advice from npm installs because there is
  * no `npm i` step to have skipped: the package has to live outside the bundle.
  */
-export function missingTransformersHint(config?: Pick<ZoteusConfig, 'dist'>): string {
+export function missingTransformersHint(config?: Pick<ZoteusConfig, 'dist' | 'transformersPath'>): string {
   const bundled = config?.dist === 'mcpb' || config?.dist === 'dxt';
   // The FIRST sentence is the short cause that ends up in the one-line embedder label
   // (see shortCause in index-manager); everything after it is the remedy. Keep it short.
   const cause = `${TRANSFORMERS_MODULE} is not installed.`;
+  const searched = searchedHint(config?.transformersPath);
   const fallbacks =
     `Otherwise set ZOTEUS_EMBEDDINGS=openai or gemini to embed through an API instead (your ` +
     `library text leaves the machine), or ZOTEUS_EMBEDDINGS=off to accept keyword-only search.`;
   if (bundled) {
+    // Deliberately NOT `npm i -g`. Claude Desktop runs the server with its own built-in
+    // Node, not the one on the user's PATH, so a global root under a version manager holds
+    // onnxruntime binaries built for a Node this process never executes, and an nvm switch
+    // later moves the directory out from under the setting (#38). A directory of its own,
+    // owned by nobody's version manager, is the install that keeps working.
     return (
-      `${cause} Semantic ranking is off; keyword (BM25) search still works. Desktop-extension ` +
-      `bundles cannot ship it: it pulls in onnxruntime's native binaries (~380 MB across platforms). ` +
-      `To get on-device vectors, install it outside the bundle (\`npm i -g ${TRANSFORMERS_MODULE}\`) ` +
-      `and set the extension's "Local embeddings path" (ZOTEUS_TRANSFORMERS_PATH) to the directory ` +
-      `\`npm root -g\` prints; that survives extension updates. ${fallbacks}`
+      `${cause} Semantic ranking is off; keyword (BM25) search still works.${searched} Desktop-extension ` +
+      `bundles cannot ship it: the resolved dependency tree, onnxruntime's native binaries included, is ` +
+      `about 700 MB. Install it into a directory of its own, outside any Node version manager (the ` +
+      `desktop app runs this server with its own built-in Node, not the one on your PATH): ` +
+      `\`mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps && npm init -y && npm i ${TRANSFORMERS_MODULE}\`, ` +
+      `then set the extension's "Local embeddings path" (ZOTEUS_TRANSFORMERS_PATH) to that folder's ` +
+      `node_modules. It survives extension updates and Node version switches alike. ${fallbacks}`
     );
   }
   return (
-    `${cause} Semantic ranking is off; keyword (BM25) search still works. Install it with ` +
+    `${cause} Semantic ranking is off; keyword (BM25) search still works.${searched} Install it with ` +
     `\`npm i ${TRANSFORMERS_MODULE}\`, or point ZOTEUS_TRANSFORMERS_PATH at a directory that ` +
     `already has it. ${fallbacks}`
   );
@@ -164,15 +205,25 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       return this.extractor;
     }
     const specifier = resolveTransformers(this.opts.transformersPath);
-    if (!specifier) throw new Error(missingTransformersHint({ dist: this.opts.dist }));
+    if (!specifier)
+      throw new Error(
+        missingTransformersHint({ dist: this.opts.dist, transformersPath: this.opts.transformersPath }),
+      );
     let transformers: any;
     try {
       transformers = await import(specifier);
     } catch (e) {
       // Resolved but unloadable: almost always a native onnxruntime binary that does not
-      // match this platform/Node ABI. Say that, rather than "not installed".
+      // match this platform/Node ABI. Say that, rather than "not installed", and say
+      // WHICH file was loaded, under which Node. That is the whole diagnosis for the
+      // desktop failure in #38: the extension runs its own built-in Node, so a package
+      // installed under a version manager (or left behind by an nvm switch) resolves
+      // perfectly and then fails on a binary compiled for a different runtime. Without
+      // the path and the version, the two halves of that sentence are invisible.
       throw new Error(
         `${TRANSFORMERS_MODULE} resolved but failed to load (${e instanceof Error ? e.message : String(e)}). ` +
+          `Loaded from ${modulePath(specifier)}${searchedFrom(this.opts.transformersPath)}, running Node ` +
+          `${process.version} on ${process.platform}-${process.arch}. ` +
           'Reinstall it for this platform and Node version, or set ZOTEUS_EMBEDDINGS=off for keyword-only search.',
       );
     }
@@ -333,7 +384,10 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
     case 'local':
     default:
       if (!resolveTransformers(config.transformersPath)) {
-        logger?.warn(`ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed; using keyword-only search.`);
+        logger?.warn(
+          `ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed` +
+            `${searchedFrom(config.transformersPath)}; using keyword-only search.`,
+        );
         return { provider: null, configured: 'local', unavailable: missingTransformersHint(config) };
       }
       return {
