@@ -6,6 +6,7 @@ import { MemorySearchIndex, type SearchIndex } from '../../src/features/search/i
 import { statusSummary } from '../../src/features/search/build.js';
 import {
   createEmbeddingProvider,
+  LocalEmbeddingProvider,
   missingTransformersHint,
   resolveTransformers,
   TRANSFORMERS_MODULE,
@@ -40,7 +41,7 @@ describe('resolveTransformers', () => {
     writeFileSync(join(pkgDir, 'package.json'), JSON.stringify({ name: TRANSFORMERS_MODULE, main: 'index.js' }));
     writeFileSync(join(pkgDir, 'index.js'), 'export const pipeline = () => {};');
 
-    // the directory that holds node_modules (what `npm root -g`'s parent looks like)
+    // the directory that holds node_modules (what a standalone ~/.zoteus-deps looks like)
     expect(resolveTransformers(root)).toMatch(/transformers\/index\.js$/);
     // the package directory itself: Node's walk-up reaches the same node_modules
     expect(resolveTransformers(pkgDir)).toMatch(/transformers\/index\.js$/);
@@ -190,5 +191,64 @@ describe('zotero_semantic_search with no vectors', () => {
     const res = await semanticSearch.handler({ q: 'deep learning', mode: 'keyword' }, { search } as any);
     expect(res.isError).toBeUndefined();
     expect(res.content[0].text).not.toMatch(/Semantic ranking is OFF/);
+  });
+});
+
+describe('local-embedding diagnostics name the path that was searched (#38)', () => {
+  /** A directory that resolves nothing: the shape of a mistyped or stale settings value. */
+  const emptyRoot = () => mkdtempSync(join(tmpdir(), 'zoteus-wrong-'));
+
+  it('puts a configured ZOTEUS_TRANSFORMERS_PATH in the reason a client reads', () => {
+    const dir = emptyRoot();
+    const config = loadConfig({
+      ZOTEUS_EMBEDDINGS: 'local',
+      ZOTEUS_TRANSFORMERS_PATH: dir,
+      ZOTEUS_DIST: 'mcpb',
+    } as any);
+    const selection = createEmbeddingProvider(config, silentLogger);
+    // Without the path, "not installed" is unfalsifiable: the value lives in a settings
+    // pane, and the user has no way to see which directory the server actually tried.
+    expect(selection.unavailable).toContain(dir);
+  });
+
+  it('logs that path too, for the installs that do have a stderr to read', () => {
+    const dir = emptyRoot();
+    const lines: string[] = [];
+    const logger = { ...silentLogger, warn: (m: string) => lines.push(m) } as any;
+    createEmbeddingProvider(
+      loadConfig({ ZOTEUS_EMBEDDINGS: 'local', ZOTEUS_TRANSFORMERS_PATH: dir } as any),
+      logger,
+    );
+    expect(lines.join('\n')).toContain(dir);
+  });
+
+  it('says nothing about a searched path when none was configured', () => {
+    expect(missingTransformersHint({ dist: 'mcpb' })).not.toMatch(/ZOTEUS_TRANSFORMERS_PATH is set/);
+  });
+
+  it('names the file it loaded, the Node and the platform when the module throws on import', async () => {
+    // The failure ZOTEUS_TRANSFORMERS_PATH actually produces once it points somewhere
+    // plausible: onnxruntime's native binary was built for another Node ABI, so the
+    // package resolves and then explodes on import. Naming the file that was loaded is
+    // what separates "wrong path" from "right path, wrong build".
+    const root = mkdtempSync(join(tmpdir(), 'zoteus-abi-'));
+    const pkgDir = join(root, 'node_modules', '@huggingface', 'transformers');
+    mkdirSync(pkgDir, { recursive: true });
+    writeFileSync(
+      join(pkgDir, 'package.json'),
+      JSON.stringify({ name: TRANSFORMERS_MODULE, type: 'module', main: 'index.js' }),
+    );
+    writeFileSync(join(pkgDir, 'index.js'), "throw new Error('NODE_MODULE_VERSION 115 vs 127');");
+
+    const provider = new LocalEmbeddingProvider(undefined, undefined, { transformersPath: root, dist: 'mcpb' });
+    const err = await provider.embed(['anything']).then(
+      () => new Error('expected the import to fail'),
+      (e: unknown) => e as Error,
+    );
+    expect(err.message).toMatch(/resolved but failed to load/);
+    expect(err.message).toContain(join(pkgDir, 'index.js'));
+    expect(err.message).toContain(root);
+    expect(err.message).toContain(process.version);
+    expect(err.message).toContain(`${process.platform}-${process.arch}`);
   });
 });
