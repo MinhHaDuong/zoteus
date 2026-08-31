@@ -3,6 +3,7 @@ import type { LibraryRef } from '../../api/web-client.js';
 import type { IndexBuildStatus, VersionBackend } from './backend.js';
 import { canonicalLibraryToken } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
+import { electronFulltextRefusal } from './electron.js';
 import { createOwnWordsSource, fetchChildVersions, type OwnWordsSource } from './own-words-source.js';
 import {
   DEFAULT_FULLTEXT_CONCURRENCY_CLOUD,
@@ -292,6 +293,17 @@ export function startIndexBuild(
   // would only reach the logger, and the tool caller would see a build that "started".
   const library = canonicalLibraryToken(lib);
   ctx.search.assertLibrary(library);
+  // The full-text pass kills this process under Electron (#37), so a build that would enter
+  // it refuses here rather than dying ten minutes in. Before anything is started, and above
+  // all before `buildIncremental` reaches the reset() that clears the store: an index built
+  // headlessly, which is the workaround this refusal prescribes, must survive being asked
+  // for again from inside the desktop app. Only a build is gated. An update's body-text
+  // catch-up is bounded by what Zotero extracted since the stored cursor, and keeping the
+  // headless index current from inside Desktop is the other half of the workaround.
+  if (opts.fulltext ?? ctx.config.indexFulltext) {
+    const refusal = electronFulltextRefusal(ctx.config);
+    if (refusal) throw new Error(refusal);
+  }
   // The configured limit is the ceiling; an explicit `maxItems` may only lower it.
   const configured = ctx.config.indexMaxItems;
   const cap = maxItems === undefined ? configured : Math.min(maxItems, configured);

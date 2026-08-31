@@ -70,6 +70,34 @@ All notable changes to Zoteus are documented here. The format is based on
   and which dial to reach for if it keeps happening. It is scoped to the running job: a
   crawl the cloud was serving never reports it, an app closed between builds is nobody's
   degradation, and each build reports on itself rather than inheriting the last one's.
+### Changed
+- **A full-text index build is refused inside Claude Desktop instead of killing the server
+  (#37).** Claude Desktop runs a bundled `.mcpb` extension inside its own process, an
+  Electron `UtilityProcess` on Electron's embedded Node, and there an `action:"build"` that
+  reaches the attachment full-text pass takes the whole server process down partway
+  through: no thrown error, no stack, no out-of-memory report, nothing on stderr, just
+  `Server transport closed unexpectedly` in the host's log. The identical build over the
+  identical library, index file and environment runs to completion under standalone Node in
+  about twelve minutes, and the metadata pass, which embeds thousands of passages through
+  the same on-device model first, is never the one that dies. **The cause is not known.** It
+  sits below the JavaScript layer, on a runtime Zoteus does not ship and cannot reproduce
+  against, so this is a mitigation and not a fix: rather than guess at the native layer,
+  Zoteus now refuses the one pass known to take the process down. Under Electron a build or
+  refresh that asks for full text (by `fulltext:true`, or by `ZOTEUS_INDEX_FULLTEXT` /
+  the "Index PDF full text" setting) returns an error naming the ways forward and **changes
+  nothing**: the refusal happens before the build clears anything, so an index built
+  headlessly survives being asked for again from in there. The workaround is documented and
+  now named in the refusal itself: build once outside the desktop app against the same
+  `ZOTEUS_DATA_DIR`, then let Desktop read the finished file. `action:"update"` is never
+  gated, and it keeps that index current from inside Desktop, body text included, because an
+  update re-reads only the delta and the attachments Zotero has extracted since the stored
+  cursor. A metadata-only build (`fulltext:false`) is unaffected. `ZOTEUS_ALLOW_ELECTRON_FULLTEXT=true`
+  lifts the refusal for anyone who wants to try it anyway; what a build indexed before the
+  process died is kept, stays searchable, and `action:"build"` resumes from it. The gate is
+  deliberately not narrowed to `ZOTEUS_EMBEDDINGS=local`: the reported suspicion
+  (`onnxruntime-node` under Electron's Node ABI) is explicitly unconfirmed, and the
+  full-text pass differs from the metadata pass in several other ways that also reach native
+  code, so refusing on the one signal that actually correlates says only what is known.
 
 ## [1.11.0] - 2026-08-31
 

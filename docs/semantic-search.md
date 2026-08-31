@@ -392,6 +392,64 @@ items are unchanged in Zotero, so they would appear in no delta, ever. The check
 what such a build leaves instead, and `action:"build"` picks the body crawl up from it: see
 [Resuming an interrupted build](#resuming-an-interrupted-build).
 
+### Full-text builds are refused inside Claude Desktop
+
+Claude Desktop runs a bundled (`.mcpb`) extension inside its own process, an Electron
+`UtilityProcess` on Electron's embedded Node, rather than as a separate program. There, a
+build that reaches the full-text pass **kills the server process** partway through: no
+thrown error, no stack, no out-of-memory report, nothing on stderr, just
+`Server transport closed unexpectedly` in the host's log ([#37]). The identical build over
+the identical library, index file and environment runs to completion under standalone Node,
+and the metadata pass, which embeds thousands of passages through the same on-device model
+first, is never the one that dies.
+
+The cause is **not known**. It is below the JavaScript layer, on a runtime Zoteus does not
+ship and cannot reproduce against, so rather than guess at a fix Zoteus refuses the one pass
+that is known to take the process down. Under Electron, `zotero_index action:"build"` or
+`"refresh"` with full text requested (by `fulltext:true`, or by the "Index PDF full text"
+setting) returns an error naming the ways forward, and **changes nothing**: the index on
+disk is left exactly as it was.
+
+The workaround is to build once outside the desktop app and read the result from inside it.
+Desktop only ever needs read access to the index file:
+
+```bash
+# In a terminal, pointed at the same data directory Claude Desktop uses.
+# (~/.local/share/zoteus on Linux, ~/Library/Application Support/zoteus on macOS.)
+ZOTEUS_DATA_DIR=~/.local/share/zoteus \
+ZOTEUS_INDEX_FULLTEXT=true \
+npx -y @oscardvs/zoteus
+```
+
+Drive that server over stdio with any MCP client (`npm run inspector` is one) and call
+`zotero_index action:"build" fulltext:true`. When it finishes, restart Claude Desktop and
+it picks the finished index up.
+
+From then on `zotero_index action:"update"` keeps that index current **from inside Claude
+Desktop**, body text included: an update re-reads only the items Zotero changed, plus the
+attachments its full-text sequence has extracted since the stored cursor (see
+[Text extracted after the build](#text-extracted-after-the-build)), so it never enters the
+long pass this refusal is about. Only `action:"build"` and `action:"refresh"` are gated.
+
+Two other ways out:
+
+- **Index metadata only in there.** Pass `fulltext:false` to `zotero_index`, or turn the
+  "Index PDF full text" setting (`ZOTEUS_INDEX_FULLTEXT`) off. Titles, abstracts, creators,
+  tags, notes and annotations are all still indexed and searchable, and that build is
+  unaffected by any of this.
+- **Try it anyway.** `ZOTEUS_ALLOW_ELECTRON_FULLTEXT=true` lifts the refusal. The server may
+  die mid-build; what it indexed before that point is kept, stays searchable, and
+  `action:"build"` resumes from it. Please attach anything you learn to [#37].
+
+The gate is not narrowed to any one embedding provider. The reported suspicion is
+`onnxruntime-node`'s native binary under Electron's Node ABI, which is explicitly
+unconfirmed, and the full-text pass differs from the metadata pass in several other ways
+that also reach native code: an order of magnitude more passages, sustained concurrent HTTP
+against Zotero for the whole pass, and minute-long SQLite write transactions carrying much
+bulkier rows. Refusing on the one signal that actually correlates says only what is known.
+
+[#37]: https://github.com/oscardvs/zoteus/issues/37
+
 ## Storage backends
 
 Where the index lives is set by **`ZOTEUS_INDEX_BACKEND`**:
