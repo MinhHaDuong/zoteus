@@ -4,7 +4,11 @@ import type { IndexBuildStatus, VersionBackend } from './backend.js';
 import { canonicalLibraryToken } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
 import { createOwnWordsSource, fetchChildVersions, type OwnWordsSource } from './own-words-source.js';
-import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
+import {
+  DEFAULT_FULLTEXT_CONCURRENCY_CLOUD,
+  DEFAULT_FULLTEXT_CONCURRENCY_LOCAL,
+  DEFAULT_INDEX_MAX_ITEMS,
+} from './limits.js';
 
 /**
  * Default cap on items per build — keeps very large libraries bounded. Re-exported from
@@ -152,6 +156,29 @@ export function updateNotice(s: IndexBuildStatus): string {
   return s.updateNotice ? ` ${s.updateNotice}` : '';
 }
 
+/**
+ * Sentence appended when the crawl saturated Zotero's local API and the session fell back
+ * to the Web API. Same reasoning as `embedderNotice`, and the direct complaint in #39: the
+ * fallback works, so nothing fails and nothing is reported, and all the user sees is a
+ * build that is suddenly taking hours for no visible reason. It is also the one notice
+ * here with a cause the user can act on immediately, so it says what to do.
+ */
+export function localApiNotice(s: IndexBuildStatus): string {
+  if (!s.localApiDegradedAt) return '';
+  // The throttle only exists on the full-text pass, which is also the only pass heavy
+  // enough to have caused this; claiming it on a metadata-only build would be a fiction.
+  const backedOff = s.fulltextEnabled
+    ? ' The full-text crawl backed off to one attachment at a time to let the app recover, so the rest of this' +
+      ' job is slower again.'
+    : '';
+  return (
+    ` Zotero's local API stopped answering at ${s.localApiDegradedAt}, while this job was reading from it, so the` +
+    ' session fell back to the Zotero Web API: slower, rate-limited, and needing a cloud API key.' +
+    `${backedOff} Zotero usually answers again once the build eases off. If it keeps happening, lower` +
+    ' ZOTEUS_INDEX_FULLTEXT_CONCURRENCY, or index in smaller passes with `limit`.'
+  );
+}
+
 /** Human summary of a build/status snapshot. */
 export function statusSummary(s: IndexBuildStatus): string {
   const job = s.operation === 'update' ? 'update' : 'build';
@@ -163,6 +190,7 @@ export function statusSummary(s: IndexBuildStatus): string {
     truncationNotice(s) +
     persistNotice(s) +
     storageNotice(s) +
+    localApiNotice(s) +
     updateNotice(s);
   switch (s.state) {
     case 'building': {
@@ -292,8 +320,30 @@ export function startIndexBuild(
     library,
     ...crawlOptions(ctx, lib, opts, backend),
   });
+  watchLocalApi(ctx, backend, job);
   job.catch((e) => ctx.logger.error(`Index build crashed: ${e instanceof Error ? e.message : String(e)}`));
   return ctx.search.buildStatus();
+}
+
+/**
+ * Tell the running job if the desktop app it is crawling stops answering.
+ *
+ * Only for a job pinned to the local API: a cloud crawl cannot saturate Zotero and is not
+ * slowed by its absence, so reporting the outage on its status would be noise. The
+ * subscription lasts exactly as long as the job, so an app closed between builds is nobody's
+ * degradation, and the index's own guard (`noteLocalApiDegraded` ignores an idle index)
+ * covers the moment between the last row and the promise settling.
+ *
+ * `ctx.localStatus` is what actually notices, because the probe on the way in to every tool
+ * call is what re-establishes reachability. A user polling `action:"status"` while their
+ * build runs is therefore also what makes this fire, which is a happy coincidence rather
+ * than a dependency: any tool call does it.
+ */
+function watchLocalApi(ctx: ToolContext, backend: VersionBackend, job: Promise<unknown>): void {
+  if (backend !== 'local' || !ctx.localStatus) return;
+  const search = ctx.search;
+  const off = ctx.localStatus.onDegraded((at) => search.noteLocalApiDegraded(at));
+  void job.then(off, off);
 }
 
 /**
@@ -361,6 +411,7 @@ export function startIndexUpdate(
     library,
     ...crawlOptions(ctx, lib, opts, backend),
   });
+  watchLocalApi(ctx, backend, job);
   job.catch((e) => ctx.logger.error(`Index update crashed: ${e instanceof Error ? e.message : String(e)}`));
   return ctx.search.buildStatus();
 }
@@ -455,6 +506,15 @@ function crawlOptions(
     // provider's per-request token cap and per-minute rate limit are tuned against.
     embedBatchSize: ctx.config.embedBatchSize,
     embedBatchDelayMs: ctx.config.embedBatchDelayMs,
+    // How hard the full-text pass is allowed to lean on whichever Zotero API is serving it.
+    // Decided here rather than inside the index because only this layer knows which one
+    // that is, and the two tolerate load in completely different ways: the desktop app is a
+    // single process with no rate limiter that can be driven into the ground (#39), the
+    // Web API is a fleet that answers a burst with a 429 and a Backoff header. An explicit
+    // ZOTEUS_INDEX_FULLTEXT_CONCURRENCY overrides both.
+    fulltextConcurrency:
+      ctx.config.indexFulltextConcurrency ??
+      (backend === 'local' ? DEFAULT_FULLTEXT_CONCURRENCY_LOCAL : DEFAULT_FULLTEXT_CONCURRENCY_CLOUD),
     // A full-text index is far bigger, and on the JSON backend persisting means
     // re-serializing all of it. Save less often so the write does not dominate the build.
     // (On SQLite a persist is a commit, so this only costs a slightly longer transaction.)

@@ -3,7 +3,11 @@ import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { normalizeForSearch, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
-import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
+import {
+  DEFAULT_EMBED_BATCH_SIZE,
+  DEFAULT_FULLTEXT_CONCURRENCY_CLOUD,
+  SATURATED_FULLTEXT_CONCURRENCY,
+} from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
 import { progressLine } from './build.js';
 import { describeLibraryToken } from './backend.js';
@@ -225,6 +229,16 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected library: string | undefined = undefined;
   /** What the last update did, or why a rebuild replaced it (see IndexBuildStatus). */
   protected updateNotice: string | undefined = undefined;
+  /**
+   * When Zotero's local API stopped answering during the running (or last) job, if it did.
+   * See `noteLocalApiDegraded`.
+   */
+  protected localApiDegradedAt: number | undefined = undefined;
+  /**
+   * The live full-text fetch limiter of the running job, so the degradation signal can
+   * lower it without the build loop having to poll for one.
+   */
+  private fulltextLimit: Semaphore | undefined = undefined;
   /**
    * Embedder identity that produced the vectors currently held (persisted with them).
    * Public because the update path compares it against the live embedder before deciding
@@ -498,6 +512,32 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /**
+   * Zotero's local API stopped answering while this job was reading from it.
+   *
+   * Two things follow, and they are the whole of #39. The crawl backs off to one full-text
+   * read at a time for the rest of the job, because it is the load that caused this and it
+   * is the only load here that can yield. And the fact is recorded on the status, because
+   * until now the only trace was one INFO line: a user saw a build take far longer than it
+   * should, over the Web API's rate limits rather than the desktop app, with nothing
+   * anywhere to say why.
+   *
+   * First edge wins. A single outage is the story; a second one twenty minutes later does
+   * not change the advice, and re-timestamping would make a build look like it degraded
+   * long after it actually did. Ignored when nothing is running, so an app closed between
+   * builds is not reported as this build's problem.
+   */
+  noteLocalApiDegraded(at: number): void {
+    if (!this.isBuilding || this.localApiDegradedAt !== undefined) return;
+    this.localApiDegradedAt = at;
+    this.fulltextLimit?.setMax(SATURATED_FULLTEXT_CONCURRENCY);
+    this.opts.logger?.warn(
+      "Zotero's local API stopped answering while the index was reading from it. Attachment full text is now " +
+        'being fetched one at a time to let the app recover; the rest of this job will be slower. ' +
+        'zotero_index action:"status" reports this as localApiDegradedAt.',
+    );
+  }
+
+  /**
    * Drop vectors this embedder did not produce, and remember why. Ranking them would not
    * fail, it would return plausible nonsense, which is the whole reason to be strict here.
    */
@@ -554,6 +594,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextItemsTotal: this.fulltextItemsTotal,
     };
     if (this.resumedFrom !== undefined) s.resumedFrom = this.resumedFrom;
+    if (this.localApiDegradedAt !== undefined) {
+      s.localApiDegradedAt = new Date(this.localApiDegradedAt).toISOString();
+    }
     if (this.fault) {
       s.state = 'error';
       s.lastError = UNREADABLE_STORE;
@@ -756,6 +799,10 @@ export abstract class SearchIndexBase implements SearchIndex {
     // A rebuild is the retry for full text too: clear the previous run's verdict so a
     // library that has since been extracted in Zotero stops reporting the old reason.
     this.fulltextUnavailable = undefined;
+    // Same rule: this job reports on itself. Zotero having fallen over during the LAST
+    // build says nothing about this one, and leaving the stamp would make a healthy build
+    // look degraded for as long as the index lives.
+    this.localApiDegradedAt = undefined;
     this.itemsRemoved = 0;
     this.phase = 'metadata';
     this.fulltextItemsScanned = 0;
@@ -814,7 +861,12 @@ export abstract class SearchIndexBase implements SearchIndex {
     const progressEveryItems = opts.progressEveryItems ?? 500;
     const progressEveryMs = opts.progressEveryMs ?? 10_000;
     const maxItems = opts.maxItems;
-    const fulltextLimit = new Semaphore(Math.max(1, opts.fulltextConcurrency ?? 4));
+    // Kept on the instance as well as in scope so `noteLocalApiDegraded` can lower it
+    // mid-crawl. `startIndexBuild` always supplies a value, chosen by the API serving
+    // this job; the fallback is for callers that drive the index directly.
+    const fulltextLimit = (this.fulltextLimit = new Semaphore(
+      Math.max(1, opts.fulltextConcurrency ?? DEFAULT_FULLTEXT_CONCURRENCY_CLOUD),
+    ));
     // Without an explicit hook the index persists itself: the SQLite backend commits its
     // open transaction here, so "persist" and "make the last N items durable" are one act.
     const persist = opts.persist ?? (() => this.save());
@@ -1193,6 +1245,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.embedderError = undefined;
     this.persistError = undefined;
     this.updateNotice = undefined;
+    this.localApiDegradedAt = undefined;
     this.itemsFetched = 0;
     this.itemsRemoved = 0;
     if (opts.fulltextFor) {
@@ -1214,7 +1267,12 @@ export abstract class SearchIndexBase implements SearchIndex {
     const progressEveryItems = opts.progressEveryItems ?? 500;
     const progressEveryMs = opts.progressEveryMs ?? 10_000;
     const maxItems = opts.maxItems;
-    const fulltextLimit = new Semaphore(Math.max(1, opts.fulltextConcurrency ?? 4));
+    // Kept on the instance as well as in scope so `noteLocalApiDegraded` can lower it
+    // mid-crawl. `startIndexBuild` always supplies a value, chosen by the API serving
+    // this job; the fallback is for callers that drive the index directly.
+    const fulltextLimit = (this.fulltextLimit = new Semaphore(
+      Math.max(1, opts.fulltextConcurrency ?? DEFAULT_FULLTEXT_CONCURRENCY_CLOUD),
+    ));
     const persist = opts.persist ?? (() => this.save());
 
     const pending: ChunkRecord[] = [];

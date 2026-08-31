@@ -22,6 +22,54 @@ export const DEFAULT_INDEX_MAX_ITEMS = 5000;
 export const DEFAULT_EMBED_BATCH_SIZE = 32;
 
 /**
+ * Concurrent attachment full-text fetches during an index build, chosen by the API that is
+ * serving the crawl. One number cannot be right for both, because the two paths fail in
+ * opposite directions.
+ *
+ * The Web API is a fleet answering the whole world. It defends itself: a burst earns a 429
+ * with a Backoff header the fetcher already honours, which costs latency and nothing else,
+ * and the round trip to api.zotero.org is long enough that a single read in flight leaves
+ * the crawl mostly idle. Four is what that path has always used.
+ *
+ * The local API is ONE desktop application. Its HTTP server shares a process with Zotero's
+ * UI, its sync engine and its own PDF indexer, and it has no rate limiter: it answers
+ * everything asked of it until it cannot. Four body reads held continuously for the length
+ * of a full-text crawl was enough to stop Zotero 10 answering on port 23119 at all, 60 to
+ * 90 seconds in, on a library of 358 extracted attachments (#39). The cost of that is much
+ * worse than a slow crawl, because local-API reachability is a session-wide capability: the
+ * moment it goes, every OTHER read and write in the session falls back to the Web API,
+ * which is the slower, rate-limited path the crawl was avoiding, and a burst of it can
+ * leave the cloud probe rate-limited for the rest of the session.
+ *
+ * 2 rather than 1 for the local path. A full-text read is almost entirely Zotero's own work
+ * (a SQLite read plus JSON serialisation), so the crawl is bound by the app rather than by
+ * the loopback hop, and serialising completely would roughly double a full-text build that
+ * already runs for hours on a large library. 2 halves the standing load, which is the load
+ * that saturates, while still keeping one request in flight while the previous response is
+ * decoded and chunked. It is deliberately a starting point rather than a guarantee: see
+ * SATURATED_FULLTEXT_CONCURRENCY for what happens when it turns out not to be enough.
+ *
+ * `ZOTEUS_INDEX_FULLTEXT_CONCURRENCY` overrides both, for anyone who has measured their own
+ * machine and disagrees.
+ */
+export const DEFAULT_FULLTEXT_CONCURRENCY_LOCAL = 2;
+export const DEFAULT_FULLTEXT_CONCURRENCY_CLOUD = 4;
+
+/**
+ * What a local-API full-text crawl drops to once Zotero has actually stopped answering.
+ *
+ * The cap above is a guess about somebody else's machine: how much headroom Zotero has
+ * depends on the library, the disk, and whatever else the app is doing at the time. This is
+ * the part that does not guess. The moment the local API is observed to have gone down
+ * while a build is running, the crawl that is loading it stops overlapping requests
+ * entirely and finishes one at a time, for the rest of the build. It never climbs back on
+ * its own: an app that has just been driven into the ground is not the place to go looking
+ * for the edge a second time, and the remaining cost is a slower tail on a build that was
+ * already going to be slow.
+ */
+export const SATURATED_FULLTEXT_CONCURRENCY = 1;
+
+/**
  * How many candidates the binary-code stage of a semantic query hands the exact rescore,
  * per vector hit the fusion asks for. The pool decides the accuracy of the whole two-stage
  * search: measured on real embeddings against the exact ranking, recall@30 was 0.884 at a

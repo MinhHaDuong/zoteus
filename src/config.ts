@@ -28,6 +28,12 @@ export interface ZoteusConfig {
   indexOwnWords: boolean;
   /** Cap on indexed full-text characters per item (0 = no cap). */
   indexFulltextMaxChars: number;
+  /**
+   * Concurrent attachment full-text fetches during an index build. Unset on purpose: the
+   * default depends on which Zotero API is serving the crawl (see limits.ts), and only an
+   * explicit value overrides that choice.
+   */
+  indexFulltextConcurrency?: number;
   /** Cap on items per index build. Raise it for libraries larger than the default. */
   indexMaxItems: number;
   /**
@@ -177,6 +183,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
           .int()
           .nonnegative()
           .default(DEFAULT_FULLTEXT_MAX_CHARS),
+        ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: z.coerce.number().int().positive().optional(),
         ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
         ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
         ZOTEUS_INDEX_ANN: bool(true),
@@ -316,6 +323,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
     indexOwnWords: parsed.ZOTEUS_INDEX_OWN_WORDS,
     indexFulltextMaxChars: parsed.ZOTEUS_INDEX_FULLTEXT_MAX_CHARS,
+    indexFulltextConcurrency: parsed.ZOTEUS_INDEX_FULLTEXT_CONCURRENCY,
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     indexBackend: parsed.ZOTEUS_INDEX_BACKEND,
     indexAnn: parsed.ZOTEUS_INDEX_ANN,

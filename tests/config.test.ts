@@ -45,6 +45,7 @@ describe('loadConfig', () => {
       ZOTEUS_INDEX_ANN: 'false',
       ZOTEUS_INDEX_ANN_OVERSAMPLE: '32',
       ZOTEUS_INDEX_ANN_MIN_CANDIDATES: '2000',
+      ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: '3',
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.apiKey).toBe('abc');
     expect(cfg.libraryId).toBe(19552201);
@@ -61,6 +62,16 @@ describe('loadConfig', () => {
     expect(cfg.indexAnn).toBe(false);
     expect(cfg.indexAnnOversample).toBe(32);
     expect(cfg.indexAnnMinCandidates).toBe(2000);
+    expect(cfg.indexFulltextConcurrency).toBe(3);
+  });
+
+  it('leaves the full-text concurrency unset unless it is asked for, so the backend picks', () => {
+    // Unset is not "4": the default depends on which Zotero API is serving the build, and
+    // only an explicit value overrides that choice (#39).
+    expect(loadConfig({} as unknown as NodeJS.ProcessEnv).indexFulltextConcurrency).toBeUndefined();
+    const bad = loadConfig({ ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: '0' } as unknown as NodeJS.ProcessEnv);
+    expect(bad.indexFulltextConcurrency).toBeUndefined();
+    expect(bad.warnings).toEqual(['ZOTEUS_INDEX_FULLTEXT_CONCURRENCY="0" is not usable, ignoring it']);
   });
 
   it('falls back on an invalid enum value, and says which', () => {

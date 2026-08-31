@@ -86,6 +86,9 @@ export class LocalApiStatus {
   /** True once the group list has been read successfully for the current up-period. */
   private groupsKnown = false;
   private consecutiveFailures = 0;
+  /** When the local API was last seen to go from answering to not answering. */
+  private degradedAt: number | undefined;
+  private readonly degradedListeners = new Set<(at: number) => void>();
 
   constructor(opts: LocalApiStatusOptions) {
     this.config = opts.config;
@@ -110,6 +113,31 @@ export class LocalApiStatus {
   /** When the answer was last established, for callers that want to say so. */
   lastCheckedAt(): number {
     return this.checkedAt;
+  }
+
+  /**
+   * When the local API was last seen to stop answering, or undefined if it never has in
+   * this process. Not cleared when the app comes back: it is a record of an event, and the
+   * thing that wants it (a long-running index build, which is what caused the outage in
+   * the first place) is still running long after the app has recovered.
+   */
+  lastDegradedAt(): number | undefined {
+    return this.degradedAt;
+  }
+
+  /**
+   * Be told when the local API goes from answering to not answering. Returns a function
+   * that unsubscribes.
+   *
+   * Only the DOWN edge, and only once per outage: a probe that finds the app still absent
+   * is the same outage, not a second one. The listener exists because that transition is
+   * not merely informational to a running index build. The build is usually its cause, it
+   * is the one thing on the machine that can ease off, and it is the one thing whose
+   * status the user is actually watching (#39).
+   */
+  onDegraded(listener: (at: number) => void): () => void {
+    this.degradedListeners.add(listener);
+    return () => this.degradedListeners.delete(listener);
   }
 
   /**
@@ -201,6 +229,16 @@ export class LocalApiStatus {
       this.logger.info(
         `Zotero's local API stopped answering on port ${this.config.localPort}; reads and writes fall back to the Zotero Web API.`,
       );
+      this.degradedAt = this.checkedAt;
+      // A listener is somebody else's code on this process's probe path, and a probe that
+      // throws is a local API wrongly reported as reachable. Each one is isolated.
+      for (const listener of this.degradedListeners) {
+        try {
+          listener(this.degradedAt);
+        } catch (e) {
+          this.logger.debug(`local-API degradation listener failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     }
     return false;
   }

@@ -162,4 +162,53 @@ describe('LocalApiStatus', () => {
     expect(await status.ensure({ force: true })).toBe(false);
     expect(capabilities.localApi).toBe(false);
   });
+
+  it('publishes the down edge, once, to whoever is listening for it (#39)', async () => {
+    let up = true;
+    const { status, advance } = makeStatus({ localApi: true, up: () => ({ up, timedOut: false }) });
+    const seen: number[] = [];
+    const off = status.onDegraded((at) => seen.push(at));
+
+    expect(status.lastDegradedAt()).toBeUndefined();
+    up = false;
+    advance(60_000);
+    await status.ensure({ force: true }); // one failure is not yet an outage
+    expect(seen).toEqual([]);
+    advance(60_000);
+    await status.ensure({ force: true });
+    expect(seen).toHaveLength(1);
+    expect(status.lastDegradedAt()).toBe(seen[0]);
+
+    // Still down on the next probe: that is the same outage, not a second one.
+    advance(60_000);
+    await status.ensure({ force: true });
+    expect(seen).toHaveLength(1);
+
+    // Back up and down again is a new edge, and an unsubscribed listener hears none of it.
+    off();
+    up = true;
+    advance(60_000);
+    await status.ensure({ force: true });
+    up = false;
+    advance(60_000);
+    await status.ensure({ force: true });
+    advance(60_000);
+    await status.ensure({ force: true });
+    expect(seen).toHaveLength(1);
+    expect(status.lastDegradedAt()).toBeGreaterThan(seen[0]!);
+  });
+
+  it('never lets a listener that throws take the probe down with it', async () => {
+    let up = true;
+    const { status, capabilities, advance } = makeStatus({ localApi: true, up: () => ({ up, timedOut: false }) });
+    status.onDegraded(() => {
+      throw new Error('listener exploded');
+    });
+    up = false;
+    advance(60_000);
+    await status.ensure({ force: true });
+    advance(60_000);
+    await expect(status.ensure({ force: true })).resolves.toBe(false);
+    expect(capabilities.localApi).toBe(false);
+  });
 });
