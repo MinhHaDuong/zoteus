@@ -13,6 +13,7 @@ import type {
   BuildOptions,
   BuildState,
   ChunkRecord,
+  OwnWordsEntry,
   IncrementalBuildOptions,
   IncrementalUpdateOptions,
   IndexBuildStatus,
@@ -38,6 +39,8 @@ export type {
   BuildState,
   ChunkRecord,
   FulltextCatchUp,
+  OwnWordsAccess,
+  OwnWordsEntry,
   IncrementalBuildOptions,
   IncrementalUpdateOptions,
   IndexBuildStatus,
@@ -88,6 +91,28 @@ function itemText(d: any): string {
 function itemKeyOf(item: any): string {
   const d = item?.data ?? item;
   return item?.key ?? d?.key ?? '';
+}
+
+/**
+ * Passage id for one chunk of one note or annotation.
+ *
+ * Namespaced `#w` so it can collide with neither a metadata passage (`#<n>`) nor a body
+ * one (`#f<n>`), and it names the CHILD rather than a running counter: an item's own words
+ * are then addressable one note at a time, which is what makes a deleted note detectable
+ * (see ownWordsPassageIds). Zotero keys are `[A-Z0-9]{8}`, so neither separator can appear
+ * inside one.
+ */
+function ownWordsId(itemKey: string, childKey: string, chunk: number): string {
+  return `${itemKey}#w${childKey}.${chunk}`;
+}
+
+/** The item and child an own-words passage id names, or undefined when it names neither. */
+function parseOwnWordsId(id: string): { itemKey: string; childKey: string } | undefined {
+  const hash = id.indexOf('#w');
+  if (hash <= 0) return undefined;
+  const dot = id.indexOf('.', hash + 2);
+  if (dot < 0) return undefined;
+  return { itemKey: id.slice(0, hash), childKey: id.slice(hash + 2, dot) };
 }
 
 /**
@@ -162,6 +187,14 @@ export abstract class SearchIndexBase implements SearchIndex {
   /** Whether the running/last build was asked for full text, and why it may not deliver. */
   protected fulltextEnabled = false;
   protected fulltextUnavailable: string | undefined = undefined;
+  /**
+   * Whether this index holds the reader's own words — child notes and PDF annotations —
+   * and why it may not. On by default, unlike full text: the whole corpus is one paged
+   * crawl of hand-written text, orders of magnitude smaller than the attachment bodies
+   * beside it, and it is the only text in a library nobody else wrote (#33).
+   */
+  protected ownWordsEnabled = false;
+  protected ownWordsUnavailable: string | undefined = undefined;
   protected builtFromVersion = 0;
   /**
    * Zotero's Last-Modified-Version this index was built or updated from, and the API that
@@ -333,6 +366,20 @@ export abstract class SearchIndexBase implements SearchIndex {
   /** True when the store already holds attachment body passages for this item. */
   protected abstract hasFulltext(itemKey: string): boolean;
   /**
+   * Ids of the passages that came from the reader's own words. Bounded by those passages
+   * (thousands) rather than by the index (which is full-text passages in their hundreds of
+   * thousands), and it is what lets an update notice a note that was DELETED: deleting one
+   * of an item's five notes moves no version anywhere in Zotero, so nothing in a `?since=`
+   * delta would ever mention it. The child key each id names is what the census is
+   * compared against.
+   */
+  protected abstract ownWordsPassageIds(): string[];
+  /**
+   * The own-words half of `deleteItem`, so an item's notes and annotations can be replaced
+   * without touching its metadata passages or the item row.
+   */
+  protected abstract clearOwnWords(itemKey: string): void;
+  /**
    * Remove only this item's body passages, leaving its metadata ones. What a full-text
    * catch-up needs: the item itself did not change, so re-fetching and re-chunking its
    * metadata would be waste, but its `#f<n>` passage ids have to be free before new ones
@@ -440,6 +487,12 @@ export abstract class SearchIndexBase implements SearchIndex {
    * Zotero yet, unreachable full-text endpoints). Mirrors the embedder's reporting: a
    * metadata-only index that was ASKED for full text must say so, not look complete.
    */
+  /** Why this build indexed no notes or annotations, from the source that could not serve them. */
+  noteOwnWordsUnavailable(reason: string): void {
+    this.ownWordsUnavailable = reason;
+    this.opts.logger?.warn(reason);
+  }
+
   noteFulltextUnavailable(reason: string): void {
     this.fulltextUnavailable = reason;
   }
@@ -540,6 +593,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       fulltextEnabled: this.fulltextEnabled,
       fulltextItems: c.fulltextItems,
       fulltextPassages: c.fulltextPassages,
+      ownWordsEnabled: this.ownWordsEnabled,
+      ownWordsItems: c.ownWordsItems,
+      ownWordsPassages: c.ownWordsPassages,
       builtFromVersion: this.builtFromVersion,
       libraryVersion: this.libraryVersion,
       fulltextVersion: this.fulltextVersion,
@@ -554,6 +610,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.vectorScanNotice) s.vectorScanNotice = this.vectorScanNotice;
     if (this.storeNotice) s.storageNotice = this.storeNotice;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
+    if (this.ownWordsUnavailable) s.ownWordsReason = this.ownWordsUnavailable;
     return s;
   }
 
@@ -734,6 +791,10 @@ export abstract class SearchIndexBase implements SearchIndex {
     // A resumed build inherits the body passages the interrupted one committed, so it is a
     // full-text index whether or not this run was asked to crawl any more of them.
     this.fulltextEnabled = Boolean(opts.fulltextFor) || (resume ? this.counts().fulltextPassages > 0 : false);
+    this.ownWordsEnabled = Boolean(opts.ownWords) || (resume ? this.counts().ownWordsPassages > 0 : false);
+    // Same rule as full text: a rebuild is the retry, so a library whose children have
+    // since become listable stops reporting the old reason.
+    this.ownWordsUnavailable = undefined;
     // Stamped before the first row, not at completion: every partial persist carries the
     // identity of the library it belongs to, so even an interrupted build stays guarded.
     // After the resume branch above, so a continued build restamps the identity it was
@@ -921,6 +982,13 @@ export abstract class SearchIndexBase implements SearchIndex {
           // searchable, and its place in the full-text worklist came from the store.
           if (known?.has(itemKeyOf(item))) continue;
           const entry = this.addMetadata(item, pending);
+          // In the metadata pass, not a pass of its own: the census behind this is already
+          // resident by the first item, so an item's own words cost no request here, and
+          // writing them with the item means one commit covers the item entirely — which
+          // is what lets a resume step over an item by key and know it is complete.
+          if (entry && opts.ownWords) {
+            this.addOwnWords(entry.key, entry.title, await opts.ownWords.textsFor(entry.key), pending);
+          }
           // Recorded now, crawled in the second pass. Truncating here rather than there is
           // what keeps the item cap honest without re-checking it against a moving count.
           if (entry && worklist) worklist.push(entry);
@@ -1134,6 +1202,10 @@ export abstract class SearchIndexBase implements SearchIndex {
       this.fulltextEnabled = true;
       this.fulltextUnavailable = undefined;
     }
+    if (opts.ownWords) {
+      this.ownWordsEnabled = true;
+      this.ownWordsUnavailable = undefined;
+    }
     const token = { cancelled: false };
     this.cancelToken = token;
 
@@ -1160,6 +1232,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     let reconciled = false;
     let fulltextCursor = this.fulltextVersion;
     let caughtUp = 0;
+    let ownWordsRefreshed = 0;
 
     const maybeLog = (): void => {
       if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
@@ -1178,6 +1251,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         const pageItems = page.items ?? [];
         if (pageItems.length === 0) break;
         const texts = await this.fulltextForPage(pageItems, opts, token, fulltextLimit);
+        const own = await this.ownWordsForPage(pageItems, opts, token);
         for (let i = 0; i < pageItems.length; i++) {
           if (token.cancelled) break;
           const item = pageItems[i];
@@ -1194,7 +1268,7 @@ export abstract class SearchIndexBase implements SearchIndex {
           // are only mostly stable (a shorter abstract yields fewer chunks), so replacing
           // the item wholesale is the only way to leave no orphans behind.
           this.deleteItem(key);
-          this.addOneItem(item, pending, texts?.[i]);
+          this.addOneItem(item, pending, texts?.[i], own?.[i]);
           known.add(key);
           refreshed.add(key);
           this.itemsFetched++;
@@ -1213,6 +1287,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         caughtUp = catchUp.items;
       }
 
+
       if (!token.cancelled) {
         const live = await opts.liveKeys();
         if (live.size === 0 && known.size > 0) {
@@ -1228,6 +1303,9 @@ export abstract class SearchIndexBase implements SearchIndex {
           for (const key of known) {
             if (live.has(key)) continue;
             this.deleteItem(key);
+            // Out of the surviving set too: what follows this pass reads `known` as the
+            // items the index still holds, and a removed key there would resurrect rows.
+            known.delete(key);
             this.itemsRemoved++;
           }
           // The versions scan is a free, exact census of the library, so the truncation
@@ -1237,6 +1315,13 @@ export abstract class SearchIndexBase implements SearchIndex {
           this.builtFromVersion = this.counts().items;
           reconciled = true;
         }
+      }
+
+      // After the deletion pass, deliberately: an item this update has just removed must
+      // not have its notes re-indexed on the way out, and `known` is only the surviving
+      // set once that pass has taken its keys out of it.
+      if (!token.cancelled && opts.ownWords) {
+        ownWordsRefreshed = await this.ownWordsCatchUp(opts, fromVersion, known, refreshed, pending, token);
       }
 
       if (!token.cancelled && reconciled && crawlVersion) {
@@ -1272,6 +1357,11 @@ export abstract class SearchIndexBase implements SearchIndex {
           // merely finished extracting their text after the build (#26).
           (caughtUp
             ? ` ${caughtUp} unchanged item(s) gained newly extracted attachment full text.`
+            : '') +
+          // Also apart from the changed count, and for a similar reason: these items did
+          // not change either, a note or a highlight hanging off them did (#33).
+          (ownWordsRefreshed
+            ? ` ${ownWordsRefreshed} item(s) had their notes and annotations re-indexed.`
             : '') +
           (skippedByCap
             ? ` ${skippedByCap} new items were left out because the index is at its item cap.`
@@ -1382,6 +1472,143 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /**
+   * The own words of one page of changed items, in the order the page holds them.
+   *
+   * No concurrency limit and no per-item error handling, unlike the full-text sibling
+   * below: every answer comes out of one census that is already resident by the time this
+   * is first called, so there is no round trip to bound and nothing here can fail on its
+   * own.
+   */
+  private async ownWordsForPage(
+    batch: any[],
+    opts: IncrementalBuildOptions,
+    token: { cancelled: boolean },
+  ): Promise<Array<OwnWordsEntry[]> | undefined> {
+    if (!opts.ownWords || token.cancelled) return undefined;
+    const out: Array<OwnWordsEntry[]> = [];
+    for (const item of batch) {
+      const key = item?.key ?? item?.data?.key;
+      out.push(key ? await opts.ownWords.textsFor(key) : []);
+    }
+    return out;
+  }
+
+  /**
+   * Re-index the notes and annotations of items the item delta never saw.
+   *
+   * The gap this closes is the one that makes #33 more than a coverage question. Writing a
+   * note, or annotating a PDF, leaves the PARENT item's version exactly where it was: the
+   * child is what Zotero versions. So an item whose reader has just written three pages of
+   * objections appears in no `?since=` delta over `/items/top`, ever, and an index anyone
+   * maintains by updating rather than rebuilding would stay blind to it indefinitely.
+   *
+   * One cheap question answers all three shapes of change. Every note and annotation key
+   * in the library, with its version, is one keys-only request; compared against the child
+   * keys this index holds it says what was edited (a version past the stamp), what was
+   * added (a key the index has no passage for) and what was deleted (a key the library no
+   * longer has) — that last one being the case no `?since=` can ever report, because
+   * deleting a child moves no version anywhere. Notes and annotations are ordinary items
+   * carrying ordinary versions, so unlike extracted full text (#26) none of this needs a
+   * second cursor. The expensive census behind `textsFor` is opened only when there is
+   * something to re-index, so an update over a library nobody has annotated since costs
+   * exactly one request.
+   */
+  private async ownWordsCatchUp(
+    opts: IncrementalUpdateOptions,
+    since: number,
+    known: Set<string>,
+    refreshed: Set<string>,
+    pending: ChunkRecord[],
+    token: { cancelled: boolean },
+  ): Promise<number> {
+    const access = opts.ownWords!;
+    let live: Map<string, number>;
+    try {
+      live = await access.childVersions();
+    } catch (e) {
+      // A census that cannot be taken must not fail the delta: the items that DID change
+      // are correctly indexed either way, and the next update asks again.
+      this.opts.logger?.warn(
+        `The library's notes and annotations could not be listed (${e instanceof Error ? e.message : String(e)}), ` +
+          'so this update did not revisit them.',
+      );
+      return 0;
+    }
+    const stored = this.ownWordsChildren();
+    if (live.size === 0 && stored.size > 0) {
+      // The same rule the item-level deletion pass learned: a library reporting no notes
+      // and no annotations at all, against an index holding some, is a failed read far
+      // more often than a reader who deleted every one of them — and acting on it would
+      // erase exactly the text this feature exists to keep.
+      this.opts.logger?.warn(
+        'The library reported no notes or annotations at all, which is treated as a failed read rather than a ' +
+          'reader who deleted every one; the indexed ones were left alone.',
+      );
+      return 0;
+    }
+    const targets = new Set<string>();
+    const held = new Set<string>();
+    for (const [itemKey, children] of stored) {
+      for (const child of children) {
+        held.add(child);
+        if (refreshed.has(itemKey) || !known.has(itemKey)) continue;
+        // Gone from the library: a deleted note or a deleted highlight. This is the case
+        // no `?since=` can report — deleting a child moves no version anywhere — and it is
+        // why the whole key set is compared rather than only the delta.
+        if (!live.has(child)) targets.add(itemKey);
+        // Still here, but written after the stamp this update is diffing from: edited, or
+        // added to an item whose own version never moved.
+        else if ((live.get(child) ?? 0) > since) targets.add(itemKey);
+      }
+    }
+    // Children the library holds that this index has no passage for. Their items are
+    // unknown until the census resolves them (an annotation names an attachment), so this
+    // is the one branch that opens it.
+    //
+    // Narrowed to the ones written since the stamp, and the narrowing is what keeps an
+    // idle update to one request: a real library always holds children that yield no
+    // passage at all — an image annotation with no text, a note someone emptied — and
+    // those are unheld forever. Unchanged since the stamp means they were already
+    // considered, by the build or by an earlier update, and considered again would cost a
+    // crawl of every note in the library to reach the same conclusion. The exception is an
+    // index holding no own words whatsoever, which is one built before they existed: there
+    // nothing has considered them yet, and filling that gap once is the point.
+    const gapFill = stored.size === 0;
+    const unheld = [...live.entries()]
+      .filter(([key, version]) => !held.has(key) && (gapFill || version > since))
+      .map(([key]) => key);
+    if (unheld.length) {
+      try {
+        for (const itemKey of await access.itemsFor(unheld)) {
+          if (known.has(itemKey) && !refreshed.has(itemKey)) targets.add(itemKey);
+        }
+      } catch (e) {
+        this.opts.logger?.warn(
+          `New notes and annotations could not be attributed to their items ` +
+            `(${e instanceof Error ? e.message : String(e)}), so this update did not index them.`,
+        );
+      }
+    }
+    if (!targets.size) return 0;
+
+    const batchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
+    const delayMs = opts.embedBatchDelayMs ?? 0;
+    let items = 0;
+    for (const key of targets) {
+      if (token.cancelled) break;
+      // The item's own metadata and body passages are untouched: nothing about the item
+      // changed. Its own words are replaced wholesale, which is also how a note that lost
+      // a paragraph stops being findable by the paragraph it lost.
+      this.clearOwnWords(key);
+      this.addOwnWords(key, this.itemTitle(key) ?? '(untitled)', await access.textsFor(key), pending);
+      items++;
+      await this.embedPending(pending, token, batchSize, delayMs, false);
+    }
+    if (!token.cancelled) await this.embedPending(pending, token, batchSize, delayMs, true);
+    return items;
+  }
+
+  /**
    * Full text for one page of items, several attachments in flight, so the per-item round
    * trip does not serialize the whole crawl behind the network.
    */
@@ -1474,9 +1701,13 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /** Chunk a single library item into the keyword index and queue passages for embedding. */
-  private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string): void {
+  private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string, ownWords?: OwnWordsEntry[]): void {
     const entry = this.addMetadata(item, pending);
-    if (entry && fulltext) this.addFulltext(entry.key, entry.title, fulltext, pending);
+    if (!entry) return;
+    if (fulltext) this.addFulltext(entry.key, entry.title, fulltext, pending);
+    // An upsert replaces the item wholesale, so its own words have to come back with it:
+    // without this, editing an item's title would silently drop every note hanging off it.
+    if (ownWords?.length) this.addOwnWords(entry.key, entry.title, ownWords, pending);
   }
 
   /**
@@ -1519,6 +1750,45 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
   }
 
+  /**
+   * Index one item's notes and annotations as extra passages.
+   *
+   * They carry the PARENT item's key, exactly as body text does, and that is the whole
+   * design: `query()` de-duplicates by item, so an item with forty annotations takes one
+   * result slot rather than forty, and the reader's own words extend what the item can be
+   * found by instead of crowding out everything else. One passage per note or annotation
+   * (chunked only when a note is long enough to need it), so each is retrievable on its
+   * own terms and can leave on its own when it is deleted.
+   */
+  private addOwnWords(itemKey: string, title: string, entries: OwnWordsEntry[], pending: ChunkRecord[]): void {
+    for (const entry of entries) {
+      for (const ch of chunkText(entry.text, FULLTEXT_CHUNK_SIZE, FULLTEXT_CHUNK_OVERLAP)) {
+        const rec: ChunkRecord = {
+          id: ownWordsId(itemKey, entry.key, ch.index),
+          itemKey,
+          title,
+          text: ch.text,
+          source: entry.kind,
+        };
+        this.putPassage(rec);
+        if (this.hasEmbedder) pending.push(rec);
+      }
+    }
+  }
+
+  /** The notes and annotations this index currently holds, by the item they belong to. */
+  protected ownWordsChildren(): Map<string, Set<string>> {
+    const map = new Map<string, Set<string>>();
+    for (const id of this.ownWordsPassageIds()) {
+      const parsed = parseOwnWordsId(id);
+      if (!parsed) continue;
+      const set = map.get(parsed.itemKey);
+      if (set) set.add(parsed.childKey);
+      else map.set(parsed.itemKey, new Set([parsed.childKey]));
+    }
+    return map;
+  }
+
   async query(q: string, opts: QueryOptions = {}): Promise<SearchHit[]> {
     // An unreadable store must refuse rather than answer nothing: a query that returns no
     // hits forever is indistinguishable from a library that holds nothing on the subject,
@@ -1558,8 +1828,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       seen.add(rec.itemKey);
       const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
       // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
-      // zotero_get_fulltext, whereas a metadata one is just the abstract.
-      if (rec.source === 'fulltext') hit.source = 'fulltext';
+      // zotero_get_fulltext, whereas a metadata one is just the abstract — and a note or
+      // annotation is the reader's own, which is a different thing again to be told.
+      if (rec.source) hit.source = rec.source;
       hits.push(hit);
       if (hits.length >= limit) break;
     }
@@ -1604,6 +1875,9 @@ export class MemorySearchIndex extends SearchIndexBase {
   /** Items with at least one full-text passage, and how many such passages exist. */
   private fulltextItems = new Set<string>();
   private fulltextPassages = 0;
+  /** The same bookkeeping for the reader's own words; see the SQLite backend's twin. */
+  private ownWordsItems = new Set<string>();
+  private ownWordsPassages = 0;
   private readonly path: string | undefined;
 
   constructor(opts: MemorySearchIndexOptions) {
@@ -1618,6 +1892,8 @@ export class MemorySearchIndex extends SearchIndexBase {
       items: this.items.size,
       fulltextItems: this.fulltextItems.size,
       fulltextPassages: this.fulltextPassages,
+      ownWordsItems: this.ownWordsItems.size,
+      ownWordsPassages: this.ownWordsPassages,
     };
   }
 
@@ -1629,6 +1905,8 @@ export class MemorySearchIndex extends SearchIndexBase {
     this.byItem = new Map();
     this.fulltextItems = new Set();
     this.fulltextPassages = 0;
+    this.ownWordsItems = new Set();
+    this.ownWordsPassages = 0;
   }
 
   protected putItem(itemKey: string, title: string): void {
@@ -1647,6 +1925,9 @@ export class MemorySearchIndex extends SearchIndexBase {
     if (rec.source === 'fulltext') {
       this.fulltextItems.add(rec.itemKey);
       this.fulltextPassages++;
+    } else if (rec.source === 'note' || rec.source === 'annotation') {
+      this.ownWordsItems.add(rec.itemKey);
+      this.ownWordsPassages++;
     }
   }
 
@@ -1654,12 +1935,14 @@ export class MemorySearchIndex extends SearchIndexBase {
     for (const id of this.byItem.get(itemKey) ?? []) {
       const rec = this.chunks.get(id);
       if (rec?.source === 'fulltext') this.fulltextPassages--;
+      else if (rec?.source === 'note' || rec?.source === 'annotation') this.ownWordsPassages--;
       this.chunks.delete(id);
       this.bm25.removeDoc(id);
       this.vectors.remove(id);
     }
     this.byItem.delete(itemKey);
     this.fulltextItems.delete(itemKey);
+    this.ownWordsItems.delete(itemKey);
     this.items.delete(itemKey);
   }
 
@@ -1677,6 +1960,30 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   protected hasFulltext(itemKey: string): boolean {
     return this.fulltextItems.has(itemKey);
+  }
+
+  protected ownWordsPassageIds(): string[] {
+    const ids: string[] = [];
+    for (const [id, rec] of this.chunks) {
+      if (rec.source === 'note' || rec.source === 'annotation') ids.push(id);
+    }
+    return ids;
+  }
+
+  /** The own-words half of `deleteItem`: same bookkeeping, everything else left in place. */
+  protected clearOwnWords(itemKey: string): void {
+    const ids = this.byItem.get(itemKey);
+    if (!ids) return;
+    for (const id of [...ids]) {
+      const rec = this.chunks.get(id);
+      if (rec?.source !== 'note' && rec?.source !== 'annotation') continue;
+      this.ownWordsPassages--;
+      this.chunks.delete(id);
+      this.bm25.removeDoc(id);
+      this.vectors.remove(id);
+      ids.delete(id);
+    }
+    this.ownWordsItems.delete(itemKey);
   }
 
   /** The body half of `deleteItem`: same bookkeeping, metadata passages left in place. */

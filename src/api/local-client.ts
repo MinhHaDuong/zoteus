@@ -226,7 +226,7 @@ export class LocalApiClient {
    * comparable with other local reads, never with the cloud's.
    */
   async itemVersions(
-    query: { since?: number; top?: boolean; limit?: number; start?: number } = {},
+    query: { since?: number; top?: boolean; limit?: number; start?: number; itemType?: string } = {},
     lib?: LibraryRef,
   ): Promise<VersionsResult> {
     const { top, ...rest } = query;

@@ -3,6 +3,7 @@ import type { LibraryRef } from '../../api/web-client.js';
 import type { IndexBuildStatus, VersionBackend } from './backend.js';
 import { canonicalLibraryToken } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
+import { createOwnWordsSource, fetchChildVersions, type OwnWordsSource } from './own-words-source.js';
 import { DEFAULT_INDEX_MAX_ITEMS } from './limits.js';
 
 /**
@@ -64,6 +65,15 @@ export function progressLine(s: IndexBuildStatus): string {
 export function embedderNotice(s: IndexBuildStatus): string {
   if (s.embedderActive || s.embedderConfigured === 'off') return '';
   return ` Semantic ranking is OFF (embeddings=${s.embedderConfigured} requested but not active): ${s.embedderReason ?? 'unavailable'}`;
+}
+
+/**
+ * Sentence appended when the reader's own words were asked for and could not be read. Same
+ * reasoning as `fulltextNotice`: an index silently missing the one part of a library
+ * nobody else wrote looks exactly like one that holds it (#33).
+ */
+export function ownWordsNotice(s: IndexBuildStatus): string {
+  return s.ownWordsReason ? ` ${s.ownWordsReason}` : '';
 }
 
 /**
@@ -149,6 +159,7 @@ export function statusSummary(s: IndexBuildStatus): string {
     embedderNotice(s) +
     staleVectorsNotice(s) +
     fulltextNotice(s) +
+    ownWordsNotice(s) +
     truncationNotice(s) +
     persistNotice(s) +
     storageNotice(s) +
@@ -174,7 +185,12 @@ export function statusSummary(s: IndexBuildStatus): string {
       const ft = s.fulltextEnabled
         ? `, including attachment full text for ${s.fulltextItems} of them (${s.fulltextPassages} passages)`
         : '';
-      return `Index ready — ${s.documents} passages over ${s.items} items${ft} (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.${notice}`;
+      // Reported apart from the passage total because it answers a different question: how
+      // much of what is searchable is the reader's own writing rather than the library's.
+      const own = s.ownWordsItems
+        ? `, and the notes and annotations of ${s.ownWordsItems} of them (${s.ownWordsPassages} passages)`
+        : '';
+      return `Index ready — ${s.documents} passages over ${s.items} items${ft}${own} (embedder=${s.embedder}). Run zotero_semantic_search to search by meaning.${notice}`;
     }
     default:
       return `Index: ${s.documents} passages over ${s.items} items; embedder=${s.embedder}.${notice}`;
@@ -184,6 +200,11 @@ export function statusSummary(s: IndexBuildStatus): string {
 export interface BuildFulltextOptions {
   /** Index attachment full text as extra passages (defaults to ZOTEUS_INDEX_FULLTEXT). */
   fulltext?: boolean;
+  /**
+   * Index the library's child notes and PDF annotations as extra passages (defaults to
+   * ZOTEUS_INDEX_OWN_WORDS, on).
+   */
+  ownWords?: boolean;
   /** Cap on indexed full-text characters per item, 0 = no cap (defaults to config). */
   fulltextMaxChars?: number;
   /**
@@ -361,6 +382,7 @@ function crawlOptions(
   backend: VersionBackend,
 ) {
   const wantFulltext = opts.fulltext ?? ctx.config.indexFulltext;
+  const wantOwnWords = opts.ownWords ?? ctx.config.indexOwnWords;
   const maxChars = opts.fulltextMaxChars ?? ctx.config.indexFulltextMaxChars;
   let source: Promise<FulltextSource> | undefined;
   let opened: FulltextSource | undefined;
@@ -399,12 +421,35 @@ function crawlOptions(
         return { itemKeys: (await openSource()).itemsFor(keys), version };
       }
     : undefined;
+  /**
+   * The census behind the reader's own words, memoized exactly like the full-text source
+   * and for the same reason: a build asks it once per item and an update asks it once per
+   * refreshed item, and it must be crawled once for all of them.
+   */
+  let ownSource: Promise<OwnWordsSource> | undefined;
+  const openOwnWords = (): Promise<OwnWordsSource> =>
+    (ownSource ??= createOwnWordsSource(ctx, lib, { backend }).then((src) => {
+      if (src.unavailable) ctx.search.noteOwnWordsUnavailable(src.unavailable);
+      else ctx.logger.info(`Own words: ${src.notes} note(s) and ${src.annotations} annotation(s) over ${src.items} item(s).`);
+      return src;
+    }));
+  // The keys-only question is answered straight from the router, NOT through the census:
+  // that is what lets an update over a library nobody has annotated since cost one request
+  // rather than a crawl of every note in it (#33).
+  const ownWords = wantOwnWords
+    ? {
+        childVersions: () => fetchChildVersions(ctx, lib, backend),
+        itemsFor: async (keys: Iterable<string>) => (await openOwnWords()).itemsFor(keys),
+        textsFor: async (itemKey: string) => (await openOwnWords()).textsFor(itemKey),
+      }
+    : undefined;
   return {
     fulltextFor,
     fulltextKeys,
     fulltextFailures,
     fulltextVersion,
     fulltextCatchUp,
+    ...(ownWords ? { ownWords } : {}),
     ...(opts.note ? { note: opts.note } : {}),
     // Passages per embedding request, and the pause between requests: the dials an API
     // provider's per-request token cap and per-minute rate limit are tuned against.

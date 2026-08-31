@@ -59,6 +59,9 @@ can never time out the MCP client, even on very large libraries.
 - `limit` — optional max number of items to index. It lowers the configured cap for one
   build and can never raise it: the build stops at the lower of `limit` and
   `ZOTEUS_INDEX_MAX_ITEMS` (default 5000).
+- `own_words` — index your own child notes and PDF annotations (see
+  [Your own notes and annotations](#your-own-notes-and-annotations) below). Defaults to
+  `ZOTEUS_INDEX_OWN_WORDS` (on).
 - `fulltext` — also index the body text of each item's attachments (see
   [Full-text indexing](#full-text-indexing-opt-in) below). Defaults to
   `ZOTEUS_INDEX_FULLTEXT` (off).
@@ -238,6 +241,53 @@ With `ZOTEUS_EMBEDDINGS=openai` that is the difference between re-embedding the 
 library and embedding seven items: minutes and real API spend against seconds and
 almost none. Rebuild when the model changes, when you raise the cap, or when the index is
 new; update the rest of the time.
+
+## Your own notes and annotations
+
+The index covers the words **you** wrote, not only the ones you collected. Every child
+note, and every PDF annotation — its highlighted passage together with your comment on it —
+is indexed as an extra passage carrying the **parent item's** key:
+
+```jsonc
+// on by default; this is how you turn it off for one build
+{ "tool": "zotero_index", "action": "build", "own_words": false }
+```
+
+```bash
+# or for every build
+ZOTEUS_INDEX_OWN_WORDS=false
+```
+
+A hit whose snippet came from one is marked `source:"note"` or `source:"annotation"`, so
+you can tell your own objection from the abstract it was written against. Because the
+passages carry the item's key, an item with forty annotations is still **one** search
+result rather than forty: your own words extend what an item can be found by instead of
+crowding the page.
+
+This is on by default where full text is not, and the reason is cost. The whole corpus is
+one paged crawl of the library's child items (`itemType=note || annotation`, a page per
+hundred children, text included in the response) plus one batched lookup per fifty
+annotated attachments — an annotation names the attachment it sits on, never the item that
+attachment belongs to, so that hop is what attributes it. On a library of 280 items with
+606 notes and annotations that is a handful of requests, where the attachment crawl behind
+full text is orders of magnitude more. Notes are stored as HTML and indexed as text, so
+markup never reaches a snippet, and a standalone note is left to the metadata crawl that
+already indexes it.
+
+**`zotero_annotate` and search now agree.** Before this, Zoteus could write an annotation
+onto an attachment and then never find it again, on any query: the crawl asked for
+top-level items, and an annotation is not one.
+
+**Staying current costs one request.** Notes and annotations are ordinary items carrying
+ordinary versions in the library's own sequence, so `action:"update"` asks one keys-only
+question (`?format=versions&itemType=note || annotation`) and compares the answer against
+the note and annotation keys the index already holds. That finds all three shapes of
+change at once: an edit (a version past the stamp), an addition (a key the index has no
+passage for) and a **deletion** — the one no `?since=` can ever report, because deleting a
+note moves no version anywhere in Zotero. The crawl that reads note bodies is opened only
+when there is something to re-index, so an update over a library nobody has annotated
+since costs exactly that one request. An index built before this existed fills its gap on
+its first update, once, and says so in `updateNotice`.
 
 ## Full-text indexing (opt-in)
 

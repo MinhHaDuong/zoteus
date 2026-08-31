@@ -40,6 +40,12 @@ export interface ItemQuery {
   q?: string;
   qmode?: 'titleCreatorYear' | 'everything';
   itemType?: string;
+  /**
+   * Comma-separated item keys, at most 50 (both APIs). The one way to look items up in
+   * bulk without a request each: the search index resolves annotated attachments to their
+   * parent items this way.
+   */
+  itemKey?: string;
   tag?: string | string[];
   sort?: string;
   direction?: 'asc' | 'desc';
@@ -311,7 +317,7 @@ export class WebApiClient {
    */
   async itemVersions(
     lib: LibraryRef,
-    query: { since?: number; top?: boolean; limit?: number; start?: number } = {},
+    query: { since?: number; top?: boolean; limit?: number; start?: number; itemType?: string } = {},
   ): Promise<VersionsResult> {
     const { top, ...rest } = query;
     const { json, headers } = await this.getJson(
