@@ -597,26 +597,50 @@ with the index.
 ### Why it is not bundled
 
 `@huggingface/transformers` statically imports `onnxruntime-node`, whose prebuilt native
-binaries ship for every platform in one package. The full tree is **~384 MB installed**
-(211 MB onnxruntime-node + 130 MB onnxruntime-web + ~40 MB of `sharp`/tokenizers), against
-a ~35 MB bundle today. There is no WASM-only shortcut either: the package's Node entry
-point imports the native runtime unconditionally, so it cannot be pruned. Shipping it would
-mean five per-platform `.mcpb` files of 100 MB+ each, and users picking the right one.
+binaries ship for every platform in one package. The resolved tree is **~700 MB installed**
+(686 MB measured on Linux x64 against `@huggingface/transformers` 4.2.0; onnxruntime's
+per-platform binaries are the bulk of it, with `sharp` and the tokenizers behind them),
+against a ~35 MB bundle today. There is no WASM-only shortcut either: the package's Node
+entry point imports the native runtime unconditionally, so it cannot be pruned. Shipping it
+would mean five per-platform `.mcpb` files of 100 MB+ each, and users picking the right one.
 
 So the `.mcpb` bundle carries **keyword search out of the box**, and local vectors are an
-opt-in that lives outside the bundle:
+opt-in that lives outside the bundle, in a directory of its own:
 
 ```bash
-npm i -g @huggingface/transformers
-npm root -g            # copy this path
+mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps
+npm init -y
+npm i @huggingface/transformers
 ```
 
-Then set **`ZOTEUS_TRANSFORMERS_PATH`** to that path (in Claude Desktop: the extension's
-**"Local embeddings path"** setting) and restart. Because it lives outside the bundle it
-survives extension updates, which would wipe anything installed *into* the extension folder.
-The variable accepts the `npm root -g` directory, the package directory itself, or an npm
-prefix. It works for npm/Docker installs too, whenever the module lives somewhere the
-server cannot resolve on its own.
+Then set **`ZOTEUS_TRANSFORMERS_PATH`** to `~/.zoteus-deps/node_modules` (in Claude Desktop:
+the extension's **"Local embeddings path"** setting, which wants the absolute path, so
+`/home/you/.zoteus-deps/node_modules`) and restart.
+
+**Not `npm i -g`.** Claude Desktop does not run the server with the Node on your `PATH`. It
+runs it with its own built-in one, which its `main.log` says out loud:
+
+```
+Using UtilityProcess for extension Zoteus: appConfig.isUsingBuiltInNodeForMcp is true and built-in node is compatible
+[LocalMcpServerManager] Using built-in Node.js for MCP server: Zoteus
+```
+
+So under nvm (or any version manager) `npm root -g` names a directory belonging to a Node
+that never executes this server, holding onnxruntime binaries built for that other runtime:
+the path resolves nothing, or resolves something that throws on import. Switching or
+upgrading the Node version later breaks a path that used to work, silently. A standalone
+directory belongs to no version manager and survives both (#38).
+
+Living outside the bundle also means surviving extension updates, which wipe anything
+installed *into* the extension folder. The variable accepts a `node_modules` directory, the
+package directory itself, or an npm prefix whose modules live under `lib/node_modules`. It
+works for npm/Docker installs too, whenever the module lives somewhere the server cannot
+resolve on its own.
+
+If local embeddings still do not come up, the diagnosis is in
+`zotero_index action:"status"`: `embedderReason` names the directory that was searched, and
+a package that resolves but fails to load reports the file it loaded plus the Node version,
+platform and architecture it loaded it under, which is the ABI mismatch above spelled out.
 
 ### When vector ranking is off
 

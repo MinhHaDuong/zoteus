@@ -64,8 +64,8 @@ export class FakeEmbeddingProvider implements EmbeddingProvider {
 
 /**
  * Directories to resolve {@link TRANSFORMERS_MODULE} from when ZOTEUS_TRANSFORMERS_PATH is
- * set. Node's own walk-up covers the two common answers (`npm root -g`, or the package
- * directory itself, whose ancestors include that root); the `lib` candidate additionally
+ * set. Node's own walk-up covers the two common answers (a `node_modules` directory, or the
+ * package directory itself, whose ancestors include one); the `lib` candidate additionally
  * accepts an npm *prefix* such as `/usr`, where globals live in `/usr/lib/node_modules`.
  */
 function overrideRoots(dir: string): string[] {
@@ -78,11 +78,11 @@ function overrideRoots(dir: string): string[] {
  * null when the package is not reachable from this process.
  *
  * This is what makes the degradation reportable *before* a build: a bundled install
- * (.mcpb) resolves only from inside its own folder, which cannot carry the package (its
- * onnxruntime native binaries are ~380 MB across platforms; see docs/semantic-search.md),
- * so status can say so up front instead of silently indexing 0 vectors.
- * ZOTEUS_TRANSFORMERS_PATH is the escape hatch: it points at an install that lives
- * outside the bundle and therefore survives extension updates.
+ * (.mcpb) resolves only from inside its own folder, which cannot carry the package (the
+ * resolved tree is roughly 700 MB, onnxruntime's native binaries included; see
+ * docs/semantic-search.md), so status can say so up front instead of silently indexing 0
+ * vectors. ZOTEUS_TRANSFORMERS_PATH is the escape hatch: it points at an install that
+ * lives outside the bundle and therefore survives extension updates.
  */
 export function resolveTransformers(transformersPath?: string): string | null {
   const dir = transformersPath?.trim();
@@ -120,12 +120,19 @@ export function missingTransformersHint(config?: Pick<ZoteusConfig, 'dist'>): st
     `Otherwise set ZOTEUS_EMBEDDINGS=openai or gemini to embed through an API instead (your ` +
     `library text leaves the machine), or ZOTEUS_EMBEDDINGS=off to accept keyword-only search.`;
   if (bundled) {
+    // Deliberately NOT `npm i -g`. Claude Desktop runs the server with its own built-in
+    // Node, not the one on the user's PATH, so a global root under a version manager holds
+    // onnxruntime binaries built for a Node this process never executes, and an nvm switch
+    // later moves the directory out from under the setting (#38). A directory of its own,
+    // owned by nobody's version manager, is the install that keeps working.
     return (
       `${cause} Semantic ranking is off; keyword (BM25) search still works. Desktop-extension ` +
-      `bundles cannot ship it: it pulls in onnxruntime's native binaries (~380 MB across platforms). ` +
-      `To get on-device vectors, install it outside the bundle (\`npm i -g ${TRANSFORMERS_MODULE}\`) ` +
-      `and set the extension's "Local embeddings path" (ZOTEUS_TRANSFORMERS_PATH) to the directory ` +
-      `\`npm root -g\` prints; that survives extension updates. ${fallbacks}`
+      `bundles cannot ship it: the resolved dependency tree, onnxruntime's native binaries included, is ` +
+      `about 700 MB. Install it into a directory of its own, outside any Node version manager (the ` +
+      `desktop app runs this server with its own built-in Node, not the one on your PATH): ` +
+      `\`mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps && npm init -y && npm i ${TRANSFORMERS_MODULE}\`, ` +
+      `then set the extension's "Local embeddings path" (ZOTEUS_TRANSFORMERS_PATH) to that folder's ` +
+      `node_modules. It survives extension updates and Node version switches alike. ${fallbacks}`
     );
   }
   return (
