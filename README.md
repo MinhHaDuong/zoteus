@@ -1,10 +1,8 @@
 <div align="center">
 
-# ⚡ Zoteus
+# Zoteus
 
-### Your Zotero library, inside every AI conversation — with real citations, not hallucinations.
-
-The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https://modelcontextprotocol.io) client complete, **safe** access to your [Zotero](https://www.zotero.org) library — search papers, add by DOI, format bibliographies in ~2,800 styles, run semantic search over your library (metadata and abstracts, or full PDF text when you turn it on), pull exact passages from your PDFs, and ground every answer in a source you actually own. **Local-first. Private. One command.**
+Zoteus is an MCP server that gives Claude and other MCP clients access to a Zotero library: search, citations, adding items, safe writes, semantic search, and passages from PDFs.
 
 [![npm](https://img.shields.io/npm/v/@oscardvs/zoteus.svg?color=2ea44f)](https://www.npmjs.com/package/@oscardvs/zoteus)
 [![npm downloads](https://img.shields.io/npm/dm/@oscardvs/zoteus.svg)](https://www.npmjs.com/package/@oscardvs/zoteus)
@@ -12,8 +10,8 @@ The **everything Zotero MCP server**. Give Claude, Cursor, and any [MCP](https:/
 [![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-server-6E56CF.svg)](https://modelcontextprotocol.io)
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-listed-6E56CF.svg)](https://registry.modelcontextprotocol.io)
 
-<!-- TODO(launch): swap to the demo GIF once recorded → ![Zoteus demo — ask Claude to find papers in your Zotero library and cite them](https://zoteus.com/demo.gif) -->
-[![Zoteus — your Zotero library, inside every AI conversation](https://zoteus.com/og/home/image.png)](https://zoteus.com)
+<!-- TODO(launch): swap to the demo GIF once recorded: ![Zoteus demo: ask Claude to find papers in your Zotero library and cite them](https://zoteus.com/demo.gif) -->
+[![Zoteus: an MCP server for your Zotero library](https://zoteus.com/og/home/image.png)](https://zoteus.com)
 
 ```bash
 npx -y @oscardvs/zoteus
@@ -23,9 +21,13 @@ npx -y @oscardvs/zoteus
 
 ---
 
-## Install in 30 seconds
+## What it does
 
-For normal use there is **nothing to download or unzip from GitHub** — your AI app fetches Zoteus automatically when it first runs. New to this? Follow the no-code getting-started guide → [`docs/getting-started.md`](./docs/getting-started.md)
+Zoteus connects an MCP client such as Claude Desktop, Claude Code, or Cursor to your [Zotero](https://www.zotero.org) library. It exposes 30 tools, namespaced `zotero_*`, that search the library by keyword or by meaning, return passages from your PDFs with page locators, format bibliographies with citeproc-js in any CSL style, add items by DOI or arXiv id, and create, edit, tag, and organize items with reversible writes. When the Zotero desktop app is running, reads and personal-library writes go to it directly and need no cloud API key; the Zotero Web API v3 is the fallback for sync, group libraries, and for when the app is closed. Zoteus is written in TypeScript, runs on your machine, and is MIT licensed.
+
+## Install
+
+For normal use there is nothing to download from GitHub: your MCP client fetches Zoteus with `npx` the first time it runs. If you are new to MCP servers, start with [`docs/getting-started.md`](./docs/getting-started.md).
 
 | Client | Command |
 |---|---|
@@ -36,7 +38,7 @@ For normal use there is **nothing to download or unzip from GitHub** — your AI
 
 > **Updating a desktop-extension install:** manually installed extensions (`.mcpb`, or the older `.dxt`) do not auto-update. Zoteus checks GitHub releases once a day and tells you in-chat (via `zotero_whoami`) when a newer version exists; download the new `zoteus.mcpb` and reinstall it to upgrade. `npx` installs always run the latest published version.
 
-Add your cloud key for sync, group libraries, and writes without the desktop app (optional — reads *and* personal-library writes work key-free against a running Zotero):
+A cloud API key is optional. Add one for sync, group libraries, and writes when the desktop app is not running; reads and personal-library writes work without a key against a running Zotero.
 
 ```bash
 claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscardvs/zoteus
@@ -46,42 +48,27 @@ claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscar
 
 ---
 
-## Why Zoteus?
+## Features
 
-There are several Zotero MCP servers now. Zoteus is the one that does **everything** — and adds the parts everyone else skips. The difference that matters: **Zoteus treats your library as the source of truth, not a search index.** When you ask Claude to "draft a methods paragraph citing the five most relevant papers in my collection," it runs that against *your verified, already-curated references* — no invented citations, no Python stack, nothing leaves your machine.
-
-| | **Zoteus** | Other Zotero MCP servers | Web AI (Elicit/SciSpace) |
-|---|:---:|:---:|:---:|
-| Operates on **your own** library | ✅ | ✅ (varies) | ❌ (web-wide) |
-| Complete Web API v3 **+** desktop local API | ✅ | partial | n/a |
-| **Safe** transactional writes (reversible, gated) | ✅ | rare | ❌ |
-| CSL bibliographies (~2,800 styles) | ✅ | rare | ❌ |
-| Local hybrid semantic search + full-text PDF retrieval | ✅ | some (cloud) | varies |
-| No Python — TypeScript, one `npx` | ✅ | varies | n/a |
-| MCP Resources + Prompts + code-execution | ✅ | ❌ | n/a |
-| Local-first / private · Open-source (MIT) | ✅ | varies | ❌ |
-
-## What you can do
-
-- **Find anything in your own work.** *"Find papers in my library that argue against X"* — hybrid keyword + semantic search over your library's titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned **with the page number**. Your own notes and PDF annotations are indexed too, under the item they hang off, so *"where did I object to this?"* is a question search can answer. Turn on `ZOTEUS_INDEX_FULLTEXT` (or pass `fulltext:true` to `zotero_index`) and semantic search covers the **body of every PDF** too, so a claim that never made it into an abstract is still findable.
-- **Cite without hallucinating.** Zoteus surfaces *your* Zotero citation data and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style — it never invents a reference.
-- **Add a paper by identifier.** Drop in a DOI or arXiv id and Zoteus fetches the metadata and files it — works out of the box via built-in resolvers, no extra services needed (a Zotero translation-server extends this to ISBN/PMID/URLs; see [`docs/resolver.md`](./docs/resolver.md)).
-- **Write back, safely.** Create items, edit, tag, organize — versioned with optimistic-locking retries, reversible trash by default, permanent delete opt-in and confirmation-gated.
-- **Write straight to the desktop app.** Personal-library writes go to your running Zotero — **no cloud API key needed**. On Zotero 10+ that's the local API behind a key you grant once ("Always Allow"); on Zotero 9 and earlier, whose local API is read-only, it's the same connector protocol the browser extensions use. The cloud Web API is the fallback for group libraries and for when the app isn't running.
-- **Annotate PDFs and attach files.** `zotero_annotate` adds real highlights, underlines, and notes, the same objects the Zotero PDF reader creates. Quote the passage and it is located in the PDF and anchored to the exact lines it occupies, wrapping and hyphenation included, so highlighting takes no page coordinates. `zotero_attach_file` stores a local file or a URL as an attachment under any item.
-- **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, nearest heading, and a page locator, extracting the text on the fly when Zotero hasn't indexed the PDF or the EPUB, straight from the running desktop app or from Zotero's own storage folder, so a file added a minute ago is readable immediately. It also reads a PDF's table of contents (`outline:true`) and any page range on demand, so working through a 400-page book costs two small calls rather than one that returns the book.
-- **Follow the scholarship.** A scholarly-context graph over OpenAlex / Crossref / Semantic Scholar.
-- **Built for agents.** 30 consolidated, well-described tools (not 70 thin endpoint mirrors), `zotero_*`-namespaced, structured outputs, and a generated tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
+- **Search your own library.** Hybrid keyword and semantic search over titles, abstracts, creators, and tags, plus full-text keyword search inside your PDFs and notes, with the matching passage returned together with its page number. Your own notes and PDF annotations are indexed under the item they belong to, so "where did I object to this?" is a question search can answer. Set `ZOTEUS_INDEX_FULLTEXT` (or pass `fulltext:true` to `zotero_index`) and semantic search also covers the body of every PDF, so a claim that never made it into an abstract is still findable.
+- **Format citations.** Zoteus reads the citation data in your Zotero library and formats it with [citeproc-js](https://citeproc-js.readthedocs.io) in any [CSL](https://citationstyles.org) style from the CSL styles repository.
+- **Add a paper by identifier.** Pass a DOI or arXiv id and Zoteus fetches the metadata and files the item. This works out of the box through built-in resolvers; a Zotero translation-server extends it to ISBN, PMID, and URLs (see [`docs/resolver.md`](./docs/resolver.md)).
+- **Write back.** Create items, edit, tag, and organize. Writes are versioned with optimistic-locking retries, trash is reversible by default, and permanent deletion is opt-in and confirmation-gated.
+- **Write straight to the desktop app.** Personal-library writes go to your running Zotero, with no cloud API key. On Zotero 10+ this uses the local API behind a key you grant once ("Always Allow"); on Zotero 9 and earlier, whose local API is read-only, it uses the connector protocol the browser extensions use. The cloud Web API is the fallback for group libraries and for when the app is not running.
+- **Annotate PDFs and attach files.** `zotero_annotate` adds highlights, underlines, and notes, the same objects the Zotero PDF reader creates. Quote the passage and Zoteus locates it in the PDF and anchors the annotation to the lines it occupies, wrapping and hyphenation included, so no page coordinates are needed. `zotero_attach_file` stores a local file or a URL as an attachment under any item.
+- **Ground claims in the PDF.** `zotero_get_fulltext` returns the relevant passage with character offsets, the nearest heading, and a page locator. When Zotero has not indexed the PDF or EPUB, it extracts the text on the fly, from the running desktop app or from Zotero's own storage folder, so a file added a minute ago is readable immediately. It also returns a PDF's table of contents (`outline:true`) and any page range on demand, so working through a 400-page book costs a few small calls rather than one that returns the whole book.
+- **Follow the literature.** `zotero_scholar` looks up a paper's references, citing works, and related works through OpenAlex, with Crossref as a fallback, and can flag which of them are already in your library.
+- **Agent support.** 30 tools with structured outputs, MCP Resources and Prompts, and a generated tool tree for the [code-execution-with-MCP](https://www.anthropic.com/engineering/code-execution-with-mcp) pattern.
 
 ## How it works
 
-1. **Install** — one `npx` command (or the one-click `.mcpb`).
-2. **Connect** — just run the desktop app for key-free local access, or paste your Zotero API key.
-3. **Ask** — your AI can now search, cite, add, and organize your library.
+1. **Install** with one `npx` command, or the one-click `.mcpb`.
+2. **Connect** by running the desktop app for key-free local access, or by pasting your Zotero API key.
+3. **Ask.** Your MCP client can now search, cite, add to, and organize your library.
 
-Zoteus auto-detects your running Zotero desktop app and talks to it directly: its fast, key-free **local API** for reads (full PDFs, real saved-search results, the semantic-search index build), and the desktop app itself for personal-library writes (imports, annotations, attachments, trash). The cloud **Web API v3** is the fallback — and stays required for sync, group libraries, and writes when the app isn't running. Details: [`docs/writing.md`](./docs/writing.md).
+Zoteus detects a running Zotero desktop app and talks to it directly: the key-free local API for reads (full PDFs, saved-search results, the semantic-search index build), and the app itself for personal-library writes (imports, annotations, attachments, trash). The cloud Web API v3 is the fallback, and it is still required for sync, group libraries, and writes when the app is not running. Details: [`docs/writing.md`](./docs/writing.md).
 
-> **Semantic search — one-time setup.** The first `zotero_semantic_search` builds the library index automatically in the background (auto-build). On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until done. The build pages your library through the same local-first path as every other read, so **it needs no cloud API key while the desktop app is running**. That covers your personal library and, on Zotero 10+, any group library the app holds; a key is needed when the app is closed, and for a group the app does not hold.
+> **Semantic search setup.** The first `zotero_semantic_search` builds the library index in the background. On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until it is done. The build pages your library through the same local-first path as every other read, so it needs no cloud API key while the desktop app is running. That covers your personal library and, on Zotero 10+, any group library the app holds; a key is needed when the app is closed, and for a group the app does not hold.
 
 > **Vector ranking is opt-in.** Keyword (BM25) search works out of the box everywhere. On-device vectors need `@huggingface/transformers`, which the desktop-extension bundle cannot ship (the resolved dependency tree, onnxruntime's native binaries included, is about 700 MB): install it into a directory of its own (`mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps && npm init -y && npm i @huggingface/transformers`) and set `ZOTEUS_TRANSFORMERS_PATH` to `~/.zoteus-deps/node_modules`. Not `npm i -g`: Claude Desktop runs the server on its own built-in Node, so a global install under a version manager sits next to a Node the extension never executes. When vectors are unavailable Zoteus says so in `zotero_index` status, `zotero_whoami`, and `zotero_semantic_search` rather than quietly returning nothing. See [`docs/semantic-search.md`](./docs/semantic-search.md).
 
@@ -89,30 +76,30 @@ Zoteus auto-detects your running Zotero desktop app and talks to it directly: it
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ZOTERO_API_KEY` | — | Cloud auth (sync, groups, writes without the desktop app; optional otherwise) |
-| `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off` — use the Zotero desktop app (reads + personal-library writes) |
-| `ZOTEUS_LOCAL_API_KEY` | — | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
+| `ZOTERO_API_KEY` | none | Cloud auth (sync, groups, writes without the desktop app; optional otherwise) |
+| `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off`: use the Zotero desktop app (reads + personal-library writes) |
+| `ZOTEUS_LOCAL_API_KEY` | none | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_INDEX_OWN_WORDS` | `true` | Index your own child notes and PDF annotations as searchable passages |
 | `ZOTEUS_INDEX_FULLTEXT` | `false` | Index PDF body text for semantic search (opt-in; costly) |
 | `ZOTEUS_ALLOW_ELECTRON_FULLTEXT` | `false` | Let a full-text **build** run under Electron (Claude Desktop), where it currently kills the server process ([#37](https://github.com/oscardvs/zoteus/issues/37)). Build headlessly instead; `action:"update"` is never gated |
-| `ZOTEUS_INDEX_BACKEND` | `auto` | `auto\|sqlite\|memory` — where the search index lives. `auto` uses SQLite (FTS5) on Node 22.13+, which is what a large library needs |
-| `ZOTEUS_TRANSFORMERS_PATH` | — | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |
+| `ZOTEUS_INDEX_BACKEND` | `auto` | `auto\|sqlite\|memory`: where the search index lives. `auto` uses SQLite (FTS5) on Node 22.13+, which is what a large library needs |
+| `ZOTEUS_TRANSFORMERS_PATH` | none | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
 
-Full table in [`docs/configuration.md`](./docs/configuration.md). Running a shared/remote instance? See [`docs/remote-oauth.md`](./docs/remote-oauth.md) (self-host the OAuth remote on loopback or behind your own proxy).
+Full table in [`docs/configuration.md`](./docs/configuration.md). To run a shared or remote instance, see [`docs/remote-oauth.md`](./docs/remote-oauth.md) (self-host the OAuth remote on loopback or behind your own proxy).
 
 ## Documentation
 
-📚 **[zoteus.com/docs](https://zoteus.com/docs)** · [Getting started](./docs/getting-started.md) · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md)
+**[zoteus.com/docs](https://zoteus.com/docs)** · [Getting started](./docs/getting-started.md) · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md)
 
-## Privacy Policy
+## Privacy
 
 Zoteus runs locally, collects nothing, and has no telemetry. Your library data flows only between your machine and the services you configure (Zotero, and optionally scholarly-graph or embedding providers), directly and under your own keys. Full policy: [`PRIVACY.md`](./PRIVACY.md).
 
 ## Contributing
 
-Contributions welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md). MIT licensed.
+Contributions are welcome; see [`CONTRIBUTING.md`](./CONTRIBUTING.md). Zoteus is MIT licensed.
 
 ## Acknowledgements
 

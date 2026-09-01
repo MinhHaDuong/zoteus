@@ -1,10 +1,10 @@
 {
   "manifest_version": "0.3",
   "name": "zoteus",
-  "display_name": "Zoteus — Zotero MCP",
+  "display_name": "Zoteus: Zotero MCP",
   "version": "1.12.0",
-  "description": "The everything Zotero MCP server: search, safe writes, citations, semantic search, and a scholarly-context graph for your Zotero library.",
-  "long_description": "Zoteus gives Claude complete, safe access to your Zotero library via the Web API v3 and the desktop local API — items, collections, tags, attachments, full-text, sync, groups, add-by-DOI/ISBN/PMID/arXiv, CSL bibliography formatting, hybrid semantic search, and an OpenAlex/Crossref scholarly graph.",
+  "description": "MCP server that gives Claude and other MCP clients access to a Zotero library: search, citations, adding items, safe writes, semantic search, and PDF passages.",
+  "long_description": "Zoteus gives Claude complete, safe access to your Zotero library via the Web API v3 and the desktop local API: items, collections, tags, attachments, full-text, sync, groups, add-by-DOI/ISBN/PMID/arXiv, CSL bibliography formatting, hybrid semantic search, and an OpenAlex/Crossref scholarly graph.",
   "author": {
     "name": "Oscar Devos",
     "url": "https://github.com/oscardvs"
@@ -58,7 +58,7 @@
     "embeddings": {
       "type": "string",
       "title": "Semantic-search embeddings",
-      "description": "Embedding provider for semantic search: local (default, on-device model) | openai | gemini | off (keyword-only index — fastest to build, useful on slow machines).",
+      "description": "Embedding provider for semantic search: local (default, on-device model) | openai | gemini | off (keyword-only index: fastest to build, useful on slow machines).",
       "default": "local",
       "required": false
     },
