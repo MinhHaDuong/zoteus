@@ -144,7 +144,11 @@ describe.each(backends)('accent folding (%s backend)', (backend) => {
     await index.close();
   });
 
-  it('still answers [] rather than throwing when nothing survives tokenization', async () => {
+  it('still answers [] rather than throwing when nothing survives tokenization or pruning', async () => {
+    // Two different emptinesses, and both must stay empty. `!!!` survives neither the
+    // token class nor anything after it; `the a an of` now survives tokenization — the
+    // list moved out of it — and is emptied one step later by the query-side prune, which
+    // deliberately does NOT fall back when nothing at all is left. See query-terms.ts.
     const index = await oneDoc('un élève très appliqué');
     expect(await hits(index, '!!! ??? ***')).toEqual([]);
     expect(await hits(index, 'the a an of')).toEqual([]);
@@ -187,8 +191,11 @@ describe('tokenize', () => {
     expect(tokenize('日本語の研究')).toEqual(['日本語の研究']);
   });
 
-  it('still drops stopwords and one-character tokens', () => {
-    expect(tokenize('the a of neural x networks')).toEqual(['neural', 'networks']);
+  it('drops one-character tokens, and nothing else', () => {
+    // The stopword list moved to the query side (`query-terms.ts`), so this function is
+    // now the document tokenizer without exception: what it returns is what gets indexed,
+    // and a term that is never indexed cannot be searched for even on purpose.
+    expect(tokenize('the a of neural x networks')).toEqual(['the', 'of', 'neural', 'networks']);
   });
 });
 
