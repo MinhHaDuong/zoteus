@@ -1358,6 +1358,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * FTS5's bm25 — a rare accented spelling stays rare.
    */
   private expandTerm(term: string): string {
+    // ZOTEUS_ACCENT_EXPANSION=false opts into strict as-typed exactness. Only this query
+    // step is gated: the index, the migration and the variants map are the same either
+    // way, so flipping the flag never needs a rebuild.
+    if (!(this.opts.accentExpansion ?? true)) return ftsTerm(term);
     if (accentKey(term) !== term) return ftsTerm(term);
     const rows = this.stmts.variantsFor.all(term) as Array<{ term: string; df: number }>;
     const variants = rows.filter((v) => v.term !== term);

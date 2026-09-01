@@ -81,16 +81,19 @@ export class BM25Index {
     return true;
   }
 
-  search(query: string, topK = 10): BM25Hit[] {
+  search(query: string, topK = 10, accentExpansion = true): BM25Hit[] {
     if (this.docs.size === 0) return [];
     const pruned = pruneTerms([...new Set(tokenize(query))], isStopword);
     // The same asymmetric, dominance-gated expansion as the SQLite backend's
     // `expandTerm` (the direction and the gate are explained there): an unaccented term
     // also scores the accented spellings the vocabulary holds — but only when those
     // spellings outweigh the typed one in this corpus. An accented term runs as typed.
+    // `accentExpansion` is a query-time argument, not index state, because that is all
+    // it gates: with it off (ZOTEUS_ACCENT_EXPANSION=false) every term runs as typed.
     const qTerms = [
       ...new Set(
         pruned.flatMap((t) => {
+          if (!accentExpansion) return [t];
           if (accentKey(t) !== t) return [t];
           const vs = [...(this.variants.get(t) ?? [])];
           if (!vs.length) return [t];

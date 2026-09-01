@@ -352,6 +352,34 @@ describe('codepoints unicode61 does not fold the way JavaScript would', () => {
   });
 });
 
+describe('ZOTEUS_ACCENT_EXPANSION gates the query step only', () => {
+  // The flag reaches both backends through SearchIndexOptions.accentExpansion, the same
+  // road ZOTEUS_INDEX_ANN travels; config parsing is pinned in tests/config.test.ts.
+  const docs = [
+    { key: 'V1', text: 'năm 2020 phát triển bền vững' },
+    { key: 'V2', text: 'năm 2021 chính sách năng lượng' },
+    { key: 'EN', text: 'nam river basin hydrology study' },
+  ];
+
+  it.each(backends)('on (the default): the unaccented query reaches the accented documents (%s)', async (backend) => {
+    const index = await createSearchIndex({ embedder: null, logger: silentLogger, backend, jsonPath: '', accentExpansion: true });
+    await index.build(docs.map((d) => ({ key: d.key, data: { itemType: 'book', title: 'F', abstractNote: d.text } })));
+    expect((await hits(index, 'nam')).sort()).toEqual(['EN', 'V1', 'V2']);
+    await index.close();
+  });
+
+  it.each(backends)('off: every query runs strictly as typed, and accented queries stay exact (%s)', async (backend) => {
+    const index = await createSearchIndex({ embedder: null, logger: silentLogger, backend, jsonPath: '', accentExpansion: false });
+    await index.build(docs.map((d) => ({ key: d.key, data: { itemType: 'book', title: 'F', abstractNote: d.text } })));
+    // The same corpus the on-case expands over: with the flag off, the unaccented query
+    // no longer reaches the accented documents…
+    expect(await hits(index, 'nam')).toEqual(['EN']);
+    // …and the accented direction is untouched by the flag — exact, as always.
+    expect((await hits(index, 'năm')).sort()).toEqual(['V1', 'V2']);
+    await index.close();
+  });
+});
+
 describe('the expansion group is bounded', () => {
   it.each(backends)('a key seeded with more spellings than the cap expands to the cap, best first (%s)', async (backend) => {
     // A document can mint accented spellings at will (OCR does it by accident, an

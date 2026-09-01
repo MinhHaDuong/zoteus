@@ -113,6 +113,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     backend: config.indexBackend,
     jsonPath: searchIndexPath,
     annEnabled: config.indexAnn,
+    accentExpansion: config.accentExpansion,
     annOversample: config.indexAnnOversample,
     annMinCandidates: config.indexAnnMinCandidates,
   };

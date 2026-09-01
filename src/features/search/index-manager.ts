@@ -2087,7 +2087,7 @@ export class MemorySearchIndex extends SearchIndexBase {
   }
 
   protected keywordSearch(q: string, topK: number): RankedId[] {
-    return this.bm25.search(q, topK);
+    return this.bm25.search(q, topK, this.opts.accentExpansion ?? true);
   }
 
   protected vectorSearch(query: number[], topK: number): RankedId[] {

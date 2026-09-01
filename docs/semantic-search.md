@@ -492,6 +492,11 @@ from its own vocabulary. Because nothing extra is indexed, document length, term
 frequency and idf are what the text says they are, and ranking is untouched for every
 query that needs no expansion.
 
+Expansion is optional (`ZOTEUS_ACCENT_EXPANSION`, on by default): it compensates the
+recall that keeping diacritics in the index removed for unaccented queries, and setting
+it to `false` opts into strict as-typed exactness — a query-time switch only, so flipping
+it never needs a rebuild.
+
 Expansion is **dominance-gated**: a term expands only when the accented spellings
 outweigh the typed one in this library (by document frequency, compared at derivation
 time). `theorie` expands because the library overwhelmingly writes `théorie`; `trong`
