@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { ActivityGate } from '../../src/features/search/conductor/activity.js';
+import { Conductor } from '../../src/features/search/conductor/conductor.js';
 import { EXTRACTOR_ID } from '../../src/features/search/conductor/document-stream.js';
 import { ExtractStage } from '../../src/features/search/conductor/extract-stage.js';
-import { ExtractWorker } from '../../src/features/search/conductor/extract-worker.js';
+import { ExtractWorker, ExtractWorkerControl } from '../../src/features/search/conductor/extract-worker.js';
 import { Ledger } from '../../src/features/search/conductor/ledger.js';
 import { CONDUCTOR_LEASE } from '../../src/features/search/conductor/lease.js';
 import { leaseHolderReader, WorkerOrphanGuard } from '../../src/features/search/conductor/orphan.js';
@@ -511,6 +512,134 @@ describeSqlite('extract worker: foreground preemption', () => {
     // a slow trickle of queries would otherwise pause indexing indefinitely.
     expect(report.totalYieldMs).toBeLessThanOrEqual(2_000);
     expect(report.documents).toBe(3);
+    h.ledger.close();
+  });
+});
+
+// ------------------------------------------------------------ run to drain
+
+describeSqlite('extract worker: spawned on queue work, drains, gone', () => {
+  function queue(h: Harness, i: number): void {
+    stageAttachment(h, {
+      item: `ITEM${String(i).padStart(4, '0')}`,
+      attachment: `ATTA${String(i).padStart(4, '0')}`,
+      dateAdded: `2022-01-${String(i).padStart(2, '0')}T00:00:00Z`,
+      text: `Text ${i}`,
+    });
+  }
+
+  function conductorWith(h: Harness): { conductor: Conductor; spawns: ExtractWorkerControl[] } {
+    const spawns: ExtractWorkerControl[] = [];
+    const conductor = new Conductor({
+      ledger: h.ledger,
+      clock: h.clock,
+      holder: 'p0-one',
+      pipeline: {
+        hasWork: () => h.ledger.nextExtractOrder({ lib: h.lib }) !== undefined,
+        spawn: () => {
+          const control = new ExtractWorkerControl(worker(h));
+          spawns.push(control);
+          return control;
+        },
+      },
+    });
+    return { conductor, spawns };
+  }
+
+  it('starts one on an idle pass with work, and none on an idle pass without', async () => {
+    const h = ledgerHarness();
+    const { conductor, spawns } = conductorWith(h);
+
+    const empty = await conductor.poll();
+    expect(empty.role).toBe('conductor');
+    // Steady state contains no pipeline worker at all: with nothing queued, none is started.
+    expect(empty.workerSpawned).toBeUndefined();
+    expect(spawns).toHaveLength(0);
+
+    queue(h, 1);
+    queue(h, 2);
+    const busy = await conductor.poll();
+    expect(busy.workerSpawned).toBe(true);
+    expect(spawns).toHaveLength(1);
+
+    // It drains and is gone; the next pass over an empty queue starts nothing.
+    const report = await spawns[0]!.finished;
+    expect(report.stopped).toBe('drained');
+    expect(report.documents).toBe(2);
+    expect(spawns[0]!.alive()).toBe(false);
+
+    const after = await conductor.poll();
+    expect(after.workerSpawned).toBeUndefined();
+    expect(after.workerAlive).toBe(false);
+    expect(spawns).toHaveLength(1);
+    h.ledger.close();
+  });
+
+  it('never runs two: a second pass with work still queued does not start another', async () => {
+    // The bound §5.2.5 states is one worker per P0, and the queue is refilled under a live
+    // one here precisely so the "there is work" branch is taken while a worker exists — the
+    // arm that separates "one at a time" from "one per pass with work".
+    //
+    // A stub rather than a real drain, because liveness is the whole subject: a real one
+    // finishes on whichever microtask it happens to finish on, so the test would be asking
+    // the conductor a question whose answer the scheduler had already changed.
+    const h = ledgerHarness();
+    const spawns: Array<{ alive: boolean; killed?: string }> = [];
+    const conductor = new Conductor({
+      ledger: h.ledger,
+      clock: h.clock,
+      holder: 'p0-one',
+      pipeline: {
+        hasWork: () => h.ledger.nextExtractOrder({ lib: h.lib }) !== undefined,
+        spawn: () => {
+          const state = { alive: true } as { alive: boolean; killed?: string };
+          spawns.push(state);
+          return {
+            kill: (reason: string): void => {
+              state.killed = reason;
+              state.alive = false;
+            },
+            alive: () => state.alive,
+          };
+        },
+      },
+    });
+
+    queue(h, 1);
+    expect((await conductor.poll()).workerSpawned).toBe(true);
+    queue(h, 2);
+    expect((await conductor.poll()).workerSpawned).toBeUndefined();
+    expect(spawns).toHaveLength(1);
+
+    // And the deposition ordering tranche 2 built the call site for now has something
+    // behind it: standing down kills the live worker rather than leaving it to expire.
+    conductor.standDown();
+    expect(spawns[0]!.killed).toBe('standing down');
+    // And a P0 that has stood down is a follower: it starts nothing, however much work is
+    // queued, because the successor's worker is the one that should be draining it.
+    expect((await conductor.poll()).role).toBe('follower');
+    expect(spawns).toHaveLength(1);
+    h.ledger.close();
+  });
+
+  it('a killed worker stops at the next document, leaving the rest queued', async () => {
+    // What `ExtractWorkerControl.kill` does to a running drain, driven from inside the run
+    // so it lands at a known point rather than at whichever one the scheduler picks.
+    const h = ledgerHarness();
+    for (let i = 1; i <= 5; i++) queue(h, i);
+    const w = worker(h);
+    const control = new ExtractWorkerControl(w);
+    w.onDocument = (_doc, seen): void => {
+      if (seen === 2) control.kill('deposed');
+    };
+
+    const report = await control.finished;
+    expect(report.stopped).toBe('killed');
+    expect(report.orphanReason).toBe('deposed');
+    expect(report.documents).toBe(2);
+    expect(control.alive()).toBe(false);
+    // Nothing is lost, exactly as on an orphaning: the rest are still owed.
+    expect(h.ledger.pending(h.lib).length).toBe(3);
     h.ledger.close();
   });
 });

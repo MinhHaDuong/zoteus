@@ -5,7 +5,7 @@ import type { DocumentSource, DocumentWindow, StreamedDocument } from './documen
 import { streamFullText } from './document-stream.js';
 import type { ExtractAssignment, ExtractDispatcher } from './extract-stage.js';
 import { FetchPacer } from './fetch-pacer.js';
-import type { WorkerOrphanGuard } from './orphan.js';
+import type { WorkerControl, WorkerOrphanGuard } from './orphan.js';
 
 /**
  * The first pipeline worker: sequential extract, run to drain, exit (SPEC.md §5.2.5).
@@ -33,11 +33,11 @@ import type { WorkerOrphanGuard } from './orphan.js';
  * a check scheduled in this process fires then.
  */
 
-export type DrainStop = 'drained' | 'orphaned';
+export type DrainStop = 'drained' | 'orphaned' | 'killed';
 
 export interface ExtractDrainReport {
   stopped: DrainStop;
-  /** Which repair noticed, when `stopped` is `orphaned`. */
+  /** Which repair noticed, when `stopped` is `orphaned`; the caller's reason when `killed`. */
   orphanReason?: string;
   documents: number;
   windows: number;
@@ -76,6 +76,7 @@ export class ExtractWorker {
   private readonly activity?: ActivityGate;
   private readonly guard?: WorkerOrphanGuard;
   private readonly windowChars?: number;
+  private killedFor?: string;
 
   constructor(opts: ExtractWorkerOptions) {
     this.dispatcher = opts.dispatcher;
@@ -92,6 +93,22 @@ export class ExtractWorker {
     return this.pacer.report();
   }
 
+  /**
+   * Stand down at the next document boundary.
+   *
+   * A boundary and not sooner, because the whole-document GET has none inside it (§5.2.4):
+   * the honest grain here is the document, and an in-flight one is abandoned by the process
+   * dying rather than by a flag it would have to check inside a decode loop. Idempotent —
+   * deposition and shutdown both reach it, and the first reason given is the one kept.
+   */
+  kill(reason: string): void {
+    this.killedFor ??= reason;
+  }
+
+  get alive(): boolean {
+    return this.killedFor === undefined;
+  }
+
   async drain(): Promise<ExtractDrainReport> {
     let documents = 0;
     let windows = 0;
@@ -100,6 +117,9 @@ export class ExtractWorker {
     let failures = 0;
 
     for (;;) {
+      if (this.killedFor !== undefined) {
+        return this.report('killed', { documents, windows, chars, emptyDocuments, failures }, this.killedFor);
+      }
       const orphan = this.orphaned();
       if (orphan) return this.report('orphaned', { documents, windows, chars, emptyDocuments, failures }, orphan);
 
@@ -190,6 +210,70 @@ export class ExtractWorker {
       totalYieldMs: this.activity?.totalYieldMs ?? 0,
     };
   }
+}
+
+/**
+ * The conductor's handle on the one worker it owns (`orphan.ts`'s `WorkerControl`), over a
+ * worker that runs in this process.
+ *
+ * Tranche 2 built the call site — a deposed P0 kills its worker before anything else — with
+ * nothing behind it, deliberately: what it owed was the ordering, not an implementation.
+ * This is the implementation, and it is honest about which half it is. The **lifecycle** is
+ * real: spawned when the queues hold work, run to drain, gone when the drain ends, killable
+ * at any document boundary. The **process boundary** is not. In the running server the
+ * worker is a separate process and windows cross a pipe; there is nothing on the far side of
+ * that pipe to forward them to until the segmenter exists (§5.2.2, tranche 4), and a pipe
+ * protocol written against no consumer is machinery that claims the design has been built.
+ * `ExtractDispatcher` is where that boundary falls — what crosses it is already an
+ * assignment and a result, which is what the pipe will carry.
+ */
+export class ExtractWorkerControl implements WorkerControl {
+  /** Resolves when the drain ends, however it ended. Never rejects. */
+  readonly finished: Promise<ExtractDrainReport>;
+
+  private readonly worker: ExtractWorker;
+  private done = false;
+
+  constructor(worker: ExtractWorker) {
+    this.worker = worker;
+    this.finished = worker
+      .drain()
+      .catch((e: unknown) => failedReport(e))
+      .then((report) => {
+        this.done = true;
+        return report;
+      });
+  }
+
+  kill(reason: string): void {
+    this.worker.kill(reason);
+  }
+
+  alive(): boolean {
+    return !this.done && this.worker.alive;
+  }
+}
+
+/**
+ * A drain that threw is reported, never rethrown.
+ *
+ * The conductor polls this handle for liveness; a rejected promise nobody awaited would take
+ * the server down over a worker whose whole design contract is that killing it is cheap.
+ */
+function failedReport(e: unknown): ExtractDrainReport {
+  return {
+    stopped: 'killed',
+    orphanReason: e instanceof Error ? e.message : String(e),
+    documents: 0,
+    windows: 0,
+    chars: 0,
+    emptyDocuments: 0,
+    failures: 1,
+    delayedFetches: 0,
+    totalDelayMs: 0,
+    activityYields: 0,
+    totalYieldMs: 0,
+  };
 }
 
 /** The one real timer in the tranche, and it belongs to the running server, not the design. */

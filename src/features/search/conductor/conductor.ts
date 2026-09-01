@@ -31,6 +31,19 @@ import type { ReconcileTick, TickReport } from './reconcile-tick.js';
  * is due-ness arithmetic rather than an assumption about when the last pass ran.
  */
 
+/**
+ * The two questions a run-to-drain worker needs answered, and nothing about how.
+ *
+ * `hasWork` is a ledger read the conductor is already entitled to make; `spawn` is the
+ * process-shaped half, which is why it is a seam rather than a call — a suite hands over an
+ * in-process worker and the running server hands over a child process, and the ordering
+ * under test is the same either way.
+ */
+export interface WorkerPipeline {
+  hasWork(): boolean;
+  spawn(): WorkerControl;
+}
+
 export interface ConductorOptions {
   ledger: Ledger;
   clock?: Clock;
@@ -38,6 +51,14 @@ export interface ConductorOptions {
   tick?: ReconcileTick;
   /** This P0's one pipeline worker, when it has spawned one. Tranche 3 supplies it. */
   worker?: WorkerControl;
+  /**
+   * How this P0 gets a worker: whether there is anything to do, and how to start one.
+   *
+   * Absent in a P0 built before the pipeline is wired, exactly as `tick` is. Present, it
+   * makes the worker run-to-drain (§5.2.5): spawned when the ledger queues hold work, gone
+   * when it has drained them, so steady state contains no pipeline worker at all.
+   */
+  pipeline?: WorkerPipeline;
   holder?: string;
   cadenceMs?: number;
   ttlMs?: number;
@@ -52,6 +73,9 @@ export interface ConductorPollReport {
   election?: ElectionResult;
   /** Set when this pass killed the worker, with the reason it gave. */
   workerKilled?: string;
+  /** Whether this pass started a worker, and whether one is running now. */
+  workerSpawned?: boolean;
+  workerAlive: boolean;
   /** Empty for a follower, and for a conductor with nothing due. */
   ticks: TickReport[];
 }
@@ -61,15 +85,18 @@ export class Conductor {
   private readonly ledger: Ledger;
   private readonly clock: Clock;
   private readonly tick?: ReconcileTick;
+  private readonly pipeline?: WorkerPipeline;
   private readonly listLibraries: () => number[];
   private worker?: WorkerControl;
   /** Set by the deposition callback, read by the pass that caused it. */
   private killedThisPass?: string;
+  private spawnedThisPass?: boolean;
 
   constructor(opts: ConductorOptions) {
     this.ledger = opts.ledger;
     this.clock = opts.clock ?? systemClock;
     this.tick = opts.tick;
+    this.pipeline = opts.pipeline;
     this.worker = opts.worker;
     this.listLibraries = opts.libraries ?? ((): number[] => this.ledger.libraries().map((l) => l.lib));
     this.election = new ConductorElection({
@@ -101,11 +128,19 @@ export class Conductor {
    */
   async poll(): Promise<ConductorPollReport> {
     this.killedThisPass = undefined;
+    this.spawnedThisPass = undefined;
     const election = this.election.checkIfDue();
     if (!this.election.isConductor()) {
       return this.report(election);
     }
-    return this.report(election, await this.runTicks());
+    const ticks = await this.runTicks();
+    // After the tick, not before: the tick is what writes the work orders, so a spawn
+    // decided on the pre-tick queue would idle through the cadence that just found
+    // something to do. A worker that has drained is simply gone, and the next pass with
+    // work in the queue starts another — which is what run-to-drain means.
+    this.reapWorker();
+    this.maybeSpawnWorker();
+    return this.report(election, ticks);
   }
 
   /**
@@ -138,6 +173,21 @@ export class Conductor {
     return reports;
   }
 
+  /** Drop a handle whose drain has ended, so the next pass can start a fresh one. */
+  private reapWorker(): void {
+    if (this.worker && !this.worker.alive()) this.worker = undefined;
+  }
+
+  private maybeSpawnWorker(): void {
+    if (!this.pipeline || this.worker) return;
+    if (!this.pipeline.hasWork()) return;
+    // The bound is one worker per P0, and this is the only place that creates one: the
+    // `this.worker` guard above is what enforces it, which is why the check and the spawn
+    // are not separated by an await.
+    this.worker = this.pipeline.spawn();
+    this.spawnedThisPass = true;
+  }
+
   private killWorker(reason: string): void {
     if (!this.worker) return;
     this.worker.kill(reason);
@@ -150,6 +200,8 @@ export class Conductor {
       role: this.election.role,
       election,
       workerKilled: this.killedThisPass,
+      ...(this.spawnedThisPass ? { workerSpawned: true } : {}),
+      workerAlive: this.worker?.alive() ?? false,
       ticks,
     };
   }
