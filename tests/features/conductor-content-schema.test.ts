@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
+import { loadConfig } from '../../src/config.js';
 import { createSearchIndex, nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { Ledger, LEDGER_SCHEMA_VERSION } from '../../src/features/search/conductor/ledger.js';
 import { conductorLedgerPath, openConductorLedger } from '../../src/features/search/conductor/store.js';
@@ -509,6 +510,34 @@ describeSqlite('v2 content schema: the production file path', () => {
     expect(existsSync(join(dir, 'search-index-v2.sqlite'))).toBe(true);
     expect(ledger.autoVacuumIncremental).toBe(true);
     ledger.close();
+  });
+
+  it('creates the data directory if it does not exist yet', () => {
+    const dir = join(tmpDir('v2-prod-mkdir'), 'not', 'created', 'yet');
+    const ledger = openConductorLedger({ dataDir: dir });
+    expect(existsSync(join(dir, 'search-index-v2.sqlite'))).toBe(true);
+    ledger.close();
+  });
+
+  it('is opt-in, and off by default', () => {
+    // Off by default is the decision, not an oversight: nothing on the query path reads
+    // v2 yet, so a server that opened it unconditionally would put a new file in every
+    // user's data directory in exchange for nothing.
+    expect(loadConfig({} as NodeJS.ProcessEnv).conductor).toBe(false);
+    expect(loadConfig({ ZOTEUS_CONDUCTOR: 'true' } as NodeJS.ProcessEnv).conductor).toBe(true);
+  });
+
+  it('is opened from server startup, not only from a test fixture', () => {
+    // Read from the source rather than driven through `buildContext`, which probes the
+    // desktop app and the cloud key before it reaches this line. What is being pinned is
+    // that a production call site exists at all — the behaviour of the call itself is
+    // covered by the cases above, which go through exactly the same function.
+    const server = readFileSync(new URL('../../src/server.ts', import.meta.url), 'utf8');
+    expect(server).toMatch(/openConductorLedger\(/);
+    expect(server).toMatch(/config\.conductor/);
+    // And released on shutdown: an unclosed handle leaves the write-ahead log
+    // uncheckpointed for the next startup to deal with.
+    expect(server).toMatch(/conductorLedger\?\.close\(\)/);
   });
 });
 

@@ -13,6 +13,7 @@ import type { Logger } from '../lib/logger.js';
 import type { StyleResolver } from '../features/citation/styles.js';
 import type { TranslationServerClient } from '../features/citation/translation-server.js';
 import type { SearchIndex } from '../features/search/backend.js';
+import type { Ledger } from '../features/search/conductor/ledger.js';
 import type { ScholarGraph } from '../features/scholar/graph.js';
 import type { RateLimitedFetcher } from '../api/http.js';
 import type { UpdateChecker } from '../lib/update-check.js';
@@ -32,6 +33,15 @@ export interface ToolContext {
   styles: StyleResolver;
   translation: TranslationServerClient;
   search: SearchIndex;
+  /**
+   * The v2 conductor store, when `ZOTEUS_CONDUCTOR` opened one (SPEC.md §5.2.2).
+   *
+   * Separate from `search` on purpose and for as long as it takes: v2 is a different file
+   * with a different schema, being built tranche by tranche, and nothing on the query path
+   * reads it. It is held here so it is opened once and closed on shutdown like any other
+   * store, not so tools can reach into it.
+   */
+  conductorLedger?: Ledger;
   scholar: ScholarGraph;
   /** Shared rate-limited fetcher (used by built-in import resolution). */
   fetcher: RateLimitedFetcher;

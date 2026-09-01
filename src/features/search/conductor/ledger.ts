@@ -84,7 +84,12 @@ export interface EntryInput {
   pageEstKind?: string;
 }
 
-export interface EntryRow extends EntryInput {
+/**
+ * A stored entry. Not `extends EntryInput`: what is *absent* on the way in comes back as
+ * an explicit `null`, and conflating the two is how a caller ends up writing `undefined`
+ * into a column and reading it as the string "undefined".
+ */
+export interface EntryRow extends Omit<EntryInput, 'attachmentKey' | 'heading' | 'path' | 'pageEst' | 'pageEstKind'> {
   eid: number;
   attachmentKey: string | null;
   heading: string | null;
