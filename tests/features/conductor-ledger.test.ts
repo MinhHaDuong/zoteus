@@ -229,6 +229,44 @@ describeSqlite('conductor ledger: completion is owned', () => {
     ledger.close();
   });
 
+  it('refuses a completion for work the row has since been re-derived from', () => {
+    // The half a holder check cannot see. `enqueue` deduplicates against pending AND
+    // claimed rows and coalesces the newer order into the one it finds, so `signal` moves
+    // under a live claim while the worker is still fetching the version it was handed.
+    // The tick stamps the full-text census in the same breath, so a completion that retired
+    // that row would lose version 2 for good — nothing re-derives an order the census
+    // already accounts for.
+    const { ledger, clock, wid } = oneOrder();
+    const order = (signal: string): number =>
+      ledger.enqueue({
+        lib: ledger.libraries()[0]!.lib,
+        class: 'metadata',
+        op: 'index',
+        itemKey: 'REC001',
+        dateAdded: '2026-01-01T00:00:00Z',
+        signal,
+      });
+    expect(order('fulltext:1|item:1')).toBe(wid);
+
+    const claim = ledger.claimTicket(wid, 'worker-a', 'fulltext:1|item:1', 20_000)!;
+    expect(claim.signal).toBe('fulltext:1|item:1');
+
+    // The tick runs again while the fetch is in flight and finds the row still claimed.
+    expect(order('fulltext:2|item:3')).toBe(wid);
+    expect(ledger.row(wid)?.signal).toBe('fulltext:2|item:3');
+    expect(ledger.row(wid)?.claimedInput).toBe('fulltext:1|item:1');
+
+    expect(ledger.markDone(claim)).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('claimed');
+
+    // The row is recovered the ordinary way, and the retry is against the newer signal.
+    clock.advance(20_001);
+    expect(ledger.releaseExpiredClaims()).toBe(1);
+    const retry = ledger.claimTicket(wid, 'worker-a', 'fulltext:2|item:3', 20_000)!;
+    expect(ledger.markDone(retry)).toBe(true);
+    ledger.close();
+  });
+
   it('accepts a live holder, including one whose claim has aged past its TTL unswept', () => {
     // Expiry is a timestamp, not an event: until the sweep runs, nobody else holds the row,
     // and rejecting the holder's own completion would throw away work for nothing. A guard

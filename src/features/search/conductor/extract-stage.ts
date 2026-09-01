@@ -224,7 +224,7 @@ export class ExtractStage implements ExtractDispatcher {
       this.staleCompletions++;
       return;
     }
-    this.finish(claim, (c) => this.ledger.markFailed(c, reason));
+    if (!this.finish(claim, (c) => this.ledger.markFailed(c, reason))) this.staleCompletions++;
   }
 
   /**
@@ -243,25 +243,30 @@ export class ExtractStage implements ExtractDispatcher {
       this.staleCompletions++;
       return;
     }
-    this.finish(claim, (c) => {
+    const applied = this.finish(claim, (c) => {
       if (!this.ledger.markDone(c)) return false;
       writes();
       return true;
     });
+    if (!applied) this.staleCompletions++;
   }
 
   /**
    * Run one completion against a held claim and drop the claim either way.
    *
-   * Either way, because a rejected completion means the row is someone else's now: keeping
-   * the ticket would only let a second attempt fail again. The write and the release are one
-   * transaction, so a completion that loses the race leaves no trace.
+   * Either way, because a rejected completion means the row has moved on — another holder,
+   * or newer work coalesced into it — and keeping the ticket would only let a second attempt
+   * fail again. The write and the release are one transaction, so a completion that loses
+   * the race leaves no trace.
+   *
+   * The rejection is not counted here: `next`'s own three completions run against a claim
+   * taken microseconds earlier and read no document at all, so counting them would put
+   * dispatch bookkeeping into the number `staleCompletions` exists to report — documents
+   * fetched and then thrown away. The two callers that answer a *read* count it themselves.
    */
   private finish(claim: ClaimTicket, write: (claim: ClaimTicket) => boolean): boolean {
     this.held.delete(claim.wid);
-    const applied = this.ledger.transaction(() => write(claim));
-    if (!applied) this.staleCompletions++;
-    return applied;
+    return this.ledger.transaction(() => write(claim));
   }
 
   /**

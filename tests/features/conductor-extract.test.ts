@@ -507,6 +507,30 @@ describeSqlite('extract completion: the row you hold, or nothing', () => {
     h.ledger.close();
   });
 
+  it('counts the discards of this drain, not of the stage that outlives it', async () => {
+    // The dispatcher outlives the worker — run-to-drain means a new worker per spawn over
+    // the same stage — so reporting the stage's lifetime counter raw would have every later
+    // drain inherit the first one's discards and read as unhealthy for the rest of the run.
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0047', attachment: 'ATTA0047', dateAdded: '2022-01-01T00:00:00Z', text: 'one' });
+    const second = new ExtractStage({ ledger: h.ledger, clock: h.clock, holder: 'p0-two' });
+    const first = worker(h);
+    first.onWindow = (): void => {
+      h.clock.advance(CLAIM_TTL_MS + 1);
+      h.ledger.releaseExpiredClaims();
+      const b = second.next();
+      if (b) second.complete(b, documentOf('ATTA0047', 'b'.repeat(64), 200));
+    };
+    expect((await first.drain()).staleCompletions).toBe(1);
+
+    stageAttachment(h, { item: 'ITEM0048', attachment: 'ATTA0048', dateAdded: '2022-01-01T00:00:00Z', text: 'two' });
+    const report = await worker(h).drain();
+    expect(report.documents).toBe(1);
+    expect(report.staleCompletions).toBe(0);
+    expect(h.stage.staleCompletions).toBe(1);
+    h.ledger.close();
+  });
+
   it('leaves the ordinary path exactly as it was: a held row completes', async () => {
     // The control the three arms above need. A guard that rejected a legitimate completion
     // would leave every document unindexed, which no assertion about a race would catch.

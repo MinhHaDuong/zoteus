@@ -47,10 +47,13 @@ export interface ExtractDrainReport {
   emptyDocuments: number;
   failures: number;
   /**
-   * Documents this worker read whose result the conductor then discarded, because the row's
-   * claim had moved on while the fetch was in flight (§5.2.5's duplicated micro-batch).
-   * Zero on a healthy drain; a number that climbs means the claim TTL sits below the stalls
-   * this machine actually produces.
+   * Documents *this drain* read whose result the conductor then discarded, because the row
+   * had moved on while the fetch was in flight — another holder, or newer work coalesced
+   * into it (§5.2.5's duplicated micro-batch). Zero on a healthy drain.
+   *
+   * Per drain, like every other count here, which takes subtracting: the dispatcher outlives
+   * the worker — that is what run-to-drain means — so its own counter is a lifetime total
+   * and reporting it raw would have every later drain inherit the first one's discards.
    */
   staleCompletions: number;
   delayedFetches: number;
@@ -102,6 +105,8 @@ export class ExtractWorker {
   private readonly priority?: () => PriorityReport;
   private priorityReport?: PriorityReport;
   private killedFor?: string;
+  /** The dispatcher's lifetime discard count when this drain began. See the report field. */
+  private staleAtStart = 0;
 
   constructor(opts: ExtractWorkerOptions) {
     this.dispatcher = opts.dispatcher;
@@ -137,6 +142,7 @@ export class ExtractWorker {
 
   async drain(): Promise<ExtractDrainReport> {
     this.priorityReport ??= this.priority?.();
+    this.staleAtStart = this.dispatcher.staleCompletions ?? 0;
     let documents = 0;
     let windows = 0;
     let chars = 0;
@@ -233,7 +239,7 @@ export class ExtractWorker {
       stopped,
       ...(orphanReason ? { orphanReason } : {}),
       ...counts,
-      staleCompletions: this.dispatcher.staleCompletions ?? 0,
+      staleCompletions: (this.dispatcher.staleCompletions ?? 0) - this.staleAtStart,
       delayedFetches: pace.delayedFetches,
       totalDelayMs: pace.totalDelayMs,
       activityYields: this.activity?.yields ?? 0,

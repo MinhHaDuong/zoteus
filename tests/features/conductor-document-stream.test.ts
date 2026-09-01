@@ -226,7 +226,10 @@ describe('the whole-document GET: over the wire', () => {
     // *there* and only the brace is missing. Without this arm the assertion above is
     // satisfied by a reader that merely notices `totalPages` is absent, which would pass a
     // response cut mid-number and store the digits it happened to receive.
-    const cutInsideCount = whole.lastIndexOf('4');
+    // `totalPages` is 40, so cutting one character into it leaves a syntactically fine
+    // `"totalPages":4` — the digits that did arrive, and a count that is simply wrong.
+    const cutInsideCount = whole.lastIndexOf('40') + 1;
+    expect(whole.slice(0, cutInsideCount)).toMatch(/"totalPages":4$/);
     api.put('/users/0/items/ATTACUT3/fulltext', { text: whole.slice(0, cutInsideCount) });
     await expect(streamFullText({ source: api.client(), attachmentKey: 'ATTACUT3' })).rejects.toThrow(
       /ended before the response closed/,

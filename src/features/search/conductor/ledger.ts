@@ -101,28 +101,41 @@ export interface ClaimTicket {
   claimedInput: string;
   /** The expiry this acquisition was granted, which is what distinguishes it from the next. */
   expiresAt: number;
+  /** The row's own `signal` as it stood when the row was taken. See `CLAIM_HELD`. */
+  signal: string | null;
 }
 
 /**
- * The completion guard: this row, still claimed, by this holder, on this acquisition.
+ * The completion guard: this row, still claimed, by this holder, on this acquisition, and
+ * still asking for the work that was claimed.
  *
- * `claimed_input` is matched NULL-safely (`IS`) because a row may be claimed against no
- * input at all, and `= NULL` would then match nothing and reject every legitimate
- * completion — a guard that rejects everything is as wrong as one that rejects nothing.
+ * The last clause is the one a holder check cannot stand in for. It compares the row's
+ * `signal` against the value it held when the row was taken — not against `claimed_input`,
+ * which would compare the claim to itself, since nothing writes that column but a new
+ * claim. `signal` is the column that moves under a *live* claim: `enqueue` deduplicates
+ * against `status IN ('pending','claimed')` and *coalesces* newer work into the row it
+ * finds, overwriting `signal` while the worker is still fetching the version it was given.
+ * The tick stamps the full-text census in the same breath as that enqueue, so a completion
+ * that retired the coalesced row would lose the newer version for good — nothing re-derives
+ * an order the census already accounts for. Rejecting leaves the row claimed until expiry,
+ * and the sweep re-dispatches it against the signal it now carries.
+ *
+ * Both sides are read through `COALESCE(…, '')` so an unsignalled row compares equal to
+ * itself rather than to nothing, `NULL = NULL` being unknown.
  */
 const CLAIM_HELD = `wid = :wid
             AND status = 'claimed'
             AND claimed_by = :holder
-            AND claimed_input IS :input
-            AND claim_expires_at = :expires`;
+            AND claim_expires_at = :expires
+            AND COALESCE(signal, '') = COALESCE(:signal, '')`;
 
 function claimBindings(claim: ClaimTicket): {
   wid: number;
   holder: string;
-  input: string;
   expires: number;
+  signal: string | null;
 } {
-  return { wid: claim.wid, holder: claim.holder, input: claim.claimedInput, expires: claim.expiresAt };
+  return { wid: claim.wid, holder: claim.holder, expires: claim.expiresAt, signal: claim.signal };
 }
 
 export interface LeaseRow {
@@ -710,9 +723,12 @@ export class Ledger {
    * A holder is not an identity: one conductor spawns one worker at a time under the same
    * holder string, so a row this holder claimed, lost to expiry, and claimed again is two
    * different claims with the same name. `claim_expires_at` is what separates them — every
-   * acquisition writes a fresh one from a monotonic clock — so the ticket is the triple, and
-   * carrying it is what lets `markDone`/`markFailed` refuse a completion from the earlier
-   * claim (§5.2.5's duplicated micro-batch is redone and discarded, never written twice).
+   * acquisition writes a fresh one from a monotonic clock — so the ticket names the
+   * acquisition, and carrying it is what lets `markDone`/`markFailed` refuse a completion
+   * from the earlier claim (§5.2.5's duplicated micro-batch is redone and discarded, never
+   * written twice). The row's `signal` travels with it for the other half of the check: the
+   * work a row asks for can change under a live claim, and a result for the superseded
+   * version is as unwelcome as one from a superseded holder. See `CLAIM_HELD`.
    */
   claimTicket(wid: number, holder: string, claimedInput: string, ttlMs: number): ClaimTicket | null {
     const now = this.clock.now();
@@ -725,7 +741,14 @@ export class Ledger {
             AND (status = 'pending' OR (status = 'claimed' AND claim_expires_at <= :now))`,
       )
       .run({ wid, holder, input: claimedInput, expires: expiresAt, now });
-    return Number(res.changes) === 1 ? { wid, holder, claimedInput, expiresAt } : null;
+    if (Number(res.changes) !== 1) return null;
+    // Read back rather than take the caller's word: `claimed_input` is whatever the caller
+    // derived its work from, which need not be the row's own signal, and it is the signal
+    // the completion guard has to compare against later.
+    const row = this.db.prepare('SELECT signal FROM stage_queue WHERE wid = ?').get(wid) as
+      | { signal: string | null }
+      | undefined;
+    return { wid, holder, claimedInput, expiresAt, signal: row?.signal ?? null };
   }
 
   /**
