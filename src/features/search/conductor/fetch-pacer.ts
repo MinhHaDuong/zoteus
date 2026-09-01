@@ -54,12 +54,13 @@ import { systemClock } from './clock.js';
  * measurement on the ground that it would have spoken for one machine where the back-off
  * protects every installation, so no ratified number exists to read from SPEC.md. The one
  * derived rather than chosen is the ceiling, and it is derived against the TTL the code
- * actually uses. §5.2.5 pins the row-claim TTL at 30 × the ~1 s micro-batch quantum, but
- * `ExtractStage` claims at `LEASE_TTL_MS` — 20 s, the constant the lease machinery already
- * carries — so the margin a ceiling of 8 s leaves is 12 s, not 22 s. That is still the right
- * side of the line and the number is stated rather than inferred from the spec's 30, because
- * a pacing delay long enough to outlive the claim would have the row re-dispatched and
- * duplicate the very fetch it was slowing down.
+ * actually uses. §5.2.5 pins the row-claim TTL at 30 × the ~1 s micro-batch quantum, and
+ * `ExtractStage` now claims at exactly that (`CLAIM_TTL_MS`, 30 s) — through round 1 it
+ * claimed at `LEASE_TTL_MS` instead, 20 s, the election lease's constant reused for an
+ * unrelated purpose, which left this derivation reasoning about a 12 s margin the spec never
+ * granted. Against the ratified TTL a ceiling of 8 s leaves 22 s, and the margin matters
+ * because a pacing delay long enough to outlive the claim would have the row re-dispatched
+ * and duplicate the very fetch it was slowing down
  *
  * **Nothing here sleeps.** The pacer reports a delay; the worker's injected `sleep` is what
  * takes it, exactly as every other cadence in this tranche is arithmetic on the clock.

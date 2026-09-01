@@ -167,6 +167,21 @@ export async function streamFullText(opts: StreamFullTextOptions): Promise<Extra
     throw new Error(`full-text stream for ${opts.attachmentKey} ended inside the document`);
   }
 
+  // And a stream that stopped *after* the text but before the response closed is the same
+  // failure wearing the other face.
+  //
+  // The page counts may follow `content` (they do in the corpus this was replayed from), so
+  // a body cut between the closing quote and the closing brace hands back a document whose
+  // text is whole, whose counts are missing, and whose `truncated` is therefore `false` —
+  // Zotero's page cap read as "not capped" from an envelope that never arrived. The text is
+  // right and the coverage claim is a guess, which is the one combination that survives
+  // every later check: a wrong `truncated` is not re-derived, and a `done` row is not
+  // revisited. Requiring the object to close costs one balance count over a bounded
+  // envelope and makes the two cut positions one failure.
+  if (!scanner.envelopeClosed) {
+    throw new Error(`full-text stream for ${opts.attachmentKey} ended before the response closed`);
+  }
+
   const envelope = scanner.envelope();
   const indexedPages = envelope.indexedPages;
   const totalPages = envelope.totalPages;
@@ -260,6 +275,19 @@ export class ContentScanner {
   /** Whether the document's string actually closed. False on a stream that was cut. */
   get complete(): boolean {
     return this.state === 'envelope-tail';
+  }
+
+  /**
+   * Whether the response's own JSON object closed — the envelope, not just the text.
+   *
+   * Counted over the envelope rather than parsed, because the envelope this scanner holds is
+   * the response with its one huge member removed: `head` is everything before `"content":`
+   * and `tail` everything after the string's closing quote, so their concatenation carries
+   * exactly the brackets the response opened and closed, and nothing of the document. String
+   * literals are skipped so a brace inside a future field's value cannot unbalance it.
+   */
+  get envelopeClosed(): boolean {
+    return this.complete && balanced(`${this.head}${this.tail}`);
   }
 
   textHash(): string {
@@ -381,6 +409,36 @@ function unescapeOne(ch: string): string {
     default:
       return ch;
   }
+}
+
+/**
+ * Did every bracket this text opened also close, and did it open at least one?
+ *
+ * "At least one" is what makes a body that never began — an empty response, an HTML error
+ * page with no braces at all — fail here rather than pass as trivially balanced.
+ */
+function balanced(envelope: string): boolean {
+  let depth = 0;
+  let opened = false;
+  let inString = false;
+  let escaped = false;
+  for (const ch of envelope) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') {
+      depth++;
+      opened = true;
+    } else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth < 0) return false;
+    }
+  }
+  return opened && depth === 0 && !inString;
 }
 
 function numberField(source: string, name: string): number | null {

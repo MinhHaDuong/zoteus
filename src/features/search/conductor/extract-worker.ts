@@ -46,6 +46,13 @@ export interface ExtractDrainReport {
   chars: number;
   emptyDocuments: number;
   failures: number;
+  /**
+   * Documents this worker read whose result the conductor then discarded, because the row's
+   * claim had moved on while the fetch was in flight (§5.2.5's duplicated micro-batch).
+   * Zero on a healthy drain; a number that climbs means the claim TTL sits below the stalls
+   * this machine actually produces.
+   */
+  staleCompletions: number;
   delayedFetches: number;
   totalDelayMs: number;
   activityYields: number;
@@ -226,6 +233,7 @@ export class ExtractWorker {
       stopped,
       ...(orphanReason ? { orphanReason } : {}),
       ...counts,
+      staleCompletions: this.dispatcher.staleCompletions ?? 0,
       delayedFetches: pace.delayedFetches,
       totalDelayMs: pace.totalDelayMs,
       activityYields: this.activity?.yields ?? 0,
@@ -293,6 +301,7 @@ function failedReport(e: unknown): ExtractDrainReport {
     chars: 0,
     emptyDocuments: 0,
     failures: 1,
+    staleCompletions: 0,
     delayedFetches: 0,
     totalDelayMs: 0,
     activityYields: 0,

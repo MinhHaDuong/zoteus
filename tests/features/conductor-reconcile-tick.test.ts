@@ -5,6 +5,7 @@ import { ReconcileTick } from '../../src/features/search/conductor/reconcile-tic
 import { ReplayLocalApi } from '../fixtures/local-api-replay.js';
 import { SyntheticLibrary } from '../fixtures/synthetic-library.js';
 import { ManualClock } from '../fixtures/clock.js';
+import { completeByHand } from '../fixtures/claims.js';
 
 /**
  * The reconcile tick: SPEC.md §5.2.4, and the discovery half of R35's one-minute promise.
@@ -62,7 +63,7 @@ function drain(ledger: Ledger, lib: number): number {
   for (;;) {
     const next = ledger.nextWorkOrder({ lib });
     if (!next) return n;
-    ledger.markDone(next.wid);
+    completeByHand(ledger, next.wid);
     n++;
   }
 }

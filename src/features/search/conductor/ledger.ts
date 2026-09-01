@@ -88,6 +88,43 @@ export interface WorkOrderRow {
   enqueuedAt: number;
 }
 
+/**
+ * One acquisition of one row, as `claim` granted it.
+ *
+ * Held by whoever took the row and handed back to complete it. It is a value rather than a
+ * handle so it can cross the extract shim's pipe unchanged (§5.2.4) — four fields, all of
+ * them already in the row.
+ */
+export interface ClaimTicket {
+  wid: number;
+  holder: string;
+  claimedInput: string;
+  /** The expiry this acquisition was granted, which is what distinguishes it from the next. */
+  expiresAt: number;
+}
+
+/**
+ * The completion guard: this row, still claimed, by this holder, on this acquisition.
+ *
+ * `claimed_input` is matched NULL-safely (`IS`) because a row may be claimed against no
+ * input at all, and `= NULL` would then match nothing and reject every legitimate
+ * completion — a guard that rejects everything is as wrong as one that rejects nothing.
+ */
+const CLAIM_HELD = `wid = :wid
+            AND status = 'claimed'
+            AND claimed_by = :holder
+            AND claimed_input IS :input
+            AND claim_expires_at = :expires`;
+
+function claimBindings(claim: ClaimTicket): {
+  wid: number;
+  holder: string;
+  input: string;
+  expires: number;
+} {
+  return { wid: claim.wid, holder: claim.holder, input: claim.claimedInput, expires: claim.expiresAt };
+}
+
 export interface LeaseRow {
   name: string;
   holder: string | null;
@@ -664,7 +701,22 @@ export class Ledger {
    * a stale one. Returns false when someone else holds a live claim.
    */
   claim(wid: number, holder: string, claimedInput: string, ttlMs: number): boolean {
+    return this.claimTicket(wid, holder, claimedInput, ttlMs) !== null;
+  }
+
+  /**
+   * The same acquisition, handing back the ticket that names *this* claim.
+   *
+   * A holder is not an identity: one conductor spawns one worker at a time under the same
+   * holder string, so a row this holder claimed, lost to expiry, and claimed again is two
+   * different claims with the same name. `claim_expires_at` is what separates them — every
+   * acquisition writes a fresh one from a monotonic clock — so the ticket is the triple, and
+   * carrying it is what lets `markDone`/`markFailed` refuse a completion from the earlier
+   * claim (§5.2.5's duplicated micro-batch is redone and discarded, never written twice).
+   */
+  claimTicket(wid: number, holder: string, claimedInput: string, ttlMs: number): ClaimTicket | null {
     const now = this.clock.now();
+    const expiresAt = now + ttlMs;
     const res = this.db
       .prepare(
         `UPDATE stage_queue
@@ -672,8 +724,8 @@ export class Ledger {
           WHERE wid = :wid
             AND (status = 'pending' OR (status = 'claimed' AND claim_expires_at <= :now))`,
       )
-      .run({ wid, holder, input: claimedInput, expires: now + ttlMs, now });
-    return Number(res.changes) === 1;
+      .run({ wid, holder, input: claimedInput, expires: expiresAt, now });
+    return Number(res.changes) === 1 ? { wid, holder, claimedInput, expiresAt } : null;
   }
 
   /**
@@ -694,24 +746,42 @@ export class Ledger {
     return Number(res.changes);
   }
 
-  markDone(wid: number): void {
-    this.db
+  /**
+   * Complete a row you hold. False when the claim has moved on and nothing was written.
+   *
+   * The guard is the other half of `claim`'s compare-and-swap, and it exists because
+   * expiry is the recovery mechanism §5.2.5 chose: `releaseExpiredClaims` returns a row a
+   * worker is merely *slow* on, another worker takes it and finishes, and the first
+   * worker's own late completion then arrives against a row it no longer owns. Unguarded
+   * — `WHERE wid = ?` — that write lands, last-write-wins, over a fresher result and with
+   * no error anywhere. The accepted cost in §5.2.5 is one duplicated micro-batch, redone
+   * and discarded; silent unbounded staleness is not the same thing.
+   *
+   * A caller that gets `false` has done work nobody wanted: the row is another holder's
+   * now, and the right response is to discard the result, not to retry.
+   */
+  markDone(claim: ClaimTicket): boolean {
+    const res = this.db
       .prepare(
         `UPDATE stage_queue
             SET status = 'done', claimed_by = NULL, claimed_input = NULL, claim_expires_at = NULL
-          WHERE wid = ?`,
+          WHERE ${CLAIM_HELD}`,
       )
-      .run(wid);
+      .run(claimBindings(claim));
+    return Number(res.changes) === 1;
   }
 
-  markFailed(wid: number, note?: string): void {
-    this.db
+  /** As `markDone`, for the failing outcome. False when the claim has moved on. */
+  markFailed(claim: ClaimTicket, note?: string): boolean {
+    const res = this.db
       .prepare(
         `UPDATE stage_queue
-            SET status = 'failed', claimed_by = NULL, claimed_input = NULL, claim_expires_at = NULL, note = ?
-          WHERE wid = ?`,
+            SET status = 'failed', claimed_by = NULL, claimed_input = NULL, claim_expires_at = NULL,
+                note = :note
+          WHERE ${CLAIM_HELD}`,
       )
-      .run(note ?? null, wid);
+      .run({ ...claimBindings(claim), note: note ?? null });
+    return Number(res.changes) === 1;
   }
 
   // --------------------------------------------------------- extract dispatch

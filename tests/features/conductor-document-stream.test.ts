@@ -206,6 +206,58 @@ describe('the whole-document GET: over the wire', () => {
     expect(read.document!.chars).toBe(400);
   });
 
+  it('raises on a stream cut after the text but before the response closed', async () => {
+    // Review round 2's second blocker, and the sibling of the one above. The page counts
+    // follow `content` in the corpus this replays, so a body cut between the closing quote
+    // and the closing brace hands back a document whose text is whole, whose counts are
+    // missing, and whose `truncated` is therefore `false` — Zotero's page cap read as "not
+    // capped" from an envelope that never arrived. Round 1's check cannot see it: the
+    // content string did close, so the scanner is `complete`.
+    const api = replay();
+    const whole = JSON.stringify({ content: 'a'.repeat(400), indexedPages: 4, totalPages: 40 });
+    const afterText = whole.indexOf('",') + 2;
+    api.put('/users/0/items/ATTACUT2/fulltext', { text: whole.slice(0, afterText) });
+
+    await expect(streamFullText({ source: api.client(), attachmentKey: 'ATTACUT2' })).rejects.toThrow(
+      /ended before the response closed/,
+    );
+
+    // The discriminating pair: the same cut carried one field further, so the counts are
+    // *there* and only the brace is missing. Without this arm the assertion above is
+    // satisfied by a reader that merely notices `totalPages` is absent, which would pass a
+    // response cut mid-number and store the digits it happened to receive.
+    const cutInsideCount = whole.lastIndexOf('4');
+    api.put('/users/0/items/ATTACUT3/fulltext', { text: whole.slice(0, cutInsideCount) });
+    await expect(streamFullText({ source: api.client(), attachmentKey: 'ATTACUT3' })).rejects.toThrow(
+      /ended before the response closed/,
+    );
+
+    // Control: served whole, the same document reads as 4 of 40 pages — truncated by
+    // Zotero's cap, which is a fact about the document rather than about the transfer.
+    api.put('/users/0/items/ATTAFULL2/fulltext', { text: whole });
+    const read = await streamFullText({ source: api.client(), attachmentKey: 'ATTAFULL2' });
+    expect(read.document!.chars).toBe(400);
+    expect(read.document!.truncated).toBe(true);
+  });
+
+  it('counts brackets rather than looking for a trailing brace', () => {
+    // The envelope check has to survive a field the local API does not send today: a string
+    // value carrying a brace is balanced text, and a scanner that scored the last character
+    // would read it as closed. Asserted on the scanner, since only a hand-built envelope
+    // reaches this shape.
+    const closed = new ContentScanner(64);
+    closed.push('{"title":"a } brace","content":"text","indexedPages":1,"totalPages":1}');
+    closed.end();
+    expect(closed.complete).toBe(true);
+    expect(closed.envelopeClosed).toBe(true);
+
+    const cut = new ContentScanner(64);
+    cut.push('{"title":"a } brace","content":"text","indexedPages":1');
+    cut.end();
+    expect(cut.complete).toBe(true);
+    expect(cut.envelopeClosed).toBe(false);
+  });
+
   it('times the response, not the read', async () => {
     // The pacer's whole input. Timing the read instead would measure the corpus: the
     // near-empty snapshot and the 44,9 MB dictionary differ by orders of magnitude on a

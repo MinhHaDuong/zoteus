@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { Ledger } from '../../src/features/search/conductor/ledger.js';
 import { ManualClock } from '../fixtures/clock.js';
+import { completeByHand } from '../fixtures/claims.js';
 
 /**
  * The ledger is the conductor's whole state: what Zotero last told us (the censuses and
@@ -112,7 +113,7 @@ describeSqlite('conductor ledger: priority is an ORDER BY, not a scheduler', () 
       const next = ledger.nextWorkOrder({ lib });
       if (!next) break;
       drained.push(next.itemKey!);
-      ledger.markDone(next.wid);
+      completeByHand(ledger, next.wid);
     }
     expect(drained).toEqual(['REC001', 'NOTE01', 'BODYNEW', 'BODYOLD']);
     ledger.close();
@@ -159,6 +160,101 @@ describeSqlite('conductor ledger: row claims', () => {
     // retry after an expiry must not inherit the dead holder's idea of the input.
     expect(ledger.claim(wid, 'uuid-b', 'item:18', 30_000)).toBe(true);
     expect(ledger.row(wid)?.claimedInput).toBe('item:18');
+    ledger.close();
+  });
+});
+
+describeSqlite('conductor ledger: completion is owned', () => {
+  /**
+   * The other half of `claim`'s compare-and-swap, added by ticket 0553's round-2 review and
+   * ticket 0567.
+   *
+   * `releaseExpiredClaims` is the recovery §5.2.5 chose, and it cannot tell a dead worker
+   * from a slow one: the row of a worker that is merely late comes back to the queue, a
+   * second worker takes it and finishes, and the first one's own completion then arrives
+   * against a row it no longer owns. Unguarded, that write lands over the fresher result
+   * with no error anywhere — which is not §5.2.5's accepted duplicate (redone and
+   * discarded) but silent unbounded staleness.
+   */
+  /** `note` is not on `WorkOrderRow`; the failing outcome's reason is read from the row. */
+  function noteOf(ledger: Ledger, wid: number): string | null {
+    const r = ledger.db.prepare('SELECT note FROM stage_queue WHERE wid = ?').get(wid) as { note: string | null };
+    return r.note ?? null;
+  }
+
+  function oneOrder(): { ledger: Ledger; clock: ManualClock; wid: number } {
+    const { ledger, clock } = openLedger();
+    const oid = ledger.registerOrigin('server-aaa');
+    const lib = ledger.registerLibrary({ oid, kind: 'user', remoteId: 0, scope: 'local' });
+    const wid = ledger.enqueue({ lib, class: 'metadata', op: 'index', itemKey: 'REC001', dateAdded: '2026-01-01T00:00:00Z' });
+    return { ledger, clock, wid };
+  }
+
+  it('refuses a completion from a holder whose claim was swept and re-taken', () => {
+    const { ledger, clock, wid } = oneOrder();
+    const slow = ledger.claimTicket(wid, 'worker-a', 'item:17', 20_000)!;
+    expect(slow).not.toBeNull();
+
+    clock.advance(20_001);
+    expect(ledger.releaseExpiredClaims()).toBe(1);
+    const fresh = ledger.claimTicket(wid, 'worker-b', 'item:17', 20_000)!;
+    expect(ledger.markDone(fresh)).toBe(true);
+
+    // Worker A was never dead, only late. Its completion arrives now.
+    expect(ledger.markDone(slow)).toBe(false);
+    expect(ledger.markFailed(slow, 'a says it failed')).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('done');
+    expect(noteOf(ledger, wid)).toBeNull();
+    ledger.close();
+  });
+
+  it('refuses it even when the same holder took the row again', () => {
+    // The arm a `claimed_by` check alone cannot pass. One conductor spawns one worker at a
+    // time under one holder string, so the re-claim after an expiry usually carries the
+    // *same* name and the same input; what separates the two claims is the expiry each was
+    // granted, which is why the ticket is the triple rather than the holder.
+    const { ledger, clock, wid } = oneOrder();
+    const first = ledger.claimTicket(wid, 'extract', 'item:17', 20_000)!;
+    clock.advance(20_001);
+    expect(ledger.releaseExpiredClaims()).toBe(1);
+    const second = ledger.claimTicket(wid, 'extract', 'item:17', 20_000)!;
+
+    expect(second.holder).toBe(first.holder);
+    expect(second.claimedInput).toBe(first.claimedInput);
+    expect(ledger.markDone(first)).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('claimed');
+    // Control: the claim that actually holds the row completes it.
+    expect(ledger.markDone(second)).toBe(true);
+    expect(ledger.row(wid)?.status).toBe('done');
+    ledger.close();
+  });
+
+  it('accepts a live holder, including one whose claim has aged past its TTL unswept', () => {
+    // Expiry is a timestamp, not an event: until the sweep runs, nobody else holds the row,
+    // and rejecting the holder's own completion would throw away work for nothing. A guard
+    // that rejects a legitimate completion is as wrong as one that rejects nothing.
+    const { ledger, clock, wid } = oneOrder();
+    const claim = ledger.claimTicket(wid, 'worker-a', 'item:17', 20_000)!;
+    clock.advance(60_000);
+    expect(ledger.markDone(claim)).toBe(true);
+    expect(ledger.row(wid)?.status).toBe('done');
+
+    // And the failing outcome carries its note through the same guard.
+    const other = oneOrder();
+    const failing = other.ledger.claimTicket(other.wid, 'worker-a', '', 20_000)!;
+    expect(other.ledger.markFailed(failing, 'zotero refused')).toBe(true);
+    expect(other.ledger.row(other.wid)?.status).toBe('failed');
+    expect(noteOf(other.ledger, other.wid)).toBe('zotero refused');
+    other.ledger.close();
+    ledger.close();
+  });
+
+  it('leaves a completed row completed: a second completion is not a second write', () => {
+    const { ledger, wid } = oneOrder();
+    const claim = ledger.claimTicket(wid, 'worker-a', '', 20_000)!;
+    expect(ledger.markDone(claim)).toBe(true);
+    expect(ledger.markFailed(claim, 'and then it failed')).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('done');
     ledger.close();
   });
 });

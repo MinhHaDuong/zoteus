@@ -3,8 +3,7 @@ import type { Clock } from './clock.js';
 import { systemClock } from './clock.js';
 import { EXTRACTOR_ID } from './document-stream.js';
 import type { StreamedDocument } from './document-stream.js';
-import type { AttachmentDecision, Ledger, SkipReason, WorkOrderRow } from './ledger.js';
-import { LEASE_TTL_MS } from './lease.js';
+import type { AttachmentDecision, ClaimTicket, Ledger, SkipReason, WorkOrderRow } from './ledger.js';
 
 /**
  * The conductor's half of the extract shim (SPEC.md §5.2.4).
@@ -22,6 +21,29 @@ import { LEASE_TTL_MS } from './lease.js';
  * carry.
  */
 
+/**
+ * The micro-batch quantum, ratified at about 1 s (SPEC.md §5.2.5, DECISIONS.md 2026-09-01).
+ *
+ * Its per-device size derivation is tranche 4's, and so is its home; what tranche 3 needs is
+ * the number the claim TTL is defined against, and defining it here beats writing 30 000 and
+ * a comment.
+ */
+const MICRO_BATCH_QUANTUM_MS = 1_000;
+
+/**
+ * How long a claimed row stays claimed: 30 × the quantum (§5.2.5, ratified 2026-09-01).
+ *
+ * Above the worst honest stall a working machine produces and below the reconcile tick, at
+ * the cost of at most one duplicated micro-batch. It is *not* the conductor's election lease
+ * (`LEASE_TTL_MS`, 20 s): this stage defaulted to that constant through round 1, which put
+ * the shipped claim a third below the ratified figure and left the pacer ceiling's own
+ * derivation reasoning about the wrong margin. Two mechanisms, two numbers.
+ */
+export const CLAIM_TTL_MS = 30 * MICRO_BATCH_QUANTUM_MS;
+
+/** How many outstanding claims one stage remembers. See `claimOrder`. */
+const MAX_HELD_CLAIMS = 1_024;
+
 export interface ExtractAssignment {
   wid: number;
   lib: number;
@@ -38,6 +60,12 @@ export interface ExtractAssignment {
  * one knowing which it has.
  */
 export interface ExtractDispatcher {
+  /**
+   * Results refused because the row's claim had moved on, so the worker's drain report can
+   * carry the number rather than leaving it somewhere nothing reads. Optional because it is
+   * a fact about a dispatcher that owns claims, and the interface is what crosses the pipe.
+   */
+  readonly staleCompletions?: number;
   next(): ExtractAssignment | undefined;
   complete(assignment: ExtractAssignment, document: StreamedDocument): void;
   /** Zotero has no text for this attachment: a 404, not a failure. */
@@ -66,11 +94,33 @@ export class ExtractStage implements ExtractDispatcher {
   /** Counted for the instrument panel: skips are work done, not work absent. */
   skipped = 0;
 
+  /**
+   * Results discarded because the row's claim had moved on. Counted, never silent.
+   *
+   * §5.2.5 accepts one duplicated micro-batch as the price of recovering a stuck worker by
+   * claim expiry. This is that duplicate arriving: the work was done twice and the second
+   * copy is dropped. A number that climbs on a healthy machine means the claim TTL is below
+   * the honest stall it was supposed to sit above, which is a thing the panel should show
+   * rather than a thing to infer from missing text.
+   */
+  staleCompletions = 0;
+
+  /**
+   * The ticket for every row handed out and not yet completed.
+   *
+   * Conductor-side, so the worker still holds nothing about writes: what crosses the shim is
+   * an assignment and a result (§5.2.4), and the claim that authorises the write stays on
+   * this side of the line. A result whose wid is not in here is a completion for a row this
+   * stage no longer owns, which is the same rejection the ledger's guard makes and is worth
+   * catching before the write is attempted.
+   */
+  private readonly held = new Map<number, ClaimTicket>();
+
   constructor(opts: ExtractStageOptions) {
     this.ledger = opts.ledger;
     this.clock = opts.clock ?? systemClock;
     this.holder = opts.holder ?? 'extract';
-    this.claimTtlMs = opts.claimTtlMs ?? LEASE_TTL_MS;
+    this.claimTtlMs = opts.claimTtlMs ?? CLAIM_TTL_MS;
     this.extractor = opts.extractor ?? EXTRACTOR_ID;
     this.lib = opts.lib;
   }
@@ -87,26 +137,31 @@ export class ExtractStage implements ExtractDispatcher {
     for (;;) {
       const order = this.ledger.nextExtractOrder({ lib: this.lib });
       if (!order) return undefined;
+
+      // The claim comes first, before any decision that could complete the row. Every write
+      // below is a completion, and a completion is now owned: it names the claim it was
+      // authorised by, so there has to be one. Losing the race here costs a loop, which is
+      // what a row another P0 took should cost.
+      const claim = this.claimOrder(order);
+      if (!claim) continue;
+
       const attachmentKey = order.attachmentKey;
       if (!attachmentKey) {
         // `nextExtractOrder` filters these out; reaching here would mean the query and this
         // reader disagree, which is worth failing loudly rather than skipping quietly.
-        this.ledger.markFailed(order.wid, 'body order without an attachment key');
+        this.finish(claim, (c) => this.ledger.markFailed(c, 'body order without an attachment key'));
         continue;
       }
 
-      if (!this.claim(order)) continue;
-
       const itemKey = order.itemKey ?? this.ledger.itemDetail(order.lib, attachmentKey)?.parentItem ?? null;
       if (itemKey && !this.isChosen(order.lib, itemKey, attachmentKey)) {
-        this.ledger.markDone(order.wid);
-        this.skipped++;
+        if (this.finish(claim, (c) => this.ledger.markDone(c))) this.skipped++;
         continue;
       }
 
       const library = this.ledger.library(order.lib);
       if (!library) {
-        this.ledger.markFailed(order.wid, `library ${order.lib} is not registered`);
+        this.finish(claim, (c) => this.ledger.markFailed(c, `library ${order.lib} is not registered`));
         continue;
       }
       return {
@@ -121,7 +176,7 @@ export class ExtractStage implements ExtractDispatcher {
   }
 
   complete(assignment: ExtractAssignment, document: StreamedDocument): void {
-    this.ledger.transaction(() => {
+    this.record(assignment, () => {
       this.ledger.putExtractState(assignment.lib, {
         attachmentKey: assignment.attachmentKey,
         itemKey: assignment.itemKey,
@@ -137,7 +192,6 @@ export class ExtractStage implements ExtractDispatcher {
       // sibling carried identical text, so recording it is what makes D6's two named
       // reasons reachable rather than aspirational.
       if (assignment.itemKey) this.decide(assignment.lib, assignment.itemKey);
-      this.ledger.markDone(assignment.wid);
     });
   }
 
@@ -151,7 +205,7 @@ export class ExtractStage implements ExtractDispatcher {
    * that says empty rather than one that says nothing.
    */
   noText(assignment: ExtractAssignment): void {
-    this.ledger.transaction(() => {
+    this.record(assignment, () => {
       this.ledger.putExtractState(assignment.lib, {
         attachmentKey: assignment.attachmentKey,
         itemKey: assignment.itemKey,
@@ -161,12 +215,53 @@ export class ExtractStage implements ExtractDispatcher {
         truncated: false,
         empty: true,
       });
-      this.ledger.markDone(assignment.wid);
     });
   }
 
   fail(assignment: ExtractAssignment, reason: string): void {
-    this.ledger.markFailed(assignment.wid, reason);
+    const claim = this.held.get(assignment.wid);
+    if (!claim) {
+      this.staleCompletions++;
+      return;
+    }
+    this.finish(claim, (c) => this.ledger.markFailed(c, reason));
+  }
+
+  /**
+   * A result, written only if this stage still owns the row it answers.
+   *
+   * The ownership check runs first and inside the transaction, so a rejected completion
+   * writes nothing at all — not the extract row, not D6's choice, not the work order. That
+   * is the whole difference between §5.2.5's accepted duplicate (redone, discarded) and the
+   * failure round 2 reproduced: worker A slow, its claim swept and re-taken by B, B finishes,
+   * and A's late `putExtractState` overwrites B's row under B's own completed work order.
+   * The `text_hash` left behind then belongs to neither worker's view of the document.
+   */
+  private record(assignment: ExtractAssignment, writes: () => void): void {
+    const claim = this.held.get(assignment.wid);
+    if (!claim) {
+      this.staleCompletions++;
+      return;
+    }
+    this.finish(claim, (c) => {
+      if (!this.ledger.markDone(c)) return false;
+      writes();
+      return true;
+    });
+  }
+
+  /**
+   * Run one completion against a held claim and drop the claim either way.
+   *
+   * Either way, because a rejected completion means the row is someone else's now: keeping
+   * the ticket would only let a second attempt fail again. The write and the release are one
+   * transaction, so a completion that loses the race leaves no trace.
+   */
+  private finish(claim: ClaimTicket, write: (claim: ClaimTicket) => boolean): boolean {
+    this.held.delete(claim.wid);
+    const applied = this.ledger.transaction(() => write(claim));
+    if (!applied) this.staleCompletions++;
+    return applied;
   }
 
   /**
@@ -219,8 +314,20 @@ export class ExtractStage implements ExtractDispatcher {
     return decisions.some((d) => d.attachmentKey === attachmentKey && d.chosen);
   }
 
-  private claim(order: WorkOrderRow): boolean {
-    return this.ledger.claim(order.wid, this.holder, order.signal ?? '', this.claimTtlMs);
+  private claimOrder(order: WorkOrderRow): ClaimTicket | null {
+    const claim = this.ledger.claimTicket(order.wid, this.holder, order.signal ?? '', this.claimTtlMs);
+    if (!claim) return null;
+    this.held.set(order.wid, claim);
+    // A ticket leaves this map when its row is answered, so the only ones that survive are
+    // rows whose worker died between the claim and the answer. One sequential worker cannot
+    // have two documents in flight, so anything beyond a handful is residue; the oldest goes
+    // first, and a completion for a row abandoned this long ago is stale by any reading.
+    while (this.held.size > MAX_HELD_CLAIMS) {
+      const oldest = this.held.keys().next();
+      if (oldest.done) break;
+      this.held.delete(oldest.value);
+    }
+    return claim;
   }
 }
 

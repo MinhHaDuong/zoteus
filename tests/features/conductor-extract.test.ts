@@ -4,7 +4,8 @@ import { nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { ActivityGate } from '../../src/features/search/conductor/activity.js';
 import { Conductor } from '../../src/features/search/conductor/conductor.js';
 import { EXTRACTOR_ID } from '../../src/features/search/conductor/document-stream.js';
-import { ExtractStage } from '../../src/features/search/conductor/extract-stage.js';
+import { CLAIM_TTL_MS, ExtractStage } from '../../src/features/search/conductor/extract-stage.js';
+import type { StreamedDocument } from '../../src/features/search/conductor/document-stream.js';
 import { ExtractWorker, ExtractWorkerControl } from '../../src/features/search/conductor/extract-worker.js';
 import { Ledger } from '../../src/features/search/conductor/ledger.js';
 import { CONDUCTOR_LEASE } from '../../src/features/search/conductor/lease.js';
@@ -14,6 +15,7 @@ import { ReconcileTick } from '../../src/features/search/conductor/reconcile-tic
 import { ManualClock } from '../fixtures/clock.js';
 import { ReplayLocalApi } from '../fixtures/local-api-replay.js';
 import { SyntheticLibrary } from '../fixtures/synthetic-library.js';
+import { completeByHand } from '../fixtures/claims.js';
 
 /**
  * Tranche 3's stage and worker: the class order in the dispatch query, D6's first-with-text
@@ -110,7 +112,7 @@ describeSqlite('extract dispatch: the class order is the query', () => {
     expect(h.ledger.pending(h.lib).some((r) => r.class === 'body')).toBe(true);
     expect(h.ledger.nextExtractOrder({ lib: h.lib })).toBeUndefined();
 
-    for (const row of h.ledger.pending(h.lib)) if (row.class !== 'body') h.ledger.markDone(row.wid);
+    for (const row of h.ledger.pending(h.lib)) if (row.class !== 'body') completeByHand(h.ledger, row.wid);
     expect(h.ledger.nextExtractOrder({ lib: h.lib })?.class).toBe('body');
     h.ledger.close();
   });
@@ -125,7 +127,7 @@ describeSqlite('extract dispatch: the class order is the query', () => {
 
     const record = h.ledger.pending(h.lib).find((r) => r.class === 'metadata' && r.itemKey === 'ITEM0001');
     expect(record).toBeDefined();
-    h.ledger.markDone(record!.wid);
+    completeByHand(h.ledger, record!.wid);
 
     const next = h.ledger.nextExtractOrder({ lib: h.lib });
     expect(next?.attachmentKey).toBe('ATTA0001');
@@ -140,10 +142,10 @@ describeSqlite('extract dispatch: the class order is the query', () => {
     const h = tickHarness();
     await h.tick.runOnce(h.lib);
     const record = h.ledger.pending(h.lib).find((r) => r.class === 'metadata' && r.itemKey === 'ITEM0001');
-    h.ledger.claim(record!.wid, 'someone', 'sig', 30_000);
+    const held = h.ledger.claimTicket(record!.wid, 'someone', 'sig', 30_000);
 
     expect(h.ledger.nextExtractOrder({ lib: h.lib })).toBeUndefined();
-    h.ledger.markDone(record!.wid);
+    expect(h.ledger.markDone(held!)).toBe(true);
     expect(h.ledger.nextExtractOrder({ lib: h.lib })?.attachmentKey).toBe('ATTA0001');
     h.ledger.close();
   });
@@ -171,7 +173,7 @@ describeSqlite('extract dispatch: the class order is the query', () => {
 
       const record = h.ledger.pending(h.lib).find((r) => r.class !== 'body');
       if (!record) break;
-      h.ledger.markDone(record.wid);
+      completeByHand(h.ledger, record.wid);
       if (record.itemKey) recorded.add(record.itemKey);
       if (h.ledger.pending(h.lib).length >= before) continue;
     }
@@ -379,6 +381,145 @@ describeSqlite('extract bookkeeping: what the conductor writes', () => {
     // The control: against its own identity nothing is stale, so a shim that changed
     // nothing observable and declined to bump costs no re-extraction.
     expect(h.ledger.staleExtracts(h.lib, 'zotero-local-cache/0').map((r) => r.attachmentKey)).toEqual(['ATTANEWX']);
+    h.ledger.close();
+  });
+});
+
+// ------------------------------------------------------------ the claim race
+
+describeSqlite('extract completion: the row you hold, or nothing', () => {
+  /**
+   * Review round 2's first blocker, reproduced end to end and then closed.
+   *
+   * `releaseExpiredClaims` cannot tell a dead worker from a slow one, and §5.2.5 chose it
+   * anyway — correctly, since a hard-killed worker leaves nothing else behind. What that
+   * costs is stated there as one duplicated micro-batch, redone and discarded. Unguarded
+   * completion turns it into something else entirely: two workers finish the same row and
+   * the *later-arriving* write wins, which on a slow-then-recovering worker is the older
+   * read, stored under a work order somebody else already completed.
+   */
+  function documentOf(attachmentKey: string, textHash: string, chars: number): StreamedDocument {
+    return {
+      attachmentKey,
+      textHash,
+      chars,
+      windows: 1,
+      indexedPages: 2,
+      totalPages: 2,
+      truncated: false,
+      empty: false,
+    };
+  }
+
+  it("drops a slow worker's completion once its row has been swept and finished by another", async () => {
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0040', attachment: 'ATTA0040', dateAdded: '2022-01-01T00:00:00Z', text: 'x' });
+
+    const slow = h.stage;
+    const a = slow.next()!;
+    expect(a.attachmentKey).toBe('ATTA0040');
+
+    // A is not dead, only slow: its claim ages out mid-document and the conductor's own
+    // sweep — the production call site, in `poll` — returns the row to the queue.
+    h.clock.advance(CLAIM_TTL_MS + 1);
+    const conductor = new Conductor({ ledger: h.ledger, clock: h.clock, holder: 'p0-one' });
+    expect((await conductor.poll()).releasedClaims).toBe(1);
+
+    const second = new ExtractStage({ ledger: h.ledger, clock: h.clock, holder: 'p0-two' });
+    const b = second.next()!;
+    expect(b.wid).toBe(a.wid);
+    second.complete(b, documentOf('ATTA0040', 'b'.repeat(64), 200));
+    expect(h.ledger.extractState(h.lib, 'ATTA0040')!.textHash).toBe('b'.repeat(64));
+
+    // And now A's own read arrives, against a row that is no longer its own.
+    slow.complete(a, documentOf('ATTA0040', 'a'.repeat(64), 100));
+
+    expect(h.ledger.extractState(h.lib, 'ATTA0040')!.textHash).toBe('b'.repeat(64));
+    expect(h.ledger.extractState(h.lib, 'ATTA0040')!.chars).toBe(200);
+    expect(slow.staleCompletions).toBe(1);
+    expect(second.staleCompletions).toBe(0);
+    expect(h.ledger.row(a.wid)?.status).toBe('done');
+    h.ledger.close();
+  });
+
+  it('drops it even when nobody else has taken the row yet', () => {
+    // The row is back in the queue, so completing it would silently retire work the queue
+    // still owes and would race whoever claims it next. The result is discarded and the
+    // attachment is fetched again, which is the duplicated micro-batch §5.2.5 budgeted for.
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0041', attachment: 'ATTA0041', dateAdded: '2022-01-01T00:00:00Z', text: 'x' });
+    const a = h.stage.next()!;
+    h.clock.advance(CLAIM_TTL_MS + 1);
+    expect(h.ledger.releaseExpiredClaims()).toBe(1);
+
+    h.stage.complete(a, documentOf('ATTA0041', 'a'.repeat(64), 100));
+    expect(h.stage.staleCompletions).toBe(1);
+    expect(h.ledger.extractState(h.lib, 'ATTA0041')).toBeUndefined();
+    expect(h.ledger.row(a.wid)?.status).toBe('pending');
+    h.ledger.close();
+  });
+
+  it('refuses the same completion three ways: done, empty and failed', () => {
+    const h = ledgerHarness();
+    for (const [item, attachment] of [
+      ['ITEM0042', 'ATTA0042'],
+      ['ITEM0043', 'ATTA0043'],
+      ['ITEM0044', 'ATTA0044'],
+    ]) {
+      stageAttachment(h, { item: item!, attachment: attachment!, dateAdded: '2022-01-01T00:00:00Z', text: 'x' });
+    }
+    const taken = [h.stage.next()!, h.stage.next()!, h.stage.next()!];
+    h.clock.advance(CLAIM_TTL_MS + 1);
+    expect(h.ledger.releaseExpiredClaims()).toBe(3);
+
+    h.stage.complete(taken[0]!, documentOf(taken[0]!.attachmentKey, 'a'.repeat(64), 100));
+    h.stage.noText(taken[1]!);
+    h.stage.fail(taken[2]!, 'zotero refused');
+
+    expect(h.stage.staleCompletions).toBe(3);
+    for (const assignment of taken) {
+      expect(h.ledger.extractState(h.lib, assignment.attachmentKey)).toBeUndefined();
+      expect(h.ledger.row(assignment.wid)?.status).toBe('pending');
+    }
+    h.ledger.close();
+  });
+
+  it('surfaces the discarded duplicate on the drain report', async () => {
+    // The same race, driven through the worker rather than the stage, and read where an
+    // operator would read it. The document takes longer than the claim: mid-read the sweep
+    // runs, another P0 takes the row and finishes it, and this worker's own result — a real
+    // read of a real document — is discarded on arrival.
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0046', attachment: 'ATTA0046', dateAdded: '2022-01-01T00:00:00Z', text: 'slow' });
+    const second = new ExtractStage({ ledger: h.ledger, clock: h.clock, holder: 'p0-two' });
+    const w = worker(h);
+    w.onWindow = (): void => {
+      h.clock.advance(CLAIM_TTL_MS + 1);
+      h.ledger.releaseExpiredClaims();
+      const b = second.next();
+      if (b) second.complete(b, documentOf('ATTA0046', 'b'.repeat(64), 200));
+    };
+
+    const report = await w.drain();
+    expect(report.documents).toBe(1);
+    expect(report.staleCompletions).toBe(1);
+    expect(h.ledger.extractState(h.lib, 'ATTA0046')!.textHash).toBe('b'.repeat(64));
+    h.ledger.close();
+  });
+
+  it('leaves the ordinary path exactly as it was: a held row completes', async () => {
+    // The control the three arms above need. A guard that rejected a legitimate completion
+    // would leave every document unindexed, which no assertion about a race would catch.
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0045', attachment: 'ATTA0045', dateAdded: '2022-01-01T00:00:00Z', text: 'ordinary' });
+    const report = await worker(h).drain();
+
+    expect(report.documents).toBe(1);
+    expect(report.failures).toBe(0);
+    expect(h.stage.staleCompletions).toBe(0);
+    expect(report.staleCompletions).toBe(0);
+    expect(h.ledger.extractState(h.lib, 'ATTA0045')!.chars).toBe('ordinary'.length);
+    expect(h.ledger.pending(h.lib)).toEqual([]);
     h.ledger.close();
   });
 });
