@@ -1,5 +1,5 @@
 import { MIN_MATCH_TERMS, pruneTerms } from './query-terms.js';
-import { isStopword, tokenize } from './tokenize.js';
+import { indexText, isStopword, tokenize } from './tokenize.js';
 
 interface Doc {
   id: string;
@@ -37,7 +37,11 @@ export class BM25Index {
     // Re-adding an id replaces it: the caller's ids are content-derived, so a re-chunked
     // item reuses them and two copies of the same passage would double its term counts.
     this.removeDoc(id);
-    const tokens = tokenize(text);
+    // The same augmentation the SQLite side indexes: the words as written, plus the
+    // mark-stripped form of any that carry marks, so an unaccented query reaches an
+    // accented document on this backend too. Parity here is not decorative — the two
+    // backends are asserted to answer identically.
+    const tokens = tokenize(indexText(text));
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     for (const term of tf.keys()) this.df.set(term, (this.df.get(term) ?? 0) + 1);

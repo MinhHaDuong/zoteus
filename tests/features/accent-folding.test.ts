@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeForSearch, tokenize, UNICODE61_KEEPS_CASE } from '../../src/features/search/tokenize.js';
+import { foldMarks, indexText, normalizeForSearch, tokenize, UNICODE61_KEEPS_CASE } from '../../src/features/search/tokenize.js';
 import { createSearchIndex, nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { MemorySearchIndex, makeSnippet } from '../../src/features/search/index-manager.js';
 import { loadIndex, saveIndex } from '../../src/features/search/persistence.js';
@@ -62,9 +62,35 @@ describe.each(backends)('accent folding (%s backend)', (backend) => {
     await index.close();
   });
 
-  it('finds the unaccented document from the accented spelling', async () => {
+  it('does NOT find the unaccented document from the accented spelling', async () => {
+    // The one direction this deliberately gives up, and it is asserted rather than left to
+    // chance. Marks are no longer stripped from what is indexed, so an accented query is
+    // answered exactly. Restoring this direction means expanding the query to the stripped
+    // form, and that is precisely what cannot be done safely without knowing how common the
+    // stripped form is: expanding `thể` to `the` is how a Vietnamese word became
+    // unsearchable in the first place.
     const index = await oneDoc('un eleve tres applique');
-    expect(await hits(index, 'élève')).toEqual(['D']);
+    expect(await hits(index, 'élève')).toEqual([]);
+    // The unaccented spelling still reaches it, and so does the accented document from an
+    // unaccented query — the direction that costs nothing is kept in full.
+    expect(await hits(index, 'eleve')).toEqual(['D']);
+    await index.close();
+  });
+
+  it('answers an accented query on the word that was written, not on its stripped form', async () => {
+    // The reason for all of this, in one assertion. `thế` is a Vietnamese word; stripping
+    // its tone mark lands it on `the`, which in a real library is in 84% of passages. The
+    // two must not be one token.
+    const index = await indexOf(backend, [
+      { key: 'VI', text: 'năm 2020 phát triển bền vững' },
+      { key: 'EN', text: 'nam river basin hydrology study' },
+    ]);
+    // `năm` is Vietnamese for year; stripped it becomes `nam`, which here is a river. The
+    // accented query gets the Vietnamese passage and only that one.
+    expect(await hits(index, 'năm')).toEqual(['VI']);
+    // The unaccented query gets both, because the index holds the stripped form beside the
+    // written one — the recall that stripping used to buy, kept.
+    expect((await hits(index, 'nam')).sort()).toEqual(['EN', 'VI']);
     await index.close();
   });
 
@@ -159,8 +185,18 @@ describe.each(backends)('accent folding (%s backend)', (backend) => {
 });
 
 describe('normalizeForSearch', () => {
-  it('folds Latin diacritics and case', () => {
-    expect(normalizeForSearch('Élève Théorie Straße')).toBe('eleve theorie straße');
+  it('folds case but NOT diacritics', () => {
+    // Marks used to come off here, on both sides of every comparison. They now come off
+    // only in `foldMarks`, and only to produce the extra token `indexText` adds beside the
+    // written one.
+    expect(normalizeForSearch('Élève Théorie Straße')).toBe('élève théorie straße');
+  });
+
+  it('composes, because unicode61 does not and a mark is a separator to it', () => {
+    // A decomposed `é` would otherwise reach the index as the bare letter `e` while a
+    // composed one reaches it as `é`. Which a passage carries is decided by whatever
+    // extracted it.
+    expect(normalizeForSearch('e\u0301le\u0300ve')).toBe(normalizeForSearch('élève'));
   });
 
   it('leaves non-Latin diacritics alone, because remove_diacritics 2 does', () => {
@@ -180,9 +216,9 @@ describe('normalizeForSearch', () => {
 });
 
 describe('tokenize', () => {
-  it('keeps an accented word as one folded token', () => {
-    expect(tokenize('théorie')).toEqual(['theorie']);
-    expect(tokenize('élève')).toEqual(['eleve']);
+  it('keeps an accented word as one token, with its marks', () => {
+    expect(tokenize('théorie')).toEqual(['théorie']);
+    expect(tokenize('élève')).toEqual(['élève']);
   });
 
   it('keeps non-Latin words as whole tokens', () => {
@@ -288,8 +324,36 @@ describe('codepoints unicode61 does not fold the way JavaScript would', () => {
     // The shield hides characters behind U+FDD0..U+FDEF noncharacters. A restore that
     // failed would leave one of those in a token, and it would match nothing forever.
     const folded = normalizeForSearch("Théorie générale de l'emploi Ǽ Ϳ");
-    expect(folded).toBe("theorie generale de l'emploi ǽ Ϳ");
+    expect(folded).toBe("théorie générale de l'emploi ǽ Ϳ");
     expect(/[﷐-﷯]/u.test(folded)).toBe(false);
     expect(normalizeForSearch('plain ascii text')).toBe('plain ascii text');
+  });
+});
+
+describe('foldMarks and indexText', () => {
+  it('strips Latin marks, and only those', () => {
+    expect(foldMarks('théorie')).toBe('theorie');
+    expect(foldMarks('thế')).toBe('the');
+    // Non-Latin marks stay, because unicode61 never removed them either.
+    expect(foldMarks('λόγος')).toBe('λόγος');
+    // And the shielded five keep their marks: stripping them yields other real words.
+    expect(foldMarks('ǽ')).toBe('ǽ');
+  });
+
+  it('indexes the word as written, plus its stripped form when they differ', () => {
+    expect(indexText('théorie')).toBe('théorie theorie');
+    // Nothing added when nothing carries a mark: the common case costs nothing.
+    expect(indexText('plain ascii text')).toBe('plain ascii text');
+  });
+
+  it('adds each stripped form once per passage, not once per occurrence', () => {
+    // BM25 normalizes by document length, so an accented word repeated twenty times must
+    // not lengthen the document by forty.
+    expect(indexText('élève élève élève')).toBe('élève élève élève eleve');
+  });
+
+  it('is what lets an unaccented query reach an accented document', () => {
+    expect(tokenize(indexText('un élève très appliqué'))).toContain('eleve');
+    expect(tokenize(indexText('un élève très appliqué'))).toContain('élève');
   });
 });

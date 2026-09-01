@@ -85,15 +85,69 @@ export function normalizeForSearch(text: string): string {
   // lowercasing is context-sensitive Greek final sigma, and UNIFY folds ς and σ together
   // anyway, so both routes land on the same token.
   const lowered = text.replace(/[\p{Lu}\p{Lt}]/gu, (c) => (UNICODE61_KEEPS_CASE.has(c) ? c : c.toLowerCase()));
-  const folded = NO_TRANSFORM_SHIELD.hide(lowered)
+  // NFC, and this is load-bearing rather than tidiness. unicode61 does not normalize, and
+  // it treats a combining mark as a separator, so a decomposed `é` reaches the index as
+  // the single letter `e` while a composed one reaches it as `é`. Extraction decides which
+  // a passage happens to carry. Composing both sides removes the difference.
+  //
+  // Shielded, because composing is not free either: `ʹ` U+0374 has a canonical
+  // decomposition, so NFC turns it into U+02B9 — two codepoints that print alike, where
+  // unicode61 leaves the first alone. Composing it would send the query to a token the
+  // index does not hold, which is this file's own defect class.
+  const composed = NO_TRANSFORM_SHIELD.show(NO_TRANSFORM_SHIELD.hide(lowered).normalize('NFC'));
+  return composed.replace(UNIFY_RE, (c) => UNIFY[c]!);
+}
+
+/**
+ * The same string with its Latin combining marks removed — `théorie` to `theorie`.
+ *
+ * This used to be part of `normalizeForSearch`, applied to every string on both sides, and
+ * moving it out is the point of the change rather than a refactor. Applied to everything
+ * it does not normalize spelling, it merges vocabulary: measured on a real library, `án`
+ * (2,592 occurrences) lands on `an`, `bé` (939) on `be`, `thể` and `thế` (641 together) on
+ * `the`. Those are Vietnamese words, where a tone mark is part of the word and not an
+ * accent on it — `ma má mà mả mã mạ` are six words — and once merged into a high-frequency
+ * English token they cannot be searched for at all.
+ *
+ * It is still wanted, in one direction only: someone who types `theorie` should find
+ * `théorie`, because accents are the first thing lost to keyboards, copy-paste and OCR. So
+ * the folded form is now indexed BESIDE the written one rather than instead of it, and the
+ * query side does not fold at all. An accented query is answered exactly; an unaccented one
+ * still reaches the accented documents through the extra token. See `indexText`.
+ *
+ * The shield is kept: `ǡ ǣ ǯ ǽ ǿ` have a non-ASCII Latin base, so stripping their mark
+ * yields `a æ ʒ æ ø` — real words of other documents, and now a false extra token rather
+ * than a false primary one.
+ */
+export function foldMarks(text: string): string {
+  const stripped = NO_TRANSFORM_SHIELD.hide(text)
     // Lowercasing can itself introduce a mark (`İ` → `i` + U+0307), so decompose after it.
     .normalize('NFD')
     .replace(LATIN_MARKS, '$1')
-    // Recompose what was kept: the token class below excludes marks, exactly as unicode61
-    // treats them as separators, so a decomposed `ά` left standing would split in two.
-    .normalize('NFC')
-    .replace(UNIFY_RE, (c) => UNIFY[c]!);
-  return NO_TRANSFORM_SHIELD.show(folded);
+    .normalize('NFC');
+  return NO_TRANSFORM_SHIELD.show(stripped);
+}
+
+/**
+ * What actually goes into the index for a passage: the text as written, plus the
+ * mark-stripped form of any word that carries marks.
+ *
+ * Both backends index this rather than the raw text, and neither reads it back — the
+ * SQLite backend keeps `passages.text` for display and snippets, and the FTS table is
+ * external-content, so what is indexed and what is shown are already separate things.
+ *
+ * The extra tokens are added once per distinct form per passage, not once per occurrence,
+ * which keeps the effect on BM25's length normalization to the vocabulary of the passage
+ * rather than to its length.
+ */
+export function indexText(text: string): string {
+  const normalized = normalizeForSearch(text);
+  const extra = new Set<string>();
+  for (const t of normalized.match(/[\p{L}\p{N}]+/gu) ?? []) {
+    const f = foldMarks(t);
+    if (f !== t && f.length > 1) extra.add(f);
+  }
+  return extra.size ? `${normalized} ${[...extra].join(' ')}` : normalized;
 }
 
 /**
@@ -160,6 +214,10 @@ const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
  * own: it keeps `théorie`, `Θεωρία`, `теория` and `日本語` single tokens instead of
  * fragments, and it would have prevented this defect even without the fold — a whole token
  * misses cleanly, a fragment matches a high-frequency English string.
+ *
+ * Marks are NOT removed here any more; see `foldMarks` and `indexText`. A query is
+ * answered on the letters it was typed with, and the unaccented spelling still reaches the
+ * accented documents because the index carries both.
  *
  * **The stopword list no longer lives here**, and that is the point of the change rather
  * than tidying. This function is the *document* tokenizer as well as the query one on the
