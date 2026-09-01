@@ -84,11 +84,20 @@ export class BM25Index {
   search(query: string, topK = 10): BM25Hit[] {
     if (this.docs.size === 0) return [];
     const pruned = pruneTerms([...new Set(tokenize(query))], isStopword);
-    // The same asymmetric expansion as the SQLite backend's `expandTerm`: an unaccented
-    // term also scores the accented spellings the vocabulary holds, each with its own
-    // idf; an accented term runs exactly as typed.
+    // The same asymmetric, dominance-gated expansion as the SQLite backend's
+    // `expandTerm` (the direction and the gate are explained there): an unaccented term
+    // also scores the accented spellings the vocabulary holds — but only when those
+    // spellings outweigh the typed one in this corpus. An accented term runs as typed.
     const qTerms = [
-      ...new Set(pruned.flatMap((t) => (accentKey(t) === t ? [t, ...(this.variants.get(t) ?? [])] : [t]))),
+      ...new Set(
+        pruned.flatMap((t) => {
+          if (accentKey(t) !== t) return [t];
+          const vs = [...(this.variants.get(t) ?? [])];
+          if (!vs.length) return [t];
+          const variantsDf = vs.reduce((s, v) => s + (this.df.get(v) ?? 0), 0);
+          return variantsDf > (this.df.get(t) ?? 0) ? [t, ...vs] : [t];
+        }),
+      ),
     ];
     const avgdl = this.totalLength / this.docs.size;
     const N = this.docs.size;

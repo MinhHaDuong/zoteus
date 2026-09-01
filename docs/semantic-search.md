@@ -492,6 +492,13 @@ from its own vocabulary. Because nothing extra is indexed, document length, term
 frequency and idf are what the text says they are, and ranking is untouched for every
 query that needs no expansion.
 
+Expansion is **dominance-gated**: a term expands only when the accented spellings
+outweigh the typed one in this library (by document frequency, compared at derivation
+time). `theorie` expands because the library overwhelmingly writes `théorie`; `trong`
+does not, because the library holds it 25 771 times as typed and its accented siblings
+(`trọng`, `trồng`, …) are different, rarer words whose high idf would otherwise outrank
+what the user asked for. The gate is corpus-derived — there is no threshold to tune.
+
 It used to strip marks from everything on both sides, and that is a different thing from
 being insensitive to them. In a library holding more than one language it merges
 vocabulary rather than normalizing spelling: Vietnamese `án`, `bé`, `thể` and `thế` all

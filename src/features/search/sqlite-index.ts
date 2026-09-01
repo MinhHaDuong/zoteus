@@ -83,23 +83,42 @@ const FTS_TOKENIZER = 'unicode61 remove_diacritics 0';
  */
 function deriveAccentVariants(db: Database): void {
   db.exec(`
-    CREATE TABLE IF NOT EXISTS accent_variants (
+    DROP TABLE IF EXISTS accent_variants;
+    CREATE TABLE accent_variants (
       folded TEXT NOT NULL,
       term TEXT NOT NULL,
+      df INTEGER NOT NULL,
       PRIMARY KEY (folded, term)
     ) WITHOUT ROWID;
-    DELETE FROM accent_variants;
     CREATE VIRTUAL TABLE temp.accent_vocab USING fts5vocab('main', 'passages_fts', 'row');
   `);
-  const insert = db.prepare('INSERT OR IGNORE INTO accent_variants(folded, term) VALUES (?, ?)');
-  for (const row of db.prepare('SELECT term FROM temp.accent_vocab').iterate() as Iterable<{ term: string }>) {
+  const insert = db.prepare('INSERT OR IGNORE INTO accent_variants(folded, term, df) VALUES (?, ?, ?)');
+  const keys = new Set<string>();
+  for (const row of db.prepare('SELECT term, doc FROM temp.accent_vocab').iterate() as Iterable<{
+    term: string;
+    doc: number;
+  }>) {
     const folded = accentKey(row.term);
-    if (folded !== row.term && folded.length > 1) insert.run(folded, row.term);
+    if (folded !== row.term && folded.length > 1) {
+      insert.run(folded, row.term, row.doc);
+      keys.add(folded);
+    }
+  }
+  // The key's own document frequency, stored as a self row (term = folded), because the
+  // expansion gate compares the two sides of one question: is this spelling, in THIS
+  // corpus, predominantly the accented word? `theorie` (df 214 against 955 accented) is;
+  // `trong` (25 771 against 7 027 Vietnamese siblings) is not.
+  const selfDf = db.prepare('SELECT doc FROM temp.accent_vocab WHERE term = ?');
+  for (const k of keys) {
+    const row = selfDf.get(k) as { doc: number } | undefined;
+    if (row) insert.run(k, k, row.doc);
   }
   db.exec('DROP TABLE temp.accent_vocab');
-  // The stamp `ensureAccentVariants` checks, so an all-ASCII library (map legitimately
-  // empty) is not re-scanned on every open.
-  db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run('accentVariantsDerived', '1');
+  // The refresh stamp: how many passages the map was derived over. Read by
+  // `refreshAccentVariants`, so an unchanged library (and an all-ASCII one, whose map is
+  // legitimately empty) is not re-scanned on every open.
+  const n = (db.prepare('SELECT COUNT(*) AS n FROM passages').get() as { n: number }).n;
+  db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run('accentVariantsPassages', String(n));
 }
 
 /**
@@ -263,7 +282,6 @@ interface Statements {
   insertItem: StatementSync;
   insertPassage: StatementSync;
   insertFts: StatementSync;
-  insertVariant: StatementSync;
   variantsFor: StatementSync;
   deleteFts: StatementSync;
   itemPassages: StatementSync;
@@ -389,7 +407,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       if (existed) await this.reconcileSchema();
       if (!this.db) this.openHandle();
       this.createSchema();
-      this.ensureAccentVariants();
+      this.refreshAccentVariants();
       this.prepareStatements();
       // `existed` deliberately still gates the import after a sideline: the legacy JSON
       // was already consumed by whichever build wrote the incompatible database, and
@@ -418,11 +436,18 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * library — instead of being wrong quietly. The meta stamp keeps the scan from running
    * on every open of a library whose map is legitimately empty.
    */
-  private ensureAccentVariants(): void {
+  private refreshAccentVariants(): void {
     const row = this.handle
-      .prepare("SELECT value FROM meta WHERE key = 'accentVariantsDerived'")
+      .prepare("SELECT value FROM meta WHERE key = 'accentVariantsPassages'")
       .get() as { value?: string } | undefined;
-    if (row?.value === '1') return;
+    const current = (this.handle.prepare('SELECT COUNT(*) AS n FROM passages').get() as { n: number }).n;
+    if (row?.value !== undefined) {
+      const stored = Number(row.value);
+      // The droplist cadence (see the derived-state note on deriveAccentVariants): a
+      // handful of new items cannot move which spelling dominates, so rescan only when
+      // the passage count has drifted by more than ~10% since the map was derived.
+      if (Math.abs(current - stored) <= 0.1 * Math.max(stored, 1)) return;
+    }
     deriveAccentVariants(this.handle);
   }
 
@@ -841,11 +866,14 @@ export class SqliteSearchIndex extends SearchIndexBase {
         tokenize='${FTS_TOKENIZER}'
       );
       -- The folded-form → accented-spelling map queries expand through: derived from the
-      -- FTS vocabulary (deriveAccentVariants), kept current by addRecord. Derived state:
-      -- losing this table costs one vocabulary scan, never data.
+      -- FTS vocabulary (deriveAccentVariants), refreshed on the droplist cadence by
+      -- refreshAccentVariants. Derived state: losing this table costs one vocabulary
+      -- scan, never data. df is the spelling's document frequency at derivation time —
+      -- the expansion gate's evidence.
       CREATE TABLE IF NOT EXISTS accent_variants (
         folded TEXT NOT NULL,
         term TEXT NOT NULL,
+        df INTEGER NOT NULL,
         PRIMARY KEY (folded, term)
       ) WITHOUT ROWID;
     `);
@@ -864,8 +892,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
         'INSERT INTO passages(id, item_key, title, text, source) VALUES (?, ?, ?, ?, ?)',
       ),
       insertFts: db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)'),
-      insertVariant: db.prepare('INSERT OR IGNORE INTO accent_variants(folded, term) VALUES (?, ?)'),
-      variantsFor: db.prepare('SELECT term FROM accent_variants WHERE folded = ?'),
+      variantsFor: db.prepare('SELECT term, df FROM accent_variants WHERE folded = ?'),
       // The external-content delete protocol: FTS5 stores no text of its own, so a row is
       // retired by handing back the exact rowid and text that were indexed. A bare DELETE
       // on `passages` would leave the index pointing at a rowid that no longer resolves,
@@ -1114,15 +1141,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // Normalized once, here, so what FTS tokenizes is exactly what the JS query side
     // produces (NFC, unicode61-aware case fold) — unicode61 itself normalizes nothing.
     // The delete sites below re-derive the same string from passages.text, which the
-    // external-content protocol requires to match byte for byte.
+    // external-content protocol requires to match byte for byte. The expansion map is NOT
+    // maintained here: it is derived state with a cadence (refreshAccentVariants), like
+    // the binary vector codes beside it.
     this.stmts.insertFts.run(Number(res.lastInsertRowid), normalizeForSearch(rec.text));
-    // Keep the expansion map current as the vocabulary grows. A deletion may leave an
-    // entry behind; that costs one zero-hit term in an expanded query, never a wrong
-    // result, and the next full build re-derives the map (deriveAccentVariants).
-    for (const t of new Set(tokenize(rec.text))) {
-      const folded = accentKey(t);
-      if (folded !== t && folded.length > 1) this.stmts.insertVariant.run(folded, t);
-    }
     this.c.documents++;
     if (rec.source === 'fulltext') {
       this.c.fulltextPassages++;
@@ -1317,8 +1339,20 @@ export class SqliteSearchIndex extends SearchIndexBase {
    */
   private expandTerm(term: string): string {
     if (accentKey(term) !== term) return ftsTerm(term);
-    const variants = this.stmts.variantsFor.all(term) as Array<{ term: string }>;
+    const rows = this.stmts.variantsFor.all(term) as Array<{ term: string; df: number }>;
+    const variants = rows.filter((v) => v.term !== term);
     if (!variants.length) return ftsTerm(term);
+    // The dominance gate, measured before it was trusted: expand only when the accented
+    // spellings outweigh the typed one in this corpus. Without it, every rare accented
+    // sibling of a common word joins the query at a HIGH idf — `trong` (25 771 passages)
+    // dragged in `trọng`, `trồng` and four more, `le` dragged in nine Vietnamese words,
+    // OCR's `enêrgy` outranked real hits for `energy` — and top-1 agreement with stock
+    // fell to 10-15 of 20 per language. With it, a query is read the way this library
+    // predominantly spells it: `theorie` (214 against 955 accented) expands, `trong`
+    // (25 771 against 7 027) runs as typed. Corpus-derived, no threshold to tune.
+    const selfDf = (rows.find((v) => v.term === term)?.df ?? 0);
+    const variantsDf = variants.reduce((s, v) => s + v.df, 0);
+    if (variantsDf <= selfDf) return ftsTerm(term);
     const group = [term, ...variants.map((v) => v.term)].map(ftsTerm).join(' OR ');
     return `(${group})`;
   }
@@ -1703,6 +1737,16 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * index, and failing a build over it would be losing the library to save the cache.
    */
   protected finalizeVectors(): void {
+    // The expansion map is derived from the keyword vocabulary exactly as the binary
+    // codes below are derived from the vectors, and it levels up at the same moment, for
+    // the same reason: the derived rows commit with the rows they were derived from.
+    // Same contract too — never throw; a map that could not be refreshed is yesterday's
+    // expansions, not a failed build.
+    try {
+      this.refreshAccentVariants();
+    } catch (e) {
+      this.opts.logger?.warn(`accent variants not refreshed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     // What the salvage actually spared, reported where the numbers are final rather than
     // promised in the future tense the sideline had to use. Rewritten from the sideline's
     // own sentence each time, so a second job over the same index updates the figure

@@ -462,7 +462,10 @@ describe('the rung that keeps diacritics re-indexes text and re-embeds nothing',
     const path = tmpDbPath('migrate-diacritics-answers');
     const first = await openIndex(path, { embedder: new CountingEmbedder() });
     await first.build([
-      { key: 'VI', data: { itemType: 'book', title: 'Bao cao', abstractNote: 'năm 2020 phát triển bền vững' } },
+      // Two accented passages against one bare one, so the accented spelling dominates
+      // and the unaccented query expands (the gate compares document frequencies).
+      { key: 'V1', data: { itemType: 'book', title: 'Bao cao', abstractNote: 'năm 2020 phát triển bền vững' } },
+      { key: 'V2', data: { itemType: 'book', title: 'Ke hoach', abstractNote: 'năm 2021 chính sách năng lượng' } },
       // The contrast, without which neither assertion below could fail: a document holding
       // the bare spelling. On a `remove_diacritics 2` index the two are one token and the
       // accented query returns both.
@@ -478,11 +481,11 @@ describe('the rung that keeps diacritics re-indexes text and re-embeds nothing',
       // Before the rung this query was answered by a `remove_diacritics 2` index, where the
       // accented and unaccented spellings are one token and this could not discriminate.
       // After it, the accented query is exact and the unaccented one still reaches the
-      // document through the stripped form the rung indexed beside it.
+      // documents through query expansion over the map the rung derived.
       const exact = await second.query('n\u0103m', { limit: 5, mode: 'keyword' });
-      expect(exact.map((h) => h.itemKey)).toEqual(['VI']);
+      expect([...new Set(exact.map((h) => h.itemKey))].sort()).toEqual(['V1', 'V2']);
       const loose = await second.query('nam', { limit: 5, mode: 'keyword' });
-      expect([...new Set(loose.map((h) => h.itemKey))].sort()).toEqual(['EN', 'VI']);
+      expect([...new Set(loose.map((h) => h.itemKey))].sort()).toEqual(['EN', 'V1', 'V2']);
     } finally {
       await second.close();
     }

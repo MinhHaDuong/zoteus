@@ -84,16 +84,34 @@ describe.each(backends)('accent folding (%s backend)', (backend) => {
     // its tone mark lands it on `the`, which in a real library is in 84% of passages. The
     // two must not be one token.
     const index = await indexOf(backend, [
-      { key: 'VI', text: 'năm 2020 phát triển bền vững' },
+      { key: 'V1', text: 'năm 2020 phát triển bền vững' },
+      { key: 'V2', text: 'năm 2021 chính sách năng lượng' },
       { key: 'EN', text: 'nam river basin hydrology study' },
     ]);
     // `năm` is Vietnamese for year; stripped it becomes `nam`, which here is a river. The
-    // accented query gets the Vietnamese passage and only that one.
+    // accented query gets the Vietnamese passages and only those.
+    expect((await hits(index, 'năm')).sort()).toEqual(['V1', 'V2']);
+    // The unaccented query gets all three: the accented spelling dominates this corpus
+    // (`năm` in two passages against `nam` in one), so the query expands to it — the
+    // recall that stripping used to buy, kept, without indexing one extra token.
+    expect((await hits(index, 'nam')).sort()).toEqual(['EN', 'V1', 'V2']);
+    await index.close();
+  });
+
+  it('does not expand a spelling the corpus predominantly uses as typed', async () => {
+    // The dominance gate, from the other side — the case that made it necessary. In the
+    // real library `trong` (a Vietnamese function word, 25 771 passages) has six rare
+    // accented siblings; expanding it hands each a HIGH idf and they outrank the word
+    // the user typed. Here `nam` dominates (two passages against one `năm`), so a `nam`
+    // query runs as typed and the accented passage stays out of it.
+    const index = await indexOf(backend, [
+      { key: 'E1', text: 'nam river basin hydrology study' },
+      { key: 'E2', text: 'the nam basin flood model' },
+      { key: 'VI', text: 'năm 2020 phát triển bền vững' },
+    ]);
+    expect((await hits(index, 'nam')).sort()).toEqual(['E1', 'E2']);
+    // The accented direction is untouched by the gate: exact, as always.
     expect(await hits(index, 'năm')).toEqual(['VI']);
-    // The unaccented query gets both, because it expands to the accented spellings the
-    // vocabulary holds — the recall that stripping used to buy, kept, without indexing
-    // one extra token.
-    expect((await hits(index, 'nam')).sort()).toEqual(['EN', 'VI']);
     await index.close();
   });
 

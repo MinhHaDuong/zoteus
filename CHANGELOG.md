@@ -14,8 +14,9 @@ All notable changes to Zoteus are documented here. The format is based on
   indexed exactly as written (`remove_diacritics 0`), an accented query is answered
   exactly, and an unaccented query still reaches accented documents by expanding to the
   accented spellings the library's vocabulary holds (`theorie` runs as
-  `theorie OR théorie`). Nothing extra is indexed, so ranking is untouched for queries
-  that need no expansion. Search semantics change accordingly: `thé` no longer answers as
+  `theorie OR théorie`) — but only where those spellings dominate the typed one in this
+  library, so a common word is never dragged toward its rare accented siblings. Nothing
+  extra is indexed, so ranking is untouched for queries that need no expansion. Search semantics change accordingly: `thé` no longer answers as
   `the`, and `soren` still does not answer to `søren` (`ø` is a letter, not an accent).
   **Existing SQLite indexes are migrated in place** on first open (schema 1 → 2: the
   keyword table is re-tokenized; no vectors are re-computed and nothing re-reads Zotero).
