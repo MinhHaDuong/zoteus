@@ -1,10 +1,12 @@
 import type { ActivityGate } from './activity.js';
 import type { Clock } from './clock.js';
 import { systemClock } from './clock.js';
-import type { DocumentSource, DocumentWindow, StreamedDocument } from './document-stream.js';
+import type { DocumentSource, DocumentWindow, ExtractRead, StreamedDocument } from './document-stream.js';
 import { streamFullText } from './document-stream.js';
 import type { ExtractAssignment, ExtractDispatcher } from './extract-stage.js';
+import type { PacerReport } from './fetch-pacer.js';
 import { FetchPacer } from './fetch-pacer.js';
+import type { PriorityReport } from './priority.js';
 import type { WorkerControl, WorkerOrphanGuard } from './orphan.js';
 
 /**
@@ -48,6 +50,10 @@ export interface ExtractDrainReport {
   totalDelayMs: number;
   activityYields: number;
   totalYieldMs: number;
+  /** What the instrument panel shows about the local API's behaviour during this drain. */
+  pace: PacerReport;
+  /** What the OS floor came to, when this worker was asked to take one. */
+  priority?: PriorityReport;
 }
 
 export interface ExtractWorkerOptions {
@@ -60,6 +66,16 @@ export interface ExtractWorkerOptions {
   activity?: ActivityGate;
   guard?: WorkerOrphanGuard;
   windowChars?: number;
+  /**
+   * Take the OS floor, once, before the first document.
+   *
+   * A seam and not a call, and deliberately absent by default. `lowerWorkerPriority` renices
+   * the process it runs in, and until the worker is a process of its own (the pipe is
+   * tranche 4's) that process is the one answering queries — so a worker that reniced itself
+   * unasked would put R6's query path on the floor to be polite to Zotero. The entry point
+   * that forks the worker passes `lowerWorkerPriority` here; nothing else should.
+   */
+  priority?: () => PriorityReport;
 }
 
 export class ExtractWorker {
@@ -76,6 +92,8 @@ export class ExtractWorker {
   private readonly activity?: ActivityGate;
   private readonly guard?: WorkerOrphanGuard;
   private readonly windowChars?: number;
+  private readonly priority?: () => PriorityReport;
+  private priorityReport?: PriorityReport;
   private killedFor?: string;
 
   constructor(opts: ExtractWorkerOptions) {
@@ -87,6 +105,7 @@ export class ExtractWorker {
     this.activity = opts.activity;
     this.guard = opts.guard;
     this.windowChars = opts.windowChars;
+    this.priority = opts.priority;
   }
 
   get pacerReport(): ReturnType<FetchPacer['report']> {
@@ -110,6 +129,7 @@ export class ExtractWorker {
   }
 
   async drain(): Promise<ExtractDrainReport> {
+    this.priorityReport ??= this.priority?.();
     let documents = 0;
     let windows = 0;
     let chars = 0;
@@ -143,25 +163,27 @@ export class ExtractWorker {
         await this.sleep(delay);
       }
 
-      const started = this.clock.now();
-      let document: StreamedDocument | null;
+      let read: ExtractRead;
       try {
-        document = await streamFullText({
+        read = await streamFullText({
           source: this.source,
           attachmentKey: assignment.attachmentKey,
           lib: assignment.libRef,
           windowChars: this.windowChars,
+          clock: this.clock,
           onWindow: (window) => this.onWindow?.(window, assignment),
         });
       } catch (e) {
         // A failed fetch tells the pacer nothing: an error is not a latency, and feeding
         // the time-to-failure into the median would let one refused connection read as the
-        // fastest document of the run.
+        // fastest document of the run. A stream cut mid-document arrives here too, which is
+        // the point of `document-stream.ts` raising rather than returning a short document.
         failures++;
         this.dispatcher.fail(assignment, e instanceof Error ? e.message : String(e));
         continue;
       }
-      this.pacer.observe(this.clock.now() - started);
+      if (read.ttfbMs !== null) this.pacer.observe(read.ttfbMs);
+      const document: StreamedDocument | null = read.document;
 
       if (document === null) {
         emptyDocuments++;
@@ -208,6 +230,8 @@ export class ExtractWorker {
       totalDelayMs: pace.totalDelayMs,
       activityYields: this.activity?.yields ?? 0,
       totalYieldMs: this.activity?.totalYieldMs ?? 0,
+      pace,
+      ...(this.priorityReport ? { priority: this.priorityReport } : {}),
     };
   }
 }
@@ -273,6 +297,7 @@ function failedReport(e: unknown): ExtractDrainReport {
     totalDelayMs: 0,
     activityYields: 0,
     totalYieldMs: 0,
+    pace: new FetchPacer().report(),
   };
 }
 

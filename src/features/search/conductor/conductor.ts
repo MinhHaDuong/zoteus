@@ -76,6 +76,8 @@ export interface ConductorPollReport {
   /** Whether this pass started a worker, and whether one is running now. */
   workerSpawned?: boolean;
   workerAlive: boolean;
+  /** Claims this P0 has returned to the queue by expiry, cumulative over its life. */
+  releasedClaims: number;
   /** Empty for a follower, and for a conductor with nothing due. */
   ticks: TickReport[];
 }
@@ -91,6 +93,8 @@ export class Conductor {
   /** Set by the deposition callback, read by the pass that caused it. */
   private killedThisPass?: string;
   private spawnedThisPass?: boolean;
+  /** Claims returned to the queue by the sweep, cumulative. Surfaced for the panel. */
+  private released = 0;
 
   constructor(opts: ConductorOptions) {
     this.ledger = opts.ledger;
@@ -134,6 +138,12 @@ export class Conductor {
       return this.report(election);
     }
     const ticks = await this.runTicks();
+    // Rows whose holder died mid-document come back to the queue here, and this is the only
+    // place that returns them. §5.2.5 recovers a stuck worker by claim expiry at the cost of
+    // at most one duplicated micro-batch — but expiry is a *timestamp*, not an event, so
+    // without someone running the sweep the row simply stays `claimed` and the attachment is
+    // never indexed again. A hard-killed worker would otherwise strand every row it held.
+    this.released += this.ledger.releaseExpiredClaims();
     // After the tick, not before: the tick is what writes the work orders, so a spawn
     // decided on the pre-tick queue would idle through the cadence that just found
     // something to do. A worker that has drained is simply gone, and the next pass with
@@ -202,6 +212,7 @@ export class Conductor {
       workerKilled: this.killedThisPass,
       ...(this.spawnedThisPass ? { workerSpawned: true } : {}),
       workerAlive: this.worker?.alive() ?? false,
+      releasedClaims: this.released,
       ticks,
     };
   }

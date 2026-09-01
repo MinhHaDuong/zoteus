@@ -7,6 +7,7 @@ import {
   WINDOW_CHARS,
 } from '../../src/features/search/conductor/document-stream.js';
 import type { DocumentWindow } from '../../src/features/search/conductor/document-stream.js';
+import { ManualClock } from '../fixtures/clock.js';
 import { ReplayLocalApi } from '../fixtures/local-api-replay.js';
 
 /**
@@ -144,7 +145,7 @@ describe('the whole-document GET: over the wire', () => {
     });
 
     const windows: DocumentWindow[] = [];
-    const doc = await streamFullText({
+    const { document: doc } = await streamFullText({
       source: api.client(),
       attachmentKey: 'ATTA0001',
       windowChars: 8,
@@ -167,14 +168,14 @@ describe('the whole-document GET: over the wire', () => {
   it('is not truncated when Zotero indexed the whole document', async () => {
     const api = replay();
     api.put('/users/0/items/ATTA0002/fulltext', { body: { content: 'all of it', indexedPages: 40, totalPages: 40 } });
-    const doc = await streamFullText({ source: api.client(), attachmentKey: 'ATTA0002' });
+    const { document: doc } = await streamFullText({ source: api.client(), attachmentKey: 'ATTA0002' });
     expect(doc!.truncated).toBe(false);
   });
 
   it('answers null when Zotero has no text, and raises when the app is unreachable', async () => {
     const api = replay();
     api.strict = false; // an unregistered route answers 404, which is "nothing extracted"
-    expect(await streamFullText({ source: api.client(), attachmentKey: 'NOSUCH' })).toBeNull();
+    expect((await streamFullText({ source: api.client(), attachmentKey: 'NOSUCH' })).document).toBeNull();
 
     api.silent = true;
     // The two must not collapse into each other: a 404 is a settled empty state, where an
@@ -183,10 +184,56 @@ describe('the whole-document GET: over the wire', () => {
     await expect(streamFullText({ source: api.client(), attachmentKey: 'ATTA0001' })).rejects.toThrow();
   });
 
+  it('raises on a stream that stopped inside the document rather than storing the prefix', async () => {
+    // Review round 1's first blocker. This is the one way the streaming design can lie that
+    // the buffering one cannot: `JSON.parse` over a cut body throws, where a scanner has
+    // already handed out every window it decoded and would hash the prefix and call it the
+    // text — a `done` row whose `text_hash` is over half a document, which is a wrong index
+    // rather than a partial one. Note that `truncated` cannot see this: it is Zotero's page
+    // cap, read from an envelope that on a cut stream never arrived.
+    const api = replay();
+    const whole = JSON.stringify({ content: 'a'.repeat(400), indexedPages: 4, totalPages: 4 });
+    api.put('/users/0/items/ATTACUT1/fulltext', { text: whole.slice(0, 200) });
+
+    await expect(streamFullText({ source: api.client(), attachmentKey: 'ATTACUT1' })).rejects.toThrow(
+      /ended inside the document/,
+    );
+
+    // Control: the same document served whole goes through. Without this the assertion above
+    // is satisfied by a reader that rejects everything.
+    api.put('/users/0/items/ATTAFULL/fulltext', { text: whole });
+    const read = await streamFullText({ source: api.client(), attachmentKey: 'ATTAFULL' });
+    expect(read.document!.chars).toBe(400);
+  });
+
+  it('times the response, not the read', async () => {
+    // The pacer's whole input. Timing the read instead would measure the corpus: the
+    // near-empty snapshot and the 44,9 MB dictionary differ by orders of magnitude on a
+    // Zotero behaving identically, so a back-off built on it would fire on a big document.
+    const clock = new ManualClock(1_000);
+    const api = new ReplayLocalApi({ clock });
+    api.latencyMs = 250;
+    api.put('/users/0/items/ATTA0009/fulltext', { body: { content: 'x'.repeat(50_000) } });
+
+    const read = await streamFullText({
+      source: api.client(),
+      attachmentKey: 'ATTA0009',
+      windowChars: 64,
+      clock,
+      // Reading the body costs time the measurement must not include.
+      onWindow: () => {
+        clock.advance(10);
+      },
+    });
+
+    expect(read.document!.windows).toBeGreaterThan(700);
+    expect(read.ttfbMs).toBe(250);
+  });
+
   it('reports an empty document as empty rather than as absent', async () => {
     const api = replay();
     api.put('/users/0/items/ATTA0003/fulltext', { body: { content: '', indexedPages: 0, totalPages: 3 } });
-    const doc = await streamFullText({ source: api.client(), attachmentKey: 'ATTA0003' });
+    const { document: doc } = await streamFullText({ source: api.client(), attachmentKey: 'ATTA0003' });
     expect(doc).not.toBeNull();
     expect(doc!.empty).toBe(true);
     expect(doc!.chars).toBe(0);

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { LibraryRef } from '../../../api/web-client.js';
+import type { Clock } from './clock.js';
 
 /**
  * The extract shim's one reading duty: the whole-document GET (SPEC.md §5.2.4, §5.2.5).
@@ -96,6 +97,26 @@ export interface StreamFullTextOptions {
   /** Called once per window, in order. Awaited, so a slow sink paces the read. */
   onWindow?: (window: DocumentWindow) => void | Promise<void>;
   windowChars?: number;
+  /** Times the response. Without one the read is untimed and `ttfbMs` is null. */
+  clock?: Clock;
+}
+
+/**
+ * One read: the document, and how long Zotero took to *answer*.
+ *
+ * The two are returned together because the caller needs the timing even when there was no
+ * document — a 404 is a round trip to the same struggling process — and because the timing
+ * that matters is the time to the response, never the time to the last byte. A whole-body
+ * measurement is dominated by document size: the near-empty HTML snapshot in the measured
+ * corpus answers in a few milliseconds and the 44,9 MB dictionary in seconds, on a Zotero
+ * behaving identically. Feeding that into a latency median measures the corpus, not the
+ * server, and the back-off built on it would fire on a big document and clear on a small one.
+ */
+export interface ExtractRead {
+  /** Null when Zotero has no text for the attachment (a 404). */
+  document: StreamedDocument | null;
+  /** Time to the response, in the caller's clock. Null when no clock was given. */
+  ttfbMs: number | null;
 }
 
 /**
@@ -107,9 +128,11 @@ export interface StreamFullTextOptions {
  * raises here rather than being read as an empty document, because the two lead to opposite
  * bookkeeping.
  */
-export async function streamFullText(opts: StreamFullTextOptions): Promise<StreamedDocument | null> {
+export async function streamFullText(opts: StreamFullTextOptions): Promise<ExtractRead> {
+  const started = opts.clock?.now() ?? null;
   const res = await opts.source.fetchFullTextStream(opts.attachmentKey, opts.lib);
-  if (res === null) return null;
+  const ttfbMs = started === null ? null : (opts.clock?.now() ?? started) - started;
+  if (res === null) return { document: null, ttfbMs };
 
   const scanner = new ContentScanner(opts.windowChars ?? WINDOW_CHARS);
   const emit = async (window: DocumentWindow): Promise<void> => {
@@ -131,18 +154,34 @@ export async function streamFullText(opts: StreamFullTextOptions): Promise<Strea
   }
   for (const window of scanner.end()) await emit(window);
 
+  // A stream that stopped inside the document is a FAILURE, never a short document.
+  //
+  // This is the one place where the streaming design can lie in a way the buffering one
+  // cannot: `JSON.parse` over a truncated body throws, where a scanner has already handed
+  // out every window it decoded and would happily hash the prefix and call it the text.
+  // The row would then be `done`, with a `text_hash` over half a document that nothing will
+  // ever re-derive — a wrong index rather than a partial one. `truncated` says nothing about
+  // this: it is Zotero's page cap, computed from counts in the envelope, and on a cut stream
+  // the envelope never arrived at all.
+  if (!scanner.complete) {
+    throw new Error(`full-text stream for ${opts.attachmentKey} ended inside the document`);
+  }
+
   const envelope = scanner.envelope();
   const indexedPages = envelope.indexedPages;
   const totalPages = envelope.totalPages;
   return {
-    attachmentKey: opts.attachmentKey,
-    textHash: scanner.textHash(),
-    chars: scanner.chars,
-    windows: scanner.windowCount,
-    indexedPages,
-    totalPages,
-    truncated: indexedPages !== null && totalPages !== null && indexedPages < totalPages,
-    empty: scanner.chars === 0,
+    document: {
+      attachmentKey: opts.attachmentKey,
+      textHash: scanner.textHash(),
+      chars: scanner.chars,
+      windows: scanner.windowCount,
+      indexedPages,
+      totalPages,
+      truncated: indexedPages !== null && totalPages !== null && indexedPages < totalPages,
+      empty: scanner.chars === 0,
+    },
+    ttfbMs,
   };
 }
 
@@ -216,6 +255,11 @@ export class ContentScanner {
     const out: DocumentWindow[] = [];
     if (this.buffer.length > 0) out.push(this.flush(this.buffer.length));
     return out;
+  }
+
+  /** Whether the document's string actually closed. False on a stream that was cut. */
+  get complete(): boolean {
+    return this.state === 'envelope-tail';
   }
 
   textHash(): string {

@@ -165,6 +165,53 @@ describeSqlite('extract worker: the latency-observed back-off', () => {
     h.ledger.close();
   });
 
+  it('an early burst of instant answers does not condemn a healthy machine for the rest of the run', async () => {
+    // Review round 1's second blocker, reproduced against its own control.
+    //
+    // The first draft took the baseline as the all-time minimum median. A run of attachments
+    // Zotero has no text for answers in about nothing, and a few of them are enough to pin
+    // that minimum near zero — after which an ordinary 60 ms machine reads as degraded and
+    // paces at the ceiling for the rest of the run, with no path back, because a minimum
+    // never rises. Bounding the horizon alone did not fix it; a low quantile does, because a
+    // handful of unrepresentative samples cannot move one.
+    //
+    // An intermediate fix left a transient here — the quantile is robust but the ratio test
+    // is *vacuous* against a baseline near zero, so the floor alone decided and a 60 ms
+    // machine paced for eighteen documents before the picture filled in. Clamping the
+    // baseline at the floor removes it outright, which is why this asserts silence rather
+    // than the recovery an earlier draft settled for.
+    const h = harness(80);
+    const pacer = new FetchPacer({ clock: h.clock });
+    h.replay.latencyMs = 0;
+    const w = h.worker(pacer);
+    w.onDocument = (_doc, seen): void => {
+      if (seen === 6) h.replay.latencyMs = 60;
+    };
+
+    await w.drain();
+    expect(h.delays).toEqual([]);
+    expect(pacer.delayMs).toBe(0);
+    expect(pacer.report().degraded).toBe(false);
+  });
+
+  it('control: the same machine really does back off when it degrades', async () => {
+    // Without this the arm above is satisfied by a pacer that has been switched off. Same
+    // 60 ms machine, same instant burst first — and then a genuine slowdown, which must
+    // still be caught.
+    const h = harness(80);
+    const pacer = new FetchPacer({ clock: h.clock });
+    h.replay.latencyMs = 0;
+    const w = h.worker(pacer);
+    w.onDocument = (_doc, seen): void => {
+      if (seen === 6) h.replay.latencyMs = 60;
+      if (seen === 40) h.replay.latencyMs = 900;
+    };
+
+    await w.drain();
+    expect(h.delays.length).toBeGreaterThan(0);
+    expect(h.delays[0]).toBe(PACE_STEP_MS);
+  });
+
   it('control: a ramp that is large in ratio and trivial in milliseconds is not degradation', async () => {
     // 2 ms to 6 ms is a tripling, and it is nothing: on a fast library ordinary scheduling
     // jitter looks exactly like this. The absolute floor is the only thing standing between

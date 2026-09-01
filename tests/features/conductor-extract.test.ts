@@ -644,6 +644,95 @@ describeSqlite('extract worker: spawned on queue work, drains, gone', () => {
   });
 });
 
+// ------------------------------------------------- reachable from the drain
+
+describeSqlite('extract worker: what the drain actually reaches', () => {
+  it('takes the OS floor when asked, once, and reports it', async () => {
+    // Review round 1's third blocker: `lowerWorkerPriority` had no production call site.
+    // It has one now, and it is a seam rather than a call for a reason the test states by
+    // running twice — the default is OFF, because until the worker is its own process the
+    // process it would renice is the one answering queries.
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0010', attachment: 'ATTA0010', dateAdded: '2022-01-01T00:00:00Z', text: 'x' });
+    stageAttachment(h, { item: 'ITEM0011', attachment: 'ATTA0011', dateAdded: '2022-01-02T00:00:00Z', text: 'y' });
+
+    let asked = 0;
+    const w = new ExtractWorker({
+      dispatcher: h.stage,
+      source: h.replay.client(),
+      clock: h.clock,
+      sleep: async () => {},
+      priority: () => {
+        asked++;
+        return { cpu: { applied: true, detail: 'nice 19' }, io: { applied: true, detail: 'idle I/O' } };
+      },
+    });
+
+    const report = await w.drain();
+    expect(asked).toBe(1);
+    expect(report.priority?.cpu.applied).toBe(true);
+    // Once per worker, not once per drain: renicing is a property of the process, and asking
+    // again on a resumed drain would be a syscall per queue refill for no effect.
+    await w.drain();
+    expect(asked).toBe(1);
+    h.ledger.close();
+  });
+
+  it('a worker not asked to take the floor does not, and says nothing about it', async () => {
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0012', attachment: 'ATTA0012', dateAdded: '2022-01-01T00:00:00Z', text: 'x' });
+    const report = await worker(h).drain();
+    expect(report.priority).toBeUndefined();
+    h.ledger.close();
+  });
+
+  it('carries the local API panel reading out of the drain', async () => {
+    // The other half of the same blocker: the pacer's report had no reader, while the
+    // ruling says the back-off is "reported on the instrument panel". It rides the drain
+    // report, where the counters the panel needs already are.
+    const h = ledgerHarness();
+    for (let i = 20; i < 26; i++) {
+      stageAttachment(h, {
+        item: `ITEM00${i}`,
+        attachment: `ATTA00${i}`,
+        dateAdded: `2022-01-${i}T00:00:00Z`,
+        text: 'x',
+      });
+    }
+    h.replay.latencyMs = 30;
+
+    const report = await worker(h).drain();
+    expect(report.pace.samples).toBe(6);
+    expect(report.pace.medianMs).toBe(30);
+    expect(report.pace.degraded).toBe(false);
+    expect(report.pace.degradedAt).toBeNull();
+    h.ledger.close();
+  });
+
+  it('returns an expired claim to the queue, so a hard-killed worker strands nothing', async () => {
+    // Expiry is a timestamp, not an event. Without someone running the sweep the row of a
+    // worker that died mid-document stays `claimed` and the attachment is never indexed
+    // again — the recovery §5.2.5 promises would exist only on paper.
+    const h = ledgerHarness();
+    stageAttachment(h, { item: 'ITEM0030', attachment: 'ATTA0030', dateAdded: '2022-01-01T00:00:00Z', text: 'x' });
+    const wid = h.ledger.pending(h.lib)[0]!.wid;
+    h.ledger.claim(wid, 'a-worker-that-died', 'sig', 20_000);
+    expect(h.ledger.nextExtractOrder({ lib: h.lib })).toBeUndefined();
+
+    const conductor = new Conductor({ ledger: h.ledger, clock: h.clock, holder: 'p0-one' });
+    // Control: before the TTL runs out the claim is live and the sweep must leave it alone,
+    // or a slow worker would have its own row taken from under it.
+    h.clock.advance(10_000);
+    expect((await conductor.poll()).releasedClaims).toBe(0);
+    expect(h.ledger.row(wid)?.status).toBe('claimed');
+
+    h.clock.advance(20_000);
+    expect((await conductor.poll()).releasedClaims).toBe(1);
+    expect(h.ledger.nextExtractOrder({ lib: h.lib })?.wid).toBe(wid);
+    h.ledger.close();
+  });
+});
+
 // ---------------------------------------------------------------- priority
 
 describe('extract worker: the OS floor', () => {
