@@ -1,3 +1,4 @@
+import { TICK_PAGE_SIZE } from '../../src/features/search/conductor/reconcile-tick.js';
 import type { ReplayLocalApi } from './local-api-replay.js';
 
 /**
@@ -193,11 +194,15 @@ export class SyntheticLibrary {
     return item.version;
   }
 
-  /** A deletion. The local API has no /deleted endpoint, so nothing announces this. */
+  /**
+   * A deletion. The local API has no /deleted endpoint, so nothing announces this — the
+   * only route to it is subtracting a fresh census from the stored one. Recursive, as
+   * Zotero is: deleting an item takes its attachments, and their annotations with them.
+   */
   remove(key: string): void {
     if (!this.items.delete(key)) throw new Error(`no item ${key}`);
     this.fulltext.delete(key);
-    for (const [k, v] of [...this.items]) if (v.parentItem === key) this.items.delete(k);
+    for (const [k, v] of [...this.items]) if (v.parentItem === key) this.remove(k);
   }
 
   /**
@@ -310,14 +315,21 @@ export class SyntheticLibrary {
           'zotero-server-id': 'synthetic-server',
         },
       });
+      // The item read the tick actually issues is paged, so every page it would ask for
+      // is canned — including the empty one past the end, which is what stops the loop
+      // when the delta happens to be an exact multiple of the page size.
       const data = this.itemsSince(v);
-      replay.put(`${prefix}/items?${v === 0 ? '' : `since=${v}`}`, {
-        body: data,
-        headers: {
-          'total-results': String(data.length),
-          'last-modified-version': String(this.itemVersion),
-        },
-      });
+      const headers = {
+        'total-results': String(data.length),
+        'last-modified-version': String(this.itemVersion),
+      };
+      replay.put(`${prefix}/items?since=${v}`, { body: data, headers });
+      for (let start = 0; start <= data.length; start += TICK_PAGE_SIZE) {
+        replay.put(`${prefix}/items?since=${v}&limit=${TICK_PAGE_SIZE}&start=${start}`, {
+          body: data.slice(start, start + TICK_PAGE_SIZE),
+          headers,
+        });
+      }
     }
 
     for (let v = 0; v <= this.fulltextVersion; v++) {

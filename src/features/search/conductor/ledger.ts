@@ -88,6 +88,13 @@ export interface LeaseRow {
   expiresAt: number;
 }
 
+/** What the delta read knows about an item beyond its version. */
+export interface ItemDetail {
+  dateAdded: string | null;
+  itemType: string | null;
+  parentItem: string | null;
+}
+
 /** One attachment's row in the full-text census, carrying both halves of §5.2.4's signal. */
 export interface FulltextCensusEntry {
   ftVersion: number;
@@ -198,10 +205,18 @@ export class Ledger {
       -- What Zotero said existed, last time we asked. Kept because the local API has no
       -- /deleted endpoint (C2): subtracting this from a fresh census is the only route to
       -- a deletion, and R35 gives that a one-minute bound.
+      -- The version is the signal; the other three columns are what the delta read hands
+      -- over on its way past and nothing else would ever ask Zotero for again. \`date_added\`
+      -- is the newest-first sort key of §5.2.3, \`item_type\` decides the discovery class,
+      -- and \`parent_item\` is how a full-text census entry — which carries an attachment
+      -- key and nothing else — finds the item it belongs to.
       CREATE TABLE IF NOT EXISTS item_census (
-        lib      INTEGER NOT NULL REFERENCES libraries(lib),
-        item_key TEXT NOT NULL,
-        version  INTEGER NOT NULL,
+        lib         INTEGER NOT NULL REFERENCES libraries(lib),
+        item_key    TEXT NOT NULL,
+        version     INTEGER NOT NULL,
+        date_added  TEXT,
+        item_type   TEXT,
+        parent_item TEXT,
         PRIMARY KEY (lib, item_key)
       );
 
@@ -352,12 +367,45 @@ export class Ledger {
     return new Map(rows.map((r) => [r.item_key, r.version]));
   }
 
+  /**
+   * Record the versions the full census reported. Version only: the census is a map of
+   * key to number and knows nothing else, so an upsert that also wrote the detail columns
+   * would blank what the delta read had just filled in.
+   */
   putItemCensus(lib: number, entries: Iterable<[string, number]>): void {
     const stmt = this.db.prepare(
       `INSERT INTO item_census(lib, item_key, version) VALUES (?, ?, ?)
          ON CONFLICT(lib, item_key) DO UPDATE SET version = excluded.version`,
     );
     for (const [key, version] of entries) stmt.run(lib, key, version);
+  }
+
+  /** Record what the delta read said about one item, beyond its version. */
+  putItemDetail(lib: number, key: string, detail: ItemDetail): void {
+    this.db
+      .prepare(
+        `INSERT INTO item_census(lib, item_key, version, date_added, item_type, parent_item)
+           VALUES (:lib, :key, 0, :dateAdded, :itemType, :parentItem)
+           ON CONFLICT(lib, item_key) DO UPDATE
+             SET date_added = excluded.date_added,
+                 item_type = excluded.item_type,
+                 parent_item = excluded.parent_item`,
+      )
+      .run({
+        lib,
+        key,
+        dateAdded: detail.dateAdded ?? null,
+        itemType: detail.itemType ?? null,
+        parentItem: detail.parentItem ?? null,
+      });
+  }
+
+  itemDetail(lib: number, key: string): ItemDetail | undefined {
+    const r = this.db
+      .prepare('SELECT date_added, item_type, parent_item FROM item_census WHERE lib = ? AND item_key = ?')
+      .get(lib, key) as { date_added: string | null; item_type: string | null; parent_item: string | null } | undefined;
+    if (!r) return undefined;
+    return { dateAdded: r.date_added, itemType: r.item_type, parentItem: r.parent_item };
   }
 
   deleteItemCensus(lib: number, keys: Iterable<string>): void {
@@ -399,26 +447,42 @@ export class Ledger {
    */
   enqueue(input: WorkOrderInput): number {
     const band = input.band ?? 0;
-    const existing = this.db
-      .prepare(
-        `SELECT wid FROM stage_queue
-           WHERE lib = ? AND class = ? AND op = ? AND band = ?
-             AND item_key IS ? AND attachment_key IS ?
-             AND status IN ('pending', 'claimed')
-           ORDER BY wid LIMIT 1`,
-      )
-      .get(input.lib, input.class, input.op, band, input.itemKey ?? null, input.attachmentKey ?? null) as
-      | { wid: number }
-      | undefined;
+    // An order about an attachment is identified by the attachment, not by the pair. The
+    // parent item is learned later than the attachment key is — the full-text census
+    // carries only the key — so keying on both would file a second row for the same work
+    // the moment the parent became known.
+    const existing = (
+      input.attachmentKey
+        ? this.db
+            .prepare(
+              `SELECT wid FROM stage_queue
+                 WHERE lib = ? AND class = ? AND op = ? AND band = ? AND attachment_key IS ?
+                   AND status IN ('pending', 'claimed')
+                 ORDER BY wid LIMIT 1`,
+            )
+            .get(input.lib, input.class, input.op, band, input.attachmentKey)
+        : this.db
+            .prepare(
+              `SELECT wid FROM stage_queue
+                 WHERE lib = ? AND class = ? AND op = ? AND band = ?
+                   AND item_key IS ? AND attachment_key IS NULL
+                   AND status IN ('pending', 'claimed')
+                 ORDER BY wid LIMIT 1`,
+            )
+            .get(input.lib, input.class, input.op, band, input.itemKey ?? null)
+    ) as { wid: number } | undefined;
 
     if (existing) {
       this.db
         .prepare(
           `UPDATE stage_queue
-              SET lane = COALESCE(?, lane), date_added = COALESCE(?, date_added), signal = COALESCE(?, signal)
+              SET lane = COALESCE(?, lane),
+                  date_added = COALESCE(?, date_added),
+                  signal = COALESCE(?, signal),
+                  item_key = COALESCE(?, item_key)
             WHERE wid = ?`,
         )
-        .run(input.lane ?? null, input.dateAdded ?? null, input.signal ?? null, existing.wid);
+        .run(input.lane ?? null, input.dateAdded ?? null, input.signal ?? null, input.itemKey ?? null, existing.wid);
       return existing.wid;
     }
 

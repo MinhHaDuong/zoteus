@@ -22,4 +22,4 @@ export interface Clock {
 }
 
 /** The clock a running server uses. */
-export const systemClock: Clock = { now: () => Date.now() };
+export const systemClock: Clock = { now: () => Date.now() }; // wall-clock: intentional

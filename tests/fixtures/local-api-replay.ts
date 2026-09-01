@@ -102,7 +102,9 @@ export class ReplayLocalApi {
     const method = (init?.method ?? 'GET').toUpperCase();
     const path = url.startsWith(this.base) ? url.slice(this.base.length) : url;
     const key = normalise(method, path);
-    const at = this.clock?.advance(this.latencyMs) ?? Date.now();
+    // With no injected clock the fake is being used outside a cadence test, where a real
+    // stamp is the only meaningful one; every conductor test injects one.
+    const at = this.clock?.advance(this.latencyMs) ?? Date.now(); // wall-clock: intentional
     this.requests.push({ method, url, key, at });
 
     if (this.silent) {
