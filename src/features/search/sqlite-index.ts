@@ -4,7 +4,8 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
-import { tokenize } from './tokenize.js';
+import { pruneTerms } from './query-terms.js';
+import { isStopword, tokenize } from './tokenize.js';
 import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
 import { VectorSalvage } from './vector-salvage.js';
 import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE } from './limits.js';
@@ -1132,7 +1133,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * scale of their scores.
    */
   protected keywordSearch(q: string, topK: number): RankedId[] {
-    const terms = [...new Set(tokenize(q))];
+    const terms = pruneTerms([...new Set(tokenize(q))], isStopword);
     if (!terms.length) return [];
     const match = terms.map(ftsTerm).join(' OR ');
     try {
