@@ -1,30 +1,4 @@
 /**
- * The words this search treats as too common to rank on.
- *
- * Consulted on the query side only, and only through `pruneTerms`, which restores the
- * whole token set when dropping these would leave too little to answer with. It used to
- * be applied here instead, inside `tokenize()`, which meant it also governed what the
- * in-memory backend *indexed* — and a term absent from the index cannot be searched for
- * even deliberately, which is what made the fallback impossible to write.
- */
-const STOPWORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were',
-  'be', 'by', 'as', 'at', 'that', 'this', 'it', 'from', 'we', 'our', 'their', 'its', 'these', 'those',
-  // `not` is the thirtieth, and its absence is what made `to be or not to be` return a wrong
-  // answer rather than no answer: every other word of that line was already here, so one
-  // term limped through and the search ran as a single-term OR on it. Added alone, and
-  // deliberately — the list omits plenty of other common words (`no`, `but`, `which`,
-  // `when`), but which of them matter is a property of the corpus rather than of English,
-  // and guessing further here is the habit this list should be losing.
-  'not',
-]);
-
-/** Whether a term is on the list above. The `TermPredicate` a query is pruned by. */
-export function isStopword(term: string): boolean {
-  return STOPWORDS.has(term);
-}
-
-/**
  * Combining marks sitting on a **Latin** base, which is the only place
  * `unicode61 remove_diacritics 2` removes them: measured, Greek tonos and Cyrillic breve
  * survive there, so they survive here. See normalizeForSearch.
@@ -242,6 +216,11 @@ const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
  * index does not hold cannot be searched for on purpose. Pruning is now a query-side
  * decision, taken in `query-terms.ts`, where it can be undone when it would leave the
  * query with nothing to say. Both backends index every term; only queries prune.
+ *
+ * **Language-agnostic, and now without exception.** The 29 English function words this
+ * used to drop are gone from here, and what replaces them is not another list but a
+ * measurement of this library — see `query-terms.ts`. Nothing about a word's language is
+ * consulted here or there.
  */
 export function tokenize(text: string): string[] {
   return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1);
