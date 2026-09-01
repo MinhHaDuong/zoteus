@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeForSearch, tokenize, UNICODE61_KEEPS_CASE } from '../../src/features/search/tokenize.js';
+import { accentKey, foldMarks, normalizeForSearch, tokenize, UNICODE61_KEEPS_CASE } from '../../src/features/search/tokenize.js';
 import { createSearchIndex, nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { MemorySearchIndex, makeSnippet } from '../../src/features/search/index-manager.js';
 import { loadIndex, saveIndex } from '../../src/features/search/persistence.js';
@@ -15,11 +15,14 @@ import type { SearchIndex } from '../../src/features/search/backend.js';
  * `théorie` reached MATCH as `"th" OR "orie"` — and since terms are OR-ed, that is a
  * confident wrong answer rather than an empty one.
  *
- * The fix folds in JS, in front of the tokenizer both backends already share, so the
- * symmetry is structural rather than coincidental. What the fold must reproduce is
- * `unicode61 remove_diacritics 2` and nothing more, because the FTS5 document side cannot
- * be moved into JS: `passages.text` is the display text `get()` reads back for snippets.
- * Every case below is therefore a symmetry assertion as much as a recall one.
+ * The first fix folded in JS, symmetrically, in front of the tokenizer both backends
+ * share — and symmetric folding is itself a defect in a multilingual library, because it
+ * merges vocabulary (`thể` and `thế` onto `the`). The current design keeps every mark on
+ * both sides (`remove_diacritics 0`) and restores the one direction worth keeping —
+ * unaccented query, accented document — by expanding the QUERY to the accented spellings
+ * the vocabulary holds. The cases below assert three things: what JS normalization must
+ * reproduce of unicode61, the asymmetry itself, and that expansion reaches exactly the
+ * documents folding used to.
  */
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -62,9 +65,35 @@ describe.each(backends)('accent folding (%s backend)', (backend) => {
     await index.close();
   });
 
-  it('finds the unaccented document from the accented spelling', async () => {
+  it('does NOT find the unaccented document from the accented spelling', async () => {
+    // The one direction this deliberately gives up, and it is asserted rather than left to
+    // chance. Expansion runs one way only: an unaccented term expands to the accented
+    // spellings the vocabulary holds, an accented term never expands to its stripped form.
+    // Expanding `thể` toward `the` is how a Vietnamese word became unsearchable in the
+    // first place.
     const index = await oneDoc('un eleve tres applique');
-    expect(await hits(index, 'élève')).toEqual(['D']);
+    expect(await hits(index, 'élève')).toEqual([]);
+    // The unaccented spelling still reaches it, and so does the accented document from an
+    // unaccented query — the direction that costs nothing is kept in full.
+    expect(await hits(index, 'eleve')).toEqual(['D']);
+    await index.close();
+  });
+
+  it('answers an accented query on the word that was written, not on its stripped form', async () => {
+    // The reason for all of this, in one assertion. `thế` is a Vietnamese word; stripping
+    // its tone mark lands it on `the`, which in a real library is in 84% of passages. The
+    // two must not be one token.
+    const index = await indexOf(backend, [
+      { key: 'VI', text: 'năm 2020 phát triển bền vững' },
+      { key: 'EN', text: 'nam river basin hydrology study' },
+    ]);
+    // `năm` is Vietnamese for year; stripped it becomes `nam`, which here is a river. The
+    // accented query gets the Vietnamese passage and only that one.
+    expect(await hits(index, 'năm')).toEqual(['VI']);
+    // The unaccented query gets both, because it expands to the accented spellings the
+    // vocabulary holds — the recall that stripping used to buy, kept, without indexing
+    // one extra token.
+    expect((await hits(index, 'nam')).sort()).toEqual(['EN', 'VI']);
     await index.close();
   });
 
@@ -159,8 +188,18 @@ describe.each(backends)('accent folding (%s backend)', (backend) => {
 });
 
 describe('normalizeForSearch', () => {
-  it('folds Latin diacritics and case', () => {
-    expect(normalizeForSearch('Élève Théorie Straße')).toBe('eleve theorie straße');
+  it('folds case but NOT diacritics', () => {
+    // Marks used to come off here, on both sides of every comparison. They now come off
+    // only in `foldMarks`, and only to produce the extra token `indexText` adds beside the
+    // written one.
+    expect(normalizeForSearch('Élève Théorie Straße')).toBe('élève théorie straße');
+  });
+
+  it('composes, because unicode61 does not and a mark is a separator to it', () => {
+    // A decomposed `é` would otherwise reach the index as the bare letter `e` while a
+    // composed one reaches it as `é`. Which a passage carries is decided by whatever
+    // extracted it.
+    expect(normalizeForSearch('e\u0301le\u0300ve')).toBe(normalizeForSearch('élève'));
   });
 
   it('leaves non-Latin diacritics alone, because remove_diacritics 2 does', () => {
@@ -180,9 +219,9 @@ describe('normalizeForSearch', () => {
 });
 
 describe('tokenize', () => {
-  it('keeps an accented word as one folded token', () => {
-    expect(tokenize('théorie')).toEqual(['theorie']);
-    expect(tokenize('élève')).toEqual(['eleve']);
+  it('keeps an accented word as one token, with its marks', () => {
+    expect(tokenize('théorie')).toEqual(['théorie']);
+    expect(tokenize('élève')).toEqual(['élève']);
   });
 
   it('keeps non-Latin words as whole tokens', () => {
@@ -288,8 +327,70 @@ describe('codepoints unicode61 does not fold the way JavaScript would', () => {
     // The shield hides characters behind U+FDD0..U+FDEF noncharacters. A restore that
     // failed would leave one of those in a token, and it would match nothing forever.
     const folded = normalizeForSearch("Théorie générale de l'emploi Ǽ Ϳ");
-    expect(folded).toBe("theorie generale de l'emploi ǽ Ϳ");
+    expect(folded).toBe("théorie générale de l'emploi ǽ Ϳ");
     expect(/[﷐-﷯]/u.test(folded)).toBe(false);
     expect(normalizeForSearch('plain ascii text')).toBe('plain ascii text');
+  });
+});
+
+describe('foldMarks and accentKey', () => {
+  it('strips Latin marks, and only those', () => {
+    expect(foldMarks('théorie')).toBe('theorie');
+    expect(foldMarks('thế')).toBe('the');
+    // Non-Latin marks stay, because unicode61 never removed them either.
+    expect(foldMarks('λόγος')).toBe('λόγος');
+    // And the shielded five keep their marks: stripping them yields other real words.
+    expect(foldMarks('ǽ')).toBe('ǽ');
+  });
+
+  it('files an accented spelling under the key its unaccented query arrives as', () => {
+    expect(accentKey('théorie')).toBe('theorie');
+    // A term without marks is its own key — it files nothing and expands from nothing.
+    expect(accentKey('theorie')).toBe('theorie');
+    // Stripping can uncover case the first normalization never saw: `İstanbul` is kept
+    // whole by unicode61, but its stripped form must land where a query for `istanbul`
+    // lands, which is lowercase. foldMarks alone leaves `Istanbul` — the re-fold is why
+    // accentKey exists.
+    expect(foldMarks('İstanbul')).toBe('Istanbul');
+    expect(accentKey('İstanbul')).toBe('istanbul');
+  });
+
+  it('what is indexed is exactly what was written — no extra tokens', () => {
+    // The alternative design indexed the stripped form BESIDE the written one, which
+    // inflates document length, halves the stripped form's idf and penalises accented
+    // documents under BM25 length normalization. This design adds nothing: recall comes
+    // from expanding the QUERY instead.
+    expect(tokenize('élève élève élève')).toEqual(['élève', 'élève', 'élève']);
+    expect(tokenize('un élève très appliqué')).not.toContain('eleve');
+  });
+});
+
+describe('marks that lowercasing introduces, and marks with no precomposed form', () => {
+  // Two cases the codepoint sweep in this file did not reach, both found by review, both
+  // reproducing the very defect the fold exists to prevent: a word split into a fragment
+  // that neither side can search for.
+
+  it('keeps `İ` whole, because unicode61 does under this tokenizer', () => {
+    // `İ`.toLowerCase() is `i` plus a combining dot, which the token class would split into
+    // an orphan `i` and `stanbul`. unicode61 with remove_diacritics 0 keeps `İ` verbatim, so
+    // the query side must too — that is what the keep-case set is for, and re-running its
+    // own generator against this tokenizer is what added this codepoint.
+    expect(tokenize('İstanbul')).toEqual(['İstanbul']);
+    expect(normalizeForSearch('İstanbul')).toBe('İstanbul');
+    // And its expansion key is the ordinary spelling, so a query for `istanbul` still
+    // reaches it — see accentKey.
+    expect(accentKey('İstanbul')).toBe('istanbul');
+  });
+
+  it('centres a snippet on the match even when normalizing changes length', () => {
+    const target = 'the théorie of value';
+    // `n̈` has no precomposed form, so folding it shortens the string — the assumption the
+    // previous implementation made about offsets, and it was false. Enough of them to push
+    // the match outside the returned window if the offset is taken from the wrong string.
+    const drift = 'n\u0308aive '.repeat(300);
+    expect(makeSnippet(`${drift}${target}`, 'theorie', 240)).toContain('théorie');
+    // Same again for the other direction, where lowercasing lengthens rather than shortens.
+    const grow = 'İstanbul '.repeat(300);
+    expect(makeSnippet(`${grow}${target}`, 'théorie', 240)).toContain('théorie');
   });
 });

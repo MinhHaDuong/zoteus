@@ -108,7 +108,7 @@ describe('schema version is read before anything is written', () => {
 
       // The file at the original path is a fresh, empty index stamped with THIS build's
       // version — not the old database re-stamped.
-      expect(readSchemaVersion(dbPath)).toBe('1');
+      expect(readSchemaVersion(dbPath)).toBe('2');
       expect(passageCount(dbPath)).toBe(0);
 
       // One notice, through the channel status already reports storage decisions on.
@@ -169,7 +169,7 @@ describe('schema version is read before anything is written', () => {
     const index = await openIndex(jsonPath);
     try {
       expect(sidelined(dbPath)).toHaveLength(1);
-      expect(readSchemaVersion(dbPath)).toBe('1');
+      expect(readSchemaVersion(dbPath)).toBe('2');
     } finally {
       await index.close();
     }
@@ -185,7 +185,7 @@ describe('schema version is read before anything is written', () => {
     const index = await openIndex(jsonPath);
     try {
       expect(sidelined(dbPath)).toHaveLength(1);
-      expect(readSchemaVersion(dbPath)).toBe('1');
+      expect(readSchemaVersion(dbPath)).toBe('2');
     } finally {
       await index.close();
     }
@@ -216,7 +216,7 @@ describe('schema version is read before anything is written', () => {
     const index = await openIndex(jsonPath);
     try {
       expect(sidelined(dbPath)).toHaveLength(0);
-      expect(readSchemaVersion(dbPath)).toBe('1');
+      expect(readSchemaVersion(dbPath)).toBe('2');
     } finally {
       await index.close();
     }

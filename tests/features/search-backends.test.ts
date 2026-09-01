@@ -373,8 +373,8 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
     await memory.build(accented);
 
     for (const index of [sqlite, memory]) {
-      // Unaccented query, accented document: what remove_diacritics 2 buys on the FTS5
-      // side, and what tokenize.ts's fold now buys on the JSON side.
+      // Unaccented query, accented document: bought on both backends by expanding the
+      // query to the accented spellings the vocabulary holds (see accent-folding.test.ts).
       expect((await index.query('Bronte', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
       expect((await index.query('etude naivete', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
       // And the other direction, which is the one that used to fail: an accented query

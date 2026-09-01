@@ -76,7 +76,12 @@ export async function createSearchIndex(opts: CreateSearchIndexOptions): Promise
         // why. Anything else still throws: a permission error or a full disk is not a
         // reason to tell someone their index is beyond saving, and the store is the only
         // thing that knows which is which.
-        if (!(e instanceof SearchIndexCorruptError)) throw e;
+        // SearchIndexUnreadableError joins the degradation for one path: a migration that
+        // failed for a transient, non-corruption reason (a full disk, a size limit) now
+        // leaves the database untouched at its old stamp and refuses instead of sidelining
+        // it. That refusal must not take the server down either — the retry it prescribes
+        // is the next open.
+        if (!(e instanceof SearchIndexCorruptError) && !(e instanceof SearchIndexUnreadableError)) throw e;
         opts.logger?.error(e.message);
         return new CorruptSearchIndex(e, indexOpts);
       }

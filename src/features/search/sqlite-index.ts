@@ -5,8 +5,14 @@ import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { pruneTerms } from './query-terms.js';
-import { isStopword, tokenize } from './tokenize.js';
-import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
+import { accentKey, isStopword, normalizeForSearch, tokenize } from './tokenize.js';
+import {
+  SearchIndexCorruptError,
+  SearchIndexUnreadableError,
+  isCorruptionError,
+  isQuerySyntaxError,
+  sidecarsOf,
+} from './corruption.js';
 import { VectorSalvage } from './vector-salvage.js';
 import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE } from './limits.js';
 import type {
@@ -47,7 +53,54 @@ export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
  * charged its owner a full re-embed (hours, and real API spend) for a cache the server
  * can rebuild from what is already on disk.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+
+/**
+ * How the keyword index tokenizes, in one place because the migration rung has to declare
+ * exactly what `createSchema` declares.
+ *
+ * `remove_diacritics 0`, not 2, and the difference is a correctness fix rather than a
+ * preference. Stripping marks from every token does not normalize spelling in a library
+ * that holds more than one language, it merges vocabulary: `án` onto `an`, `bé` onto `be`,
+ * two distinct Vietnamese words onto `the`. The recall that stripping bought — typing
+ * `theorie` and finding the accented spelling — is kept on the QUERY side instead: an
+ * unaccented query term is expanded to the accented variants the vocabulary actually
+ * holds (`accent_variants`), so the index itself stores each word exactly once, as
+ * written. See tokenize.ts.
+ */
+const FTS_TOKENIZER = 'unicode61 remove_diacritics 0';
+
+/**
+ * Rebuild the folded-form → accented-spelling map from the keyword index's own vocabulary.
+ *
+ * `fts5vocab` is a virtual table over the existing FTS index — nothing is stored until
+ * this SELECT materialises it — and the scan is the only full read: on a 477 512-passage
+ * library it visits 639 888 terms in about two seconds, which is why the map is derived
+ * state with a home (this table) rather than a query-time computation. Incremental inserts
+ * keep it current afterwards (`addRecord`); deletions may leave a variant behind, which
+ * costs one zero-hit term in an expanded MATCH and never a wrong result, and the next
+ * full build recreates the map from scratch through this same function.
+ */
+function deriveAccentVariants(db: Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS accent_variants (
+      folded TEXT NOT NULL,
+      term TEXT NOT NULL,
+      PRIMARY KEY (folded, term)
+    ) WITHOUT ROWID;
+    DELETE FROM accent_variants;
+    CREATE VIRTUAL TABLE temp.accent_vocab USING fts5vocab('main', 'passages_fts', 'row');
+  `);
+  const insert = db.prepare('INSERT OR IGNORE INTO accent_variants(folded, term) VALUES (?, ?)');
+  for (const row of db.prepare('SELECT term FROM temp.accent_vocab').iterate() as Iterable<{ term: string }>) {
+    const folded = accentKey(row.term);
+    if (folded !== row.term && folded.length > 1) insert.run(folded, row.term);
+  }
+  db.exec('DROP TABLE temp.accent_vocab');
+  // The stamp `ensureAccentVariants` checks, so an all-ASCII library (map legitimately
+  // empty) is not re-scanned on every open.
+  db.prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)').run('accentVariantsDerived', '1');
+}
 
 /**
  * One rung of the upgrade ladder: how a database stamped `to - 1` becomes one stamped `to`.
@@ -79,13 +132,42 @@ export interface SchemaMigration {
 }
 
 /**
- * The ladder, in ascending order. Empty because SCHEMA_VERSION has never been bumped: the
- * stamp was introduced as 1 with the SQLite backend and is still 1. That is precisely why
- * this is here now — a migration path is cheap to build before the first bump and
- * expensive to wish for afterwards, when every index in the field has already been
- * sidelined by it.
+ * The ladder, in ascending order. The first rung is exactly the case the ladder was built
+ * for: the tokenizer changed, so every passage must be tokenized again — and not one
+ * vector is touched. Without it the bump would sideline every index in the field and
+ * charge it the re-embed the interface comment above prices at five and a half hours of
+ * local CPU.
  */
-export const SCHEMA_MIGRATIONS: SchemaMigration[] = [];
+export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
+  {
+    to: 2,
+    what: 'keeps diacritics in the keyword index, answering unaccented queries by expansion',
+    up(db) {
+      db.exec('DROP TABLE IF EXISTS passages_fts');
+      db.exec(`
+        CREATE VIRTUAL TABLE passages_fts USING fts5(
+          text,
+          content='passages',
+          content_rowid='pid',
+          tokenize='${FTS_TOKENIZER}'
+        );
+      `);
+      const insert = db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)');
+      // Paged by rowid rather than read whole: the text of a full-text library is hundreds
+      // of megabytes, and a migration needing all of it resident is one that fails on the
+      // machines least able to afford the rebuild it is there to avoid.
+      const page = db.prepare('SELECT pid, text FROM passages WHERE pid > ? ORDER BY pid LIMIT 2000');
+      let after = 0;
+      for (;;) {
+        const rows = page.all(after) as Array<{ pid: number; text: string }>;
+        if (!rows.length) break;
+        for (const r of rows) insert.run(r.pid, normalizeForSearch(r.text));
+        after = rows[rows.length - 1]!.pid;
+      }
+      deriveAccentVariants(db);
+    },
+  },
+];
 
 /**
  * Passage rowids per rescore statement. The exact stage fetches its candidates by rowid in
@@ -181,6 +263,8 @@ interface Statements {
   insertItem: StatementSync;
   insertPassage: StatementSync;
   insertFts: StatementSync;
+  insertVariant: StatementSync;
+  variantsFor: StatementSync;
   deleteFts: StatementSync;
   itemPassages: StatementSync;
   itemFulltext: StatementSync;
@@ -305,6 +389,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       if (existed) await this.reconcileSchema();
       if (!this.db) this.openHandle();
       this.createSchema();
+      this.ensureAccentVariants();
       this.prepareStatements();
       // `existed` deliberately still gates the import after a sideline: the legacy JSON
       // was already consumed by whichever build wrote the incompatible database, and
@@ -322,6 +407,23 @@ export class SqliteSearchIndex extends SearchIndexBase {
       await this.close().catch(() => {});
       throw e instanceof SearchIndexCorruptError ? e : new SearchIndexCorruptError(this.file, e);
     }
+  }
+
+  /**
+   * Derive the expansion map once for a database that predates it or lost it.
+   *
+   * `accent_variants` is derived state, so it is recoverable by construction: a schema-2
+   * database whose map is absent (created by a build that never derived, or deleted by
+   * hand) is healed here with one vocabulary scan — about two seconds on a 477 512-passage
+   * library — instead of being wrong quietly. The meta stamp keeps the scan from running
+   * on every open of a library whose map is legitimately empty.
+   */
+  private ensureAccentVariants(): void {
+    const row = this.handle
+      .prepare("SELECT value FROM meta WHERE key = 'accentVariantsDerived'")
+      .get() as { value?: string } | undefined;
+    if (row?.value === '1') return;
+    deriveAccentVariants(this.handle);
   }
 
   /** Create the writable handle and apply its connection pragmas, after the schema probe. */
@@ -429,11 +531,30 @@ export class SqliteSearchIndex extends SearchIndexBase {
     const ladder = typeof stored === 'number' ? this.migrationPath(stored) : undefined;
     if (ladder) {
       const failure = this.runMigrations(stored as number, ladder);
-      if (!failure) return;
+      if (failure === undefined) return;
       // A migration that threw rolled itself back, so the file is untouched at its old
-      // stamp — which is the one state the sideline below was written for.
-      await this.sideline(stored, contents, failure);
-      return;
+      // stamp. What happens next depends on WHY it threw, and the two answers must not
+      // be merged: a corrupt database is evidence to move aside, but a transient error —
+      // a full disk, a file-size limit, a lock — is a proven-intact database that failed
+      // to upgrade TODAY. Sidelining it would discard a complete index (and start an
+      // empty one) over a condition a retry can clear; `isCorruptionError` exists for
+      // exactly this distinction, so it is consulted here.
+      if (isCorruptionError(failure)) {
+        await this.sideline(stored, contents, failure instanceof Error ? failure.message : String(failure));
+        return;
+      }
+      // Not corruption: leave the file at its old stamp and surface the failure. The
+      // factory degrades this into "search refuses, and says why" — the server survives,
+      // nothing is written over the file, and the next open retries the ladder against an
+      // untouched database.
+      throw new SearchIndexUnreadableError(
+        this.file,
+        new Error(
+          `it is intact at schema version ${stored} but could not be upgraded to ` +
+            `${this.schemaVersion} (${failure instanceof Error ? failure.message : String(failure)}); ` +
+            'the file was left untouched and the upgrade will be retried on the next open',
+        ),
+      );
     }
     await this.sideline(stored, contents);
   }
@@ -459,7 +580,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
 
   /**
    * Run the ladder, and stamp the new version in the same transaction. Returns undefined
-   * on success, or the reason to sideline instead.
+   * on success, or the error itself — the CAUSE, not its message, because the caller has
+   * to ask `isCorruptionError` of it before deciding between sideline and refusal.
    *
    * One transaction over every rung, and the stamp inside it: a database is either fully
    * at the new version or still fully at the old one, never at some half-applied state
@@ -468,7 +590,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * rule the probe protects is "do not write into a database this build does not
    * understand" — a rung that exists is this build saying it understands this one.
    */
-  private runMigrations(stored: number, steps: SchemaMigration[]): string | undefined {
+  private runMigrations(stored: number, steps: SchemaMigration[]): unknown {
     this.openHandle();
     const db = this.handle;
     try {
@@ -491,12 +613,18 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // failure means were never prepared.
       this.db?.close();
       this.db = undefined;
-      return e instanceof Error ? e.message : String(e);
+      // `?? new Error(...)`: a thrown nullish value must not read as the success return.
+      return e ?? new Error('migration failed with a nullish throw');
     }
     const what = steps.map((s) => s.what).join('; ');
     this.storeNotice =
       `The search index at ${this.file} was upgraded in place from schema version ${stored} to ` +
-      `${this.schemaVersion} (${what}). Nothing was re-indexed and no vectors were re-computed.`;
+      // "Nothing was re-indexed" used to be part of this sentence. It was true while the
+      // ladder was empty; it is not a property of the mechanism, and the first real rung
+      // re-indexes every passage. What the ladder does guarantee is the expensive half —
+      // a rung runs inside the stamping transaction and nothing in it embeds — so that is
+      // what the notice claims, and the rung's own `what` says the rest.
+      `${this.schemaVersion} (${what}). No vectors were re-computed.`;
     this.opts.logger?.info(this.storeNotice);
     return undefined;
   }
@@ -703,15 +831,23 @@ export class SqliteSearchIndex extends SearchIndexBase {
       -- losing this table costs a pass, never data.
       CREATE TABLE IF NOT EXISTS vector_codes (pid INTEGER PRIMARY KEY, code BLOB NOT NULL);
       -- External content: the passage text is stored once, in the passages table, and the
-      -- index points back at it by rowid. remove_diacritics 2 folds accents, so "Bronte"
-      -- finds "Brontë". The query side folds to match, in tokenize.ts, which is where the
-      -- JSON backend folds too: one normalizer in front of the tokenizer both share.
+      -- index points back at it by rowid. remove_diacritics 0 keeps accents: "Brontë" is
+      -- indexed as written, and an unaccented query reaches it through accent_variants
+      -- below, never by folding the index. See FTS_TOKENIZER.
       CREATE VIRTUAL TABLE IF NOT EXISTS passages_fts USING fts5(
         text,
         content='passages',
         content_rowid='pid',
-        tokenize='unicode61 remove_diacritics 2'
+        tokenize='${FTS_TOKENIZER}'
       );
+      -- The folded-form → accented-spelling map queries expand through: derived from the
+      -- FTS vocabulary (deriveAccentVariants), kept current by addRecord. Derived state:
+      -- losing this table costs one vocabulary scan, never data.
+      CREATE TABLE IF NOT EXISTS accent_variants (
+        folded TEXT NOT NULL,
+        term TEXT NOT NULL,
+        PRIMARY KEY (folded, term)
+      ) WITHOUT ROWID;
     `);
     this.handle
       .prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)')
@@ -728,6 +864,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
         'INSERT INTO passages(id, item_key, title, text, source) VALUES (?, ?, ?, ?, ?)',
       ),
       insertFts: db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)'),
+      insertVariant: db.prepare('INSERT OR IGNORE INTO accent_variants(folded, term) VALUES (?, ?)'),
+      variantsFor: db.prepare('SELECT term FROM accent_variants WHERE folded = ?'),
       // The external-content delete protocol: FTS5 stores no text of its own, so a row is
       // retired by handing back the exact rowid and text that were indexed. A bare DELETE
       // on `passages` would leave the index pointing at a rowid that no longer resolves,
@@ -973,7 +1111,18 @@ export class SqliteSearchIndex extends SearchIndexBase {
   protected putPassage(rec: ChunkRecord): void {
     this.begin();
     const res = this.stmts.insertPassage.run(rec.id, rec.itemKey, rec.title, rec.text, rec.source ?? null);
-    this.stmts.insertFts.run(Number(res.lastInsertRowid), rec.text);
+    // Normalized once, here, so what FTS tokenizes is exactly what the JS query side
+    // produces (NFC, unicode61-aware case fold) — unicode61 itself normalizes nothing.
+    // The delete sites below re-derive the same string from passages.text, which the
+    // external-content protocol requires to match byte for byte.
+    this.stmts.insertFts.run(Number(res.lastInsertRowid), normalizeForSearch(rec.text));
+    // Keep the expansion map current as the vocabulary grows. A deletion may leave an
+    // entry behind; that costs one zero-hit term in an expanded query, never a wrong
+    // result, and the next full build re-derives the map (deriveAccentVariants).
+    for (const t of new Set(tokenize(rec.text))) {
+      const folded = accentKey(t);
+      if (folded !== t && folded.length > 1) this.stmts.insertVariant.run(folded, t);
+    }
     this.c.documents++;
     if (rec.source === 'fulltext') {
       this.c.fulltextPassages++;
@@ -1009,7 +1158,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       has_vector: number;
     }>;
     for (const row of rows) {
-      this.stmts.deleteFts.run(row.pid, row.text);
+      this.stmts.deleteFts.run(row.pid, normalizeForSearch(row.text));
       this.c.documents--;
       if (row.has_vector) this.c.vectors--;
       if (row.source === 'fulltext') this.c.fulltextPassages--;
@@ -1048,7 +1197,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.begin();
     const rows = this.stmts.itemFulltext.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
     for (const row of rows) {
-      this.stmts.deleteFts.run(row.pid, row.text);
+      this.stmts.deleteFts.run(row.pid, normalizeForSearch(row.text));
       this.c.documents--;
       this.c.fulltextPassages--;
       if (row.has_vector) this.c.vectors--;
@@ -1066,7 +1215,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.begin();
     const rows = this.stmts.itemOwnWords.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
     for (const row of rows) {
-      this.stmts.deleteFts.run(row.pid, row.text);
+      this.stmts.deleteFts.run(row.pid, normalizeForSearch(row.text));
       this.c.documents--;
       this.c.ownWordsPassages--;
       if (row.has_vector) this.c.vectors--;
@@ -1135,7 +1284,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
   protected keywordSearch(q: string, topK: number): RankedId[] {
     const terms = pruneTerms([...new Set(tokenize(q))], isStopword);
     if (!terms.length) return [];
-    const match = terms.map(ftsTerm).join(' OR ');
+    const match = terms.map((t) => this.expandTerm(t)).join(' OR ');
     try {
       const rows = this.stmts.keyword.all(match, topK) as Array<{ id: string; rank: number }>;
       return rows.map((r) => ({ id: r.id, score: -r.rank }));
@@ -1153,6 +1302,25 @@ export class SqliteSearchIndex extends SearchIndexBase {
       this.opts.logger?.debug(`FTS5 query rejected (${match}): ${e instanceof Error ? e.message : String(e)}`);
       return [];
     }
+  }
+
+  /**
+   * One query term as its MATCH fragment: the term itself, OR-grouped with the accented
+   * spellings the index holds for it when the term carries no marks of its own.
+   *
+   * The direction is deliberate and asymmetric. An unaccented term expands — accents are
+   * the first thing lost to keyboards, copy-paste and OCR, so `theorie` runs as
+   * `("theorie" OR "théorie")` and reaches the accented documents without one extra token
+   * in the index. An accented term never expands: folding `thể` toward `the` is the
+   * vocabulary merge this change exists to end. Each variant keeps its own idf under
+   * FTS5's bm25 — a rare accented spelling stays rare.
+   */
+  private expandTerm(term: string): string {
+    if (accentKey(term) !== term) return ftsTerm(term);
+    const variants = this.stmts.variantsFor.all(term) as Array<{ term: string }>;
+    if (!variants.length) return ftsTerm(term);
+    const group = [term, ...variants.map((v) => v.term)].map(ftsTerm).join(' OR ');
+    return `(${group})`;
   }
 
   /**
