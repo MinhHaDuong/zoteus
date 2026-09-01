@@ -198,8 +198,10 @@ export class ContentScanner {
     }
 
     if (this.state === 'content') {
-      rest = this.decodeInto(rest, out);
-      if (this.state !== 'envelope-tail') return out;
+      const decoded = this.decodeInto(rest, out);
+      if (!decoded.closed) return out;
+      this.state = 'envelope-tail';
+      rest = decoded.rest;
     }
 
     this.tail += rest;
@@ -229,10 +231,14 @@ export class ContentScanner {
   }
 
   /**
-   * Decode the JSON string body until its closing quote. Returns whatever followed it, and
-   * leaves the state on `content` when the string has not ended in this chunk.
+   * Decode the JSON string body until its closing quote.
+   *
+   * `closed` says whether the string ended inside this chunk, and `rest` is whatever
+   * followed it. Reported rather than written straight into `this.state` so the caller owns
+   * the transition — the state machine has one place that advances it, which is also what
+   * keeps the narrowing honest for a reader.
    */
-  private decodeInto(chunk: string, out: DocumentWindow[]): string {
+  private decodeInto(chunk: string, out: DocumentWindow[]): { rest: string; closed: boolean } {
     let i = 0;
     let plain = '';
     const take = (s: string): void => {
@@ -272,8 +278,7 @@ export class ContentScanner {
 
       if (ch === '"') {
         this.append(plain, out);
-        this.state = 'envelope-tail';
-        return chunk.slice(i + 1);
+        return { rest: chunk.slice(i + 1), closed: true };
       }
 
       // The common path: run to the next character that needs deciding, in one slice.
@@ -284,7 +289,7 @@ export class ContentScanner {
     }
 
     this.append(plain, out);
-    return '';
+    return { rest: '', closed: false };
   }
 
   private append(text: string, out: DocumentWindow[]): void {
