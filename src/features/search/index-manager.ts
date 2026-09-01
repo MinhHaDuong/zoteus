@@ -2,7 +2,7 @@ import { BM25Index } from './bm25.js';
 import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { pruneTerms } from './query-terms.js';
-import { isStopword, normalizeForSearch, tokenize } from './tokenize.js';
+import { foldMarks, isStopword, normalizeForSearch, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
 import {
   DEFAULT_EMBED_BATCH_SIZE,
@@ -159,10 +159,17 @@ export function makeSnippet(text: string, query: string, max = 240): string {
   // Folded, not merely lowercased, because the terms being looked for are folded: an
   // accented query would otherwise never find its own passage and every snippet would
   // start at character 0.
-  const folded = normalizeForSearch(clean);
+  const normalized = normalizeForSearch(clean);
+  // The same string with its marks stripped, searched only when the accented one misses.
+  // The index answers `theorie` for an accented passage because it holds the stripped form
+  // beside the written one; a snippet has no such second copy, so it looks twice instead.
+  // Offsets carry over because stripping a mark from precomposed text is length-preserving
+  // — which is what the NFC above is for.
+  const stripped = foldMarks(normalized);
   let pos = -1;
   for (const t of pruneTerms(tokenize(query), isStopword)) {
-    const i = folded.indexOf(t);
+    let i = normalized.indexOf(t);
+    if (i < 0) i = stripped.indexOf(t);
     if (i >= 0 && (pos < 0 || i < pos)) pos = i;
   }
   let start = pos < 0 ? 0 : Math.max(0, pos - Math.floor(max / 3));

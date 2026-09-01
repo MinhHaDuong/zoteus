@@ -5,7 +5,7 @@ import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
 import { pruneTerms } from './query-terms.js';
-import { isStopword, tokenize } from './tokenize.js';
+import { indexText, isStopword, tokenize } from './tokenize.js';
 import { SearchIndexCorruptError, isCorruptionError, isQuerySyntaxError, sidecarsOf } from './corruption.js';
 import { VectorSalvage } from './vector-salvage.js';
 import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE } from './limits.js';
@@ -47,7 +47,21 @@ export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
  * charged its owner a full re-embed (hours, and real API spend) for a cache the server
  * can rebuild from what is already on disk.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+
+/**
+ * How the keyword index tokenizes, in one place because the migration rung has to declare
+ * exactly what `createSchema` declares.
+ *
+ * `remove_diacritics 0`, not 2, and the difference is a correctness fix rather than a
+ * preference. Stripping marks from every token does not normalize spelling in a library
+ * that holds more than one language, it merges vocabulary: `an` with an acute onto `an`,
+ * `be` with an acute onto `be`, two distinct Vietnamese words onto `the`. The recall that
+ * stripping bought — typing `theorie` and finding the accented spelling — is kept by
+ * indexing the stripped form BESIDE the written one, which is what `indexText` does. See
+ * tokenize.ts.
+ */
+const FTS_TOKENIZER = 'unicode61 remove_diacritics 0';
 
 /**
  * One rung of the upgrade ladder: how a database stamped `to - 1` becomes one stamped `to`.
@@ -85,7 +99,39 @@ export interface SchemaMigration {
  * expensive to wish for afterwards, when every index in the field has already been
  * sidelined by it.
  */
-export const SCHEMA_MIGRATIONS: SchemaMigration[] = [];
+export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
+  {
+    to: 2,
+    what: 'keeps diacritics in the keyword index, with the folded form indexed beside each accented word',
+    up(db) {
+      // The first rung, and it is exactly the case the ladder was built for: the tokenizer
+      // changed, so every passage must be tokenized again — and not one vector is touched.
+      // Without a rung the bump would sideline every index in the field and charge it the
+      // re-embed the interface comment above prices at five and a half hours of local CPU.
+      db.exec('DROP TABLE IF EXISTS passages_fts');
+      db.exec(`
+        CREATE VIRTUAL TABLE passages_fts USING fts5(
+          text,
+          content='passages',
+          content_rowid='pid',
+          tokenize='${FTS_TOKENIZER}'
+        );
+      `);
+      const insert = db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)');
+      // Paged by rowid rather than read whole: the text of a full-text library is hundreds
+      // of megabytes, and a migration needing all of it resident is one that fails on the
+      // machines least able to afford the rebuild it is there to avoid.
+      const page = db.prepare('SELECT pid, text FROM passages WHERE pid > ? ORDER BY pid LIMIT 2000');
+      let after = 0;
+      for (;;) {
+        const rows = page.all(after) as Array<{ pid: number; text: string }>;
+        if (!rows.length) break;
+        for (const r of rows) insert.run(r.pid, indexText(r.text));
+        after = rows[rows.length - 1]!.pid;
+      }
+    },
+  },
+];
 
 /**
  * Passage rowids per rescore statement. The exact stage fetches its candidates by rowid in
@@ -496,7 +542,13 @@ export class SqliteSearchIndex extends SearchIndexBase {
     const what = steps.map((s) => s.what).join('; ');
     this.storeNotice =
       `The search index at ${this.file} was upgraded in place from schema version ${stored} to ` +
-      `${this.schemaVersion} (${what}). Nothing was re-indexed and no vectors were re-computed.`;
+      // "Nothing was re-indexed" used to be part of this sentence. It was true while the
+      // ladder was empty and every imagined rung added a column; it is not a property of
+      // the mechanism, and the first real rung re-indexes every passage. What the ladder
+      // does guarantee is the expensive half — a rung runs inside the stamping transaction
+      // and nothing in it embeds — so that is what the notice claims, and the rung's own
+      // `what` says the rest.
+      `${this.schemaVersion} (${what}). No vectors were re-computed.`;
     this.opts.logger?.info(this.storeNotice);
     return undefined;
   }
@@ -710,7 +762,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
         text,
         content='passages',
         content_rowid='pid',
-        tokenize='unicode61 remove_diacritics 2'
+        tokenize='${FTS_TOKENIZER}'
       );
     `);
     this.handle
@@ -973,7 +1025,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
   protected putPassage(rec: ChunkRecord): void {
     this.begin();
     const res = this.stmts.insertPassage.run(rec.id, rec.itemKey, rec.title, rec.text, rec.source ?? null);
-    this.stmts.insertFts.run(Number(res.lastInsertRowid), rec.text);
+    this.stmts.insertFts.run(Number(res.lastInsertRowid), indexText(rec.text));
     this.c.documents++;
     if (rec.source === 'fulltext') {
       this.c.fulltextPassages++;
@@ -1009,7 +1061,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       has_vector: number;
     }>;
     for (const row of rows) {
-      this.stmts.deleteFts.run(row.pid, row.text);
+      this.stmts.deleteFts.run(row.pid, indexText(row.text));
       this.c.documents--;
       if (row.has_vector) this.c.vectors--;
       if (row.source === 'fulltext') this.c.fulltextPassages--;
@@ -1048,7 +1100,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.begin();
     const rows = this.stmts.itemFulltext.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
     for (const row of rows) {
-      this.stmts.deleteFts.run(row.pid, row.text);
+      this.stmts.deleteFts.run(row.pid, indexText(row.text));
       this.c.documents--;
       this.c.fulltextPassages--;
       if (row.has_vector) this.c.vectors--;
@@ -1066,7 +1118,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.begin();
     const rows = this.stmts.itemOwnWords.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
     for (const row of rows) {
-      this.stmts.deleteFts.run(row.pid, row.text);
+      this.stmts.deleteFts.run(row.pid, indexText(row.text));
       this.c.documents--;
       this.c.ownWordsPassages--;
       if (row.has_vector) this.c.vectors--;
