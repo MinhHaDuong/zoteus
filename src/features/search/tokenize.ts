@@ -26,8 +26,9 @@ export function isStopword(term: string): boolean {
 
 /**
  * Combining marks sitting on a **Latin** base, which is the only place
- * `unicode61 remove_diacritics 2` removes them: measured, Greek tonos and Cyrillic breve
- * survive there, so they survive here. See normalizeForSearch.
+ * `unicode61 remove_diacritics 2` removed them under the old symmetric fold: measured,
+ * Greek tonos and Cyrillic breve survive there, so they survive here. Consumed by
+ * `foldMarks` (the expansion map's key derivation), never by `normalizeForSearch`.
  *
  * U+0300–U+036F rather than `\p{M}`, which is the block NFD produces for Latin (Vietnamese
  * included: the tone marks and the dot below are all in it) and the range Zotero's own
@@ -51,28 +52,28 @@ const UNIFY: Record<string, string> = {
 const UNIFY_RE = new RegExp(`[${Object.keys(UNIFY).join('')}]`, 'gu');
 
 /**
- * Fold a string to the form both sides of the index are compared in: lowercase, Latin
- * diacritics removed, everything else left standing.
+ * Normalize a string to the form both sides of the index are compared in: lowercase (as
+ * unicode61 lowercases, not as JavaScript does), canonically composed, letter-unified —
+ * marks left standing. Diacritic removal is NOT part of this any more; it lives in
+ * `foldMarks`, applied only to derive the expansion map's keys.
  *
  * **Why this exists.** `tokenize()` used to match `[a-z0-9]+` over lowercased text, which
- * is adequate for English and a correctness defect for everything else. On the FTS5
- * backend the document side is folded by SQLite (`remove_diacritics 2`) while the query
- * side was not, so `théorie` reached MATCH as `"th" OR "orie"`. Because terms are OR-ed
- * that is not a miss but a confident wrong answer: `"th"` and `"orie"` retrieve whatever
- * ordinary prose happens to contain them. Measured on a 7 500-item library, an accented
- * query and its unaccented spelling shared not one result — jaccard 0,00.
- * The repair is Zotero's: fold in JS, in front of the tokeniser that the index side and
- * the query side already share, so the symmetry is structural rather than coincidental.
+ * is adequate for English and a correctness defect for everything else: `théorie` reached
+ * MATCH as `"th" OR "orie"`, and because terms are OR-ed that is not a miss but a
+ * confident wrong answer — `"th"` and `"orie"` retrieve whatever ordinary prose happens
+ * to contain them. Measured on a 7 500-item library, an accented query and its unaccented
+ * spelling shared not one result — jaccard 0,00. The repair is one normalizer in front of
+ * the tokenizer that the index side and the query side share, so agreement between what
+ * is stored and what is asked is structural rather than coincidental.
  *
  * **Why it emulates unicode61 rather than copying Zotero's `normalizeForSearch`.** Zotero
  * folds harder — NFKD, plus a hand map for `ø œ æ ł đ ð þ ß ı` — because it owns both
- * sides of its own comparison. We do not: `passages.text` is the display text `get()`
- * reads back for snippets, so the FTS5 document side stays raw and is tokenised by SQLite.
- * Anything this function does that `unicode61 remove_diacritics 2` does not re-opens the
- * asymmetry it exists to close. Measured, `đại` indexes as `đai` and `søren` as `søren`;
- * folding either here would send the query where the index is not. So the hand map is
- * deliberately absent, and NFD is used rather than NFKD (`ﬁle` and `ａｂｃ` are indexed
- * whole, so they stay whole here).
+ * sides of its own comparison. We only own one: the FTS5 side is tokenised by SQLite
+ * (this function feeds it, but unicode61 still decides where tokens split and how case
+ * folds), so anything done here that `unicode61` does not re-opens the asymmetry it
+ * exists to close. Measured, `søren` indexes as `søren`; folding it here would send the
+ * query where the index is not. So the hand map is deliberately absent, and NFC is used
+ * rather than NFKD (`ﬁle` and `ａｂｃ` are indexed whole, so they stay whole here).
  *
  * Swept codepoint by codepoint over Latin, Greek, Cyrillic, Latin Extended Additional,
  * letterlike and number forms, fullwidth and the ligatures — 1 301 codepoints. What it found
@@ -81,8 +82,8 @@ const UNIFY_RE = new RegExp(`[${Object.keys(UNIFY).join('')}]`, 'gu');
  * harmless. **That was wrong**, and re-running it is what showed otherwise: twelve of them
  * sent the query to a token the index does not hold, which is this defect's own class on
  * rarer input. Ten were `Ǡ Ǣ Ǯ Ǽ Ǿ` with their lowercase forms and two were gaps in
- * unicode61's Greek case table; all twelve are handled by NO_MARK_STRIP and
- * NO_CASE_FOLD below. What remains is fifteen unassigned or symbol codepoints that
+ * unicode61's Greek case table; all twelve are handled by NO_TRANSFORM and
+ * UNICODE61_KEEPS_CASE below. What remains is fifteen unassigned or symbol codepoints that
  * unicode61 indexes and `\p{L}\p{N}` does not — those genuinely do only retrieve less.
  */
 export function normalizeForSearch(text: string): string {

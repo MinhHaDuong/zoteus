@@ -1,4 +1,4 @@
-import { pruneTerms } from './query-terms.js';
+import { MAX_ACCENT_VARIANTS, pruneTerms } from './query-terms.js';
 import { accentKey, isStopword, tokenize } from './tokenize.js';
 
 interface Doc {
@@ -95,7 +95,10 @@ export class BM25Index {
           const vs = [...(this.variants.get(t) ?? [])];
           if (!vs.length) return [t];
           const variantsDf = vs.reduce((s, v) => s + (this.df.get(v) ?? 0), 0);
-          return variantsDf > (this.df.get(t) ?? 0) ? [t, ...vs] : [t];
+          if (variantsDf <= (this.df.get(t) ?? 0)) return [t];
+          // Same cap as the SQLite backend's MAX_ACCENT_VARIANTS, best spellings first.
+          const kept = vs.sort((a, b) => (this.df.get(b) ?? 0) - (this.df.get(a) ?? 0)).slice(0, MAX_ACCENT_VARIANTS);
+          return [t, ...kept];
         }),
       ),
     ];

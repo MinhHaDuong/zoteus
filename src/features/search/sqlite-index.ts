@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
-import { pruneTerms } from './query-terms.js';
+import { MAX_ACCENT_VARIANTS, pruneTerms } from './query-terms.js';
 import { accentKey, isStopword, normalizeForSearch, tokenize } from './tokenize.js';
 import {
   SearchIndexCorruptError,
@@ -83,6 +83,11 @@ const FTS_TOKENIZER = 'unicode61 remove_diacritics 0';
  */
 function deriveAccentVariants(db: Database): void {
   db.exec(`
+    -- The stamp comes OFF first and goes back on last, so a derivation that dies midway
+    -- (this function can run inside a build's own transaction, whose commit would keep
+    -- the partial table) leaves no stamp — and an unstamped map is re-derived
+    -- unconditionally on the next open, never trusted.
+    DELETE FROM meta WHERE key = 'accentVariantsPassages';
     DROP TABLE IF EXISTS accent_variants;
     CREATE TABLE accent_variants (
       folded TEXT NOT NULL,
@@ -90,6 +95,7 @@ function deriveAccentVariants(db: Database): void {
       df INTEGER NOT NULL,
       PRIMARY KEY (folded, term)
     ) WITHOUT ROWID;
+    DROP TABLE IF EXISTS temp.accent_vocab;
     CREATE VIRTUAL TABLE temp.accent_vocab USING fts5vocab('main', 'passages_fts', 'row');
   `);
   const insert = db.prepare('INSERT OR IGNORE INTO accent_variants(folded, term, df) VALUES (?, ?, ?)');
@@ -136,7 +142,9 @@ function deriveAccentVariants(db: Database): void {
  *  - add a rung whose `to` is the new version, or deliberately do not, and understand
  *    that not adding one sidelines every existing index and charges it a re-embed;
  *  - `up` runs inside the transaction that stamps the new version, so a step that throws
- *    leaves the database exactly as it was, at its old stamp, and the sideline takes over;
+ *    leaves the database exactly as it was, at its old stamp. What happens then depends
+ *    on why it threw: a corrupt file is sidelined, anything else is refused with the
+ *    reason and retried on the next open (see reconcileSchema);
  *  - the ladder must be contiguous. A database is migrated only when every rung from its
  *    stamp to this one exists, because a gap means some version's rows were never
  *    accounted for by anything.
@@ -572,14 +580,26 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // factory degrades this into "search refuses, and says why" — the server survives,
       // nothing is written over the file, and the next open retries the ladder against an
       // untouched database.
-      throw new SearchIndexUnreadableError(
+      const refusal = new SearchIndexUnreadableError(
         this.file,
         new Error(
           `it is intact at schema version ${stored} but could not be upgraded to ` +
-            `${this.schemaVersion} (${failure instanceof Error ? failure.message : String(failure)}); ` +
-            'the file was left untouched and the upgrade will be retried on the next open',
+            `${this.schemaVersion} (${failure instanceof Error ? failure.message : String(failure)})`,
         ),
       );
+      // The class's stock message ends in rebuild advice, and for THIS refusal that
+      // advice is exactly wrong: a rebuild deletes an intact, fully-vectorized database
+      // to cure a transient condition a restart cures for free. Say the right thing
+      // instead — the refusal is the whole value of this path.
+      refusal.message =
+        `The search index at ${this.file} is intact at schema version ${stored} but could not be ` +
+        `upgraded to ${this.schemaVersion}: ${failure instanceof Error ? failure.message : String(failure)}. ` +
+        'The file was left untouched and nothing will be written over it. Search is unavailable until the ' +
+        'upgrade succeeds; every other tool still works. Fix the underlying condition (a full disk, a file ' +
+        'limit, another process holding the database) and restart the server — the upgrade then completes ' +
+        'in place, with nothing re-read from Zotero and no vectors re-computed. A rebuild is NOT needed ' +
+        'and would discard a usable index.';
+      throw refusal;
     }
     await this.sideline(stored, contents);
   }
@@ -1353,7 +1373,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
     const selfDf = (rows.find((v) => v.term === term)?.df ?? 0);
     const variantsDf = variants.reduce((s, v) => s + v.df, 0);
     if (variantsDf <= selfDf) return ftsTerm(term);
-    const group = [term, ...variants.map((v) => v.term)].map(ftsTerm).join(' OR ');
+    // Capped, best spellings first, so no key can grow a query without bound: the widest
+    // group a real 477 512-passage EN/FR/VI library produced was 15 spellings, and a
+    // document seeded with hundreds of crafted spellings of one key must cost the
+    // attacker an indexing job, not every future user a posting-list merge per spelling.
+    const kept = [...variants].sort((a, b) => b.df - a.df).slice(0, MAX_ACCENT_VARIANTS);
+    const group = [term, ...kept.map((v) => v.term)].map(ftsTerm).join(' OR ');
     return `(${group})`;
   }
 

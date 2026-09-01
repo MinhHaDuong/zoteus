@@ -57,3 +57,11 @@ export function pruneTerms(terms: string[], prunable: TermPredicate): string[] {
   // have, with nothing, for free.
   return terms.length >= MIN_PHRASE_TERMS ? terms : kept;
 }
+
+/**
+ * Most accented spellings one expanded query term may carry, highest document frequency
+ * first (see the SQLite backend's expandTerm and the memory backend's search). Bounds
+ * the expanded query against a corpus seeded with crafted spellings; comfortably above
+ * the widest real group measured (15, the Vietnamese syllables under `to`).
+ */
+export const MAX_ACCENT_VARIANTS = 24;

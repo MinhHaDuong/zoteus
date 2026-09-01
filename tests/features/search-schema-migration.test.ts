@@ -12,10 +12,12 @@ import type { SchemaMigration } from '../../src/features/search/sqlite-index.js'
  *
  * Until this existed the stamp had exactly two accepted states — no tables, or this
  * build's own version — and everything else was moved aside and rebuilt from zero,
- * re-embedding included. That has never fired for anyone, because the stamp has been 1
- * since the SQLite backend landed, which is the entire point: the next bump is the
- * expensive one, and it costs a 255k-passage library five and a half hours of local
- * embedding (or a hosted provider's bill) for what is usually an added column.
+ * re-embedding included. The ladder was built before the first bump, which is the entire
+ * point: without it, that bump would have cost a 255k-passage library five and a half
+ * hours of local embedding (or a hosted provider's bill). The first real rung has now
+ * shipped — the keep-diacritics re-tokenization, stamped 2 and pinned by the cases at
+ * the end of this file; the ADD_COLUMN-style rungs above them are generic machinery
+ * fixtures, not shipped migrations.
  *
  * These cases play the part of the build that makes that bump, through the schemaVersion /
  * migrations options, and pin both halves of the answer: a database at an older version of
@@ -203,7 +205,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
       },
     ];
     await expect(openIndex(path, { schemaVersion: 3, migrations: broken })).rejects.toThrow(
-      /intact at schema version 2 but could not be upgraded to 3 \(rung failed halfway\)/,
+      /intact at schema version 2 but could not be upgraded to 3: rung failed halfway/,
     );
     // NOT sidelined: the original file sits untouched at its own path, at its old stamp,
     // holding every row and without the half-applied column — the rung and the stamp

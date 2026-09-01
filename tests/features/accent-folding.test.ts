@@ -220,7 +220,7 @@ describe('normalizeForSearch', () => {
     expect(normalizeForSearch('e\u0301le\u0300ve')).toBe(normalizeForSearch('élève'));
   });
 
-  it('leaves non-Latin diacritics alone, because remove_diacritics 2 does', () => {
+  it('leaves non-Latin diacritics alone, as it always has', () => {
     expect(normalizeForSearch('Θεωρία')).toBe('θεωρία');
     expect(normalizeForSearch('Йошкар')).toBe('йошкар');
   });
@@ -301,8 +301,9 @@ describe('makeSnippet', () => {
  * first reading called it.
  *
  * Pinned here because the sweep itself is not something a pull request runs. The expected
- * values are what `unicode61 remove_diacritics 2` actually stores, read off that
- * comparison — not what a reading of the Unicode tables suggests it ought to.
+ * values are what `unicode61 remove_diacritics 0` — the tokenizer this commit ships —
+ * actually stores, read off that comparison (re-swept for this commit: it moved `İ` into
+ * the keep-case set) — not what a reading of the Unicode tables suggests it ought to.
  */
 describe('codepoints unicode61 does not fold the way JavaScript would', () => {
   it('keeps the mark on letters whose base is itself non-ASCII Latin', () => {
@@ -348,6 +349,35 @@ describe('codepoints unicode61 does not fold the way JavaScript would', () => {
     expect(folded).toBe("théorie générale de l'emploi ǽ Ϳ");
     expect(/[﷐-﷯]/u.test(folded)).toBe(false);
     expect(normalizeForSearch('plain ascii text')).toBe('plain ascii text');
+  });
+});
+
+describe('the expansion group is bounded', () => {
+  it.each(backends)('a key seeded with more spellings than the cap expands to the cap, best first (%s)', async (backend) => {
+    // A document can mint accented spellings at will (OCR does it by accident, an
+    // adversary on purpose), and each would join an expanded query as its own
+    // posting-list merge. The cap keeps that a bounded cost. 30 crafted spellings of
+    // one key: the query must still find the dominant ones and must NOT match a
+    // document whose only content is the 30th-ranked spelling.
+    const marks = ['̀', '́', '̂', '̃', '̄', '̆', '̇', '̈', '̉', '̊',
+      '̋', '̌', '̏', '̑', '̣', '̤', '̥', '̧', '̨', '̭',
+      '̮', '̰', '̱', '̹', '̼', '̽', '̾', '̿', '̓', 'ͅ'];
+    const spelling = (i: number) => `zoq${'u'.normalize('NFD')}${marks[i]}t`.normalize('NFC');
+    const docs = [
+      // The dominant spelling, in several documents.
+      ...Array.from({ length: 3 }, (_, i) => ({ key: `D${i}`, text: `${spelling(0)} research corpus` })),
+      // 29 more spellings, one document each.
+      ...Array.from({ length: 29 }, (_, i) => ({ key: `S${i}`, text: `${spelling(i + 1)} lone spelling` })),
+    ];
+    const index = await indexOf(backend, docs);
+    const found = [...new Set((await index.query('zoqut', { limit: 40, mode: 'keyword' })).map((h) => h.itemKey))];
+    // Expansion fired (nothing spells it bare) and reached the dominant spelling…
+    expect(found).toContain('D0');
+    // …and the group was capped: 30 spellings exist, at most 24 can have joined, so at
+    // least five of the one-spelling documents are unreachable from this query.
+    const loners = found.filter((k) => k.startsWith('S')).length;
+    expect(loners).toBeLessThanOrEqual(23);
+    await index.close();
   });
 });
 

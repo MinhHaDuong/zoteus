@@ -149,16 +149,10 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
 
 /** Build a readable, query-centred snippet trimmed to word boundaries. */
 export function makeSnippet(text: string, query: string, max = 240): string {
-  // NFC first: the fold below is length-preserving on precomposed text, so folded
-  // offsets carry straight over — on decomposed text every stripped mark shifts them,
-  // and a passage with a few hundred marks before the hit (ordinary NFD Vietnamese at
-  // full-text chunk size) would push the match clean out of the returned window.
-  // Canonical composition changes no character the reader sees.
+  // NFC changes no character the reader sees, and it is what the token comparison below
+  // normalizes to.
   const clean = text.replace(/\s+/g, ' ').trim().normalize('NFC');
   if (clean.length <= max) return clean;
-  // Folded, not merely lowercased, because the terms being looked for are folded: an
-  // accented query would otherwise never find its own passage and every snippet would
-  // start at character 0.
   // Walk the passage's own tokens and normalize each one, rather than normalizing the whole
   // passage and searching inside the result. The offset then comes from `clean` itself and
   // needs no assumption at all about whether normalizing preserved length.
