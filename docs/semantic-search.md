@@ -487,6 +487,18 @@ construction. The JS fold deliberately reproduces `unicode61` and no more — `�
 þ ß` are letters to unicode61 rather than accented forms, so they are letters here too,
 and `søren` does not answer to `soren`.
 
+**Common words.** Some words are too common in a library to rank on — searching them
+walks a long posting list to separate almost nothing — so they are dropped from the query
+before it runs. They are still indexed: only queries prune, and both backends index every
+term, so a word can always be searched for on purpose.
+
+Dropping them stops when it would change the question rather than shorten it. If fewer
+terms survive the prune than were dropped, the query runs on what you typed instead: `to
+be or not to be` is otherwise answered by a single-word search for `not`, which returns a
+confidently-ranked page of unrelated results. If nothing survives at all, the search
+returns nothing, as it always has — a query of nothing but common words has no answer to
+give, and inventing one would be slower and no more useful.
+
 **Where the files are.** `<ZOTEUS_DATA_DIR>/search-index.sqlite` beside the older
 `search-index.json` (and `search-index-<userId>.*` per tenant in multi-tenant mode). SQLite
 also writes `-wal` and `-shm` sidecar files while the database is open; a clean shutdown

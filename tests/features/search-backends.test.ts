@@ -343,12 +343,20 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
     await sqlite.close();
   });
 
-  sqliteIt('tokenizes the query exactly like the JSON backend, stopwords included', async () => {
+  sqliteIt('tokenizes the query exactly like the JSON backend, common words included', async () => {
     const { memory, sqlite } = await both();
-    // "of"/"the" are dropped by tokenize.ts, so a query made only of them matches nothing
-    // on either backend rather than erroring or returning everything.
+    // A query of nothing but common words matches nothing on either backend, rather than
+    // erroring or returning everything. The mechanism moved — the words are no longer
+    // dropped by tokenize(), they are pruned query-side and nothing survives the prune —
+    // but the answer is the same, and that it is the same on BOTH backends is the point.
+    // Note the fixture below does contain `for` and `and`, so this is not green for want
+    // of the words being present anywhere.
     expect(await sqlite.query('of the', { mode: 'keyword' })).toEqual([]);
     expect(await memory.query('of the', { mode: 'keyword' })).toEqual([]);
+    // The case the assertion above stood in for and could not reach: a common word that
+    // IS in the fixture. Still nothing, still the same nothing on both sides.
+    expect(await sqlite.query('for and', { mode: 'keyword' })).toEqual([]);
+    expect(await memory.query('for and', { mode: 'keyword' })).toEqual([]);
     // Punctuation is not FTS5 syntax here: every term is quoted before it is OR-ed.
     const hits = await sqlite.query('"gardening" OR (tomatoes*)', { limit: 3, mode: 'keyword' });
     expect(hits[0]!.itemKey).toBe('B');

@@ -1,8 +1,8 @@
-import { tokenize } from './tokenize.js';
+import { MIN_MATCH_TERMS, pruneTerms } from './query-terms.js';
+import { isStopword, tokenize } from './tokenize.js';
 
 interface Doc {
   id: string;
-  tokens: string[];
   length: number;
   tf: Map<string, number>;
 }
@@ -41,7 +41,7 @@ export class BM25Index {
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     for (const term of tf.keys()) this.df.set(term, (this.df.get(term) ?? 0) + 1);
-    this.docs.set(id, { id, tokens, length: tokens.length, tf });
+    this.docs.set(id, { id, length: tokens.length, tf });
     this.totalLength += tokens.length;
   }
 
@@ -61,7 +61,7 @@ export class BM25Index {
 
   search(query: string, topK = 10): BM25Hit[] {
     if (this.docs.size === 0) return [];
-    const qTerms = [...new Set(tokenize(query))];
+    const qTerms = pruneTerms([...new Set(tokenize(query))], isStopword, MIN_MATCH_TERMS);
     const avgdl = this.totalLength / this.docs.size;
     const N = this.docs.size;
 
