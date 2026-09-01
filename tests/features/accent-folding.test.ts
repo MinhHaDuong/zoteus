@@ -227,10 +227,12 @@ describe('tokenize', () => {
     expect(tokenize('日本語の研究')).toEqual(['日本語の研究']);
   });
 
-  it('drops one-character tokens, and nothing else', () => {
-    // The stopword list moved to the query side (`query-terms.ts`), so this function is
-    // now the document tokenizer without exception: what it returns is what gets indexed,
-    // and a term that is never indexed cannot be searched for even on purpose.
+  it('drops one-character tokens and nothing else', () => {
+    // The 29 English function words this used to drop are gone: they were a language rule
+    // in a token space that holds every language at once, and what replaces them is a
+    // measurement of the library, applied query-side. See query-terms.ts and
+    // search-droplist.test.ts. Only the length rule is left, and it belongs here because it
+    // is about the token, not about the corpus.
     expect(tokenize('the a of neural x networks')).toEqual(['the', 'of', 'neural', 'networks']);
   });
 });
