@@ -188,6 +188,27 @@ export class LocalApiClient {
   }
 
   /**
+   * The same endpoint as `getFullText`, handed over unread.
+   *
+   * `getFullText` parses, which puts the document's whole extracted text in the caller's
+   * process — and the largest attachment in the measured corpus is 44,9 MB of it. The
+   * search pipeline's extract stage reads that text incrementally instead, so it needs the
+   * response rather than the object: the body is consumed as it arrives and no step holds
+   * the document whole. Null on 404, the local API's way of saying "nothing extracted",
+   * kept distinct from an unreachable app, which throws.
+   */
+  async fetchFullTextStream(key: string, lib?: LibraryRef): Promise<Response | null> {
+    const res = await this.fetcher.fetch(
+      `${this.base}${localLibraryPrefix(lib)}/items/${key}/fulltext`,
+      { method: 'GET', headers: this.headers() },
+      { maxRetries: 0 },
+    );
+    if (res.status === 404) return null;
+    if (!res.ok) throw new LocalApiError(res.status, `Local API ${res.status} for full text of ${key}`);
+    return res;
+  }
+
+  /**
    * The attachment's file bytes, read from the desktop app's own storage.
    *
    * `/items/<key>/file` does not serve the file: it answers 302 with a `file://` Location

@@ -11,8 +11,14 @@ import { systemClock } from './clock.js';
  */
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
 
-/** Bumped only when the DDL below changes shape. Nothing migrates yet; there is no field. */
-export const LEDGER_SCHEMA_VERSION = 1;
+/**
+ * Bumped only when the DDL below changes shape. Nothing migrates yet; there is no field.
+ *
+ * 2: tranche 3 added the extract shim's bookkeeping — `extract_state` and
+ * `attachment_choice`. Both are the conductor's, per the write line §5.2.4 draws through
+ * the shim: all of the shim's bookkeeping is writing, and the worker writes nothing.
+ */
+export const LEDGER_SCHEMA_VERSION = 2;
 
 /**
  * The three discovery classes, in priority order (SPEC.md §5.2.3): a record before its
@@ -99,6 +105,65 @@ export interface ItemDetail {
 export interface FulltextCensusEntry {
   ftVersion: number;
   itemVersion: number;
+}
+
+/** What the extract stage learned about one document, beyond its text. */
+export interface ExtractStateInput {
+  attachmentKey: string;
+  itemKey?: string | null;
+  /** The extract key of §5.2.1, over the streamed bytes. Null when there was no text. */
+  textHash?: string | null;
+  /** The tool identity the key's other half is made of. */
+  extractor: string;
+  chars: number;
+  indexedPages?: number | null;
+  totalPages?: number | null;
+  truncated: boolean;
+  empty: boolean;
+}
+
+export interface ExtractStateRow extends Omit<ExtractStateInput, 'itemKey' | 'textHash'> {
+  lib: number;
+  itemKey: string | null;
+  textHash: string | null;
+  indexedPages: number | null;
+  totalPages: number | null;
+  extractedAt: number;
+}
+
+/**
+ * The two reasons §5.2.3 names, plus the one it cannot name yet.
+ *
+ * `identical-text` and `different-text` are the SPEC's own vocabulary, and both need the
+ * *skipped* attachment's `text_hash` to be honest — which exists only when that attachment
+ * was extracted under an earlier choice, the case D6 explicitly contemplates ("if a later
+ * extraction gives an earlier attachment text, the choice function's output changes").
+ * `not-first-with-text` is what the stage records when it has never read the skipped
+ * attachment, and it is the honest statement then: we did not index it, and we are not
+ * claiming its text differs from something we never fetched. Claiming otherwise would put a
+ * measurement in the ledger that nothing measured.
+ */
+export type SkipReason = 'identical-text' | 'different-text' | 'not-first-with-text';
+
+export interface AttachmentDecision {
+  attachmentKey: string;
+  chosen: boolean;
+  reason?: SkipReason;
+}
+
+export interface AttachmentChoiceRow {
+  lib: number;
+  attachmentKey: string;
+  itemKey: string;
+  chosen: boolean;
+  reason: SkipReason | null;
+  decidedAt: number;
+}
+
+/** One candidate for D6, in the order the choice function reads them. */
+export interface AttachmentWithText {
+  attachmentKey: string;
+  dateAdded: string | null;
 }
 
 /**
@@ -267,6 +332,53 @@ export class Ledger {
         ON stage_queue(lib, class, op, item_key, attachment_key, band, status);
       CREATE INDEX IF NOT EXISTS stage_queue_claims
         ON stage_queue(status, claim_expires_at);
+
+      -- The extract stage's own row per attachment: its key, its tool identity, and what
+      -- the fetch learned about the document beyond its text (§5.2.4's per-attachment
+      -- truncation flags and extractor-version staleness).
+      --
+      -- \`text_hash\` is the extract key of §5.2.1, computed over the stream as it passed, so
+      -- this table identifies a document without ever having held one. \`extractor\` is the
+      -- other half of that key: work is stale exactly when the stored pair differs from the
+      -- current one, which is what makes a shim replacement a labeled re-extraction rather
+      -- than a silent one.
+      CREATE TABLE IF NOT EXISTS extract_state (
+        lib            INTEGER NOT NULL REFERENCES libraries(lib),
+        attachment_key TEXT NOT NULL,
+        item_key       TEXT,
+        text_hash      TEXT,
+        extractor      TEXT NOT NULL,
+        chars          INTEGER NOT NULL DEFAULT 0,
+        indexed_pages  INTEGER,
+        total_pages    INTEGER,
+        -- Zotero indexed fewer pages than the document has: the text is faithful and
+        -- partial. Stored because a partial extraction counted as complete is exactly how
+        -- coverage overstates itself.
+        truncated      INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+        empty          INTEGER NOT NULL DEFAULT 0 CHECK (empty IN (0, 1)),
+        extracted_at   INTEGER NOT NULL,
+        PRIMARY KEY (lib, attachment_key)
+      );
+
+      -- D6, first-with-text (§5.2.3): per item, exactly one attachment carries the body
+      -- text, and every other one gets a stored reason. The reason is the whole value of
+      -- the table — a suppressed attachment that leaves no trace is indistinguishable from
+      -- one nobody looked at — and it is honesty rather than a reopening of the decision.
+      CREATE TABLE IF NOT EXISTS attachment_choice (
+        lib            INTEGER NOT NULL REFERENCES libraries(lib),
+        attachment_key TEXT NOT NULL,
+        item_key       TEXT NOT NULL,
+        chosen         INTEGER NOT NULL DEFAULT 0 CHECK (chosen IN (0, 1)),
+        reason         TEXT,
+        decided_at     INTEGER NOT NULL,
+        PRIMARY KEY (lib, attachment_key),
+        -- The chosen attachment carries no reason and a skipped one always does. Without
+        -- this the "not indexed, no reason recorded" row is representable, which is the
+        -- state D6 exists to forbid.
+        CHECK ((chosen = 1) = (reason IS NULL))
+      );
+
+      CREATE INDEX IF NOT EXISTS attachment_choice_item ON attachment_choice(lib, item_key, chosen);
 
       -- One row per named lease. Tranche 1 owes tranche 2 a table the election statement
       -- of §5.2.5 is valid against; the election itself is not here.
@@ -602,6 +714,171 @@ export class Ledger {
       .run(note ?? null, wid);
   }
 
+  // --------------------------------------------------------- extract dispatch
+
+  /**
+   * The next document to fetch, in the order §5.2.3 states — and never one whose item still
+   * owes upper-class work.
+   *
+   * **The class order is this query, not a scheduler.** `class_rank` is a stored generated
+   * column carried by `stage_queue_priority`, so "metadata, then notes and annotations,
+   * then body text, newest first inside each" is an indexed ORDER BY that costs nothing to
+   * respect.
+   *
+   * The `NOT EXISTS` is the per-item half, and it is the half a global ORDER BY cannot
+   * give. What §5.2.3 promises is checkable at any instant *per item*: no item's body text
+   * is indexed before its record. A worker that merely took the highest-priority row would
+   * satisfy a global order and still fetch item B's PDF while item B's own record sat
+   * pending behind item A's — the promise is about the item, so the query is too. The
+   * reading that record coverage is a strict newest-first *prefix* is a different claim,
+   * and it was vetoed on 2026-08-29 (§5.2.3); this asserts neither more nor less than the
+   * per-item order.
+   *
+   * A claimed upper-class row counts as owed. It is being worked on, not done, and the
+   * ordering is about what is durable rather than about what is in flight.
+   */
+  nextExtractOrder(opts: { lib?: number; lane?: WorkLane } = {}): WorkOrderRow | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT q.* FROM stage_queue q
+           WHERE q.status = 'pending'
+             AND q.class = 'body'
+             AND q.op = 'index'
+             AND q.attachment_key IS NOT NULL
+             AND (:lib IS NULL OR q.lib = :lib)
+             AND (:lane IS NULL OR q.lane = :lane)
+             AND NOT EXISTS (
+               SELECT 1 FROM stage_queue p
+                 WHERE p.lib = q.lib
+                   AND p.item_key IS NOT NULL
+                   AND p.item_key = q.item_key
+                   AND p.class_rank < q.class_rank
+                   AND p.status IN ('pending', 'claimed'))
+           ORDER BY q.class_rank ASC, q.band ASC, q.date_added DESC, q.wid ASC
+           LIMIT 1`,
+      )
+      .get({ lib: opts.lib ?? null, lane: opts.lane ?? null }) as any;
+    return row ? toWorkOrderRow(row) : undefined;
+  }
+
+  // ---------------------------------------------------------- extract records
+
+  putExtractState(lib: number, state: ExtractStateInput): void {
+    this.db
+      .prepare(
+        `INSERT INTO extract_state(lib, attachment_key, item_key, text_hash, extractor, chars,
+                                   indexed_pages, total_pages, truncated, empty, extracted_at)
+           VALUES (:lib, :key, :itemKey, :hash, :extractor, :chars, :indexed, :total, :truncated, :empty, :at)
+           ON CONFLICT(lib, attachment_key) DO UPDATE
+             SET item_key = excluded.item_key,
+                 text_hash = excluded.text_hash,
+                 extractor = excluded.extractor,
+                 chars = excluded.chars,
+                 indexed_pages = excluded.indexed_pages,
+                 total_pages = excluded.total_pages,
+                 truncated = excluded.truncated,
+                 empty = excluded.empty,
+                 extracted_at = excluded.extracted_at`,
+      )
+      .run({
+        lib,
+        key: state.attachmentKey,
+        itemKey: state.itemKey ?? null,
+        hash: state.textHash ?? null,
+        extractor: state.extractor,
+        chars: state.chars,
+        indexed: state.indexedPages ?? null,
+        total: state.totalPages ?? null,
+        truncated: state.truncated ? 1 : 0,
+        empty: state.empty ? 1 : 0,
+        at: this.clock.now(),
+      });
+  }
+
+  extractState(lib: number, attachmentKey: string): ExtractStateRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM extract_state WHERE lib = ? AND attachment_key = ?')
+      .get(lib, attachmentKey) as any;
+    return r ? toExtractStateRow(r) : undefined;
+  }
+
+  /**
+   * Attachments whose stored text was produced by a different shim than the current one.
+   *
+   * Staleness is a comparison, never a date: the extract key is `(text_hash, extractor)`,
+   * so a row is stale exactly when its tool identity differs — which is also why a shim
+   * that changed nothing observable can decline to bump `EXTRACTOR_ID` and cost no
+   * re-extraction at all.
+   */
+  staleExtracts(lib: number, extractor: string): ExtractStateRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM extract_state WHERE lib = ? AND extractor <> ? ORDER BY attachment_key')
+      .all(lib, extractor) as any[];
+    return rows.map(toExtractStateRow);
+  }
+
+  // ------------------------------------------------------- first-with-text (D6)
+
+  /** Record the choice for one item: one chosen attachment, every other one with a reason. */
+  putAttachmentChoice(lib: number, itemKey: string, decisions: AttachmentDecision[]): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO attachment_choice(lib, attachment_key, item_key, chosen, reason, decided_at)
+         VALUES (:lib, :key, :itemKey, :chosen, :reason, :at)
+         ON CONFLICT(lib, attachment_key) DO UPDATE
+           SET item_key = excluded.item_key,
+               chosen = excluded.chosen,
+               reason = excluded.reason,
+               decided_at = excluded.decided_at`,
+    );
+    const at = this.clock.now();
+    for (const d of decisions) {
+      stmt.run({
+        lib,
+        key: d.attachmentKey,
+        itemKey,
+        chosen: d.chosen ? 1 : 0,
+        reason: d.chosen ? null : (d.reason ?? null),
+        at,
+      });
+    }
+  }
+
+  attachmentChoices(lib: number, itemKey: string): AttachmentChoiceRow[] {
+    const rows = this.db
+      .prepare('SELECT * FROM attachment_choice WHERE lib = ? AND item_key = ? ORDER BY attachment_key')
+      .all(lib, itemKey) as any[];
+    return rows.map(toAttachmentChoiceRow);
+  }
+
+  attachmentChoice(lib: number, attachmentKey: string): AttachmentChoiceRow | undefined {
+    const r = this.db
+      .prepare('SELECT * FROM attachment_choice WHERE lib = ? AND attachment_key = ?')
+      .get(lib, attachmentKey) as any;
+    return r ? toAttachmentChoiceRow(r) : undefined;
+  }
+
+  /**
+   * Every attachment of one item that the full-text census says has text, with the sort key
+   * D6 chooses on. Ascending `dateAdded`, attachment key as the tie-break, both applied in
+   * SQL so the choice function has nothing to decide about ordering.
+   *
+   * A NULL `date_added` sorts last rather than first: the census learned of the attachment
+   * before the delta read filled its detail in, and treating "unknown" as "oldest" would
+   * hand the body text to whichever attachment happened to be least known about.
+   */
+  attachmentsWithText(lib: number, itemKey: string): AttachmentWithText[] {
+    const rows = this.db
+      .prepare(
+        `SELECT c.attachment_key AS attachment_key, i.date_added AS date_added
+           FROM fulltext_census c
+           JOIN item_census i ON i.lib = c.lib AND i.item_key = c.attachment_key
+          WHERE c.lib = :lib AND i.parent_item = :itemKey
+          ORDER BY (i.date_added IS NULL) ASC, i.date_added ASC, c.attachment_key ASC`,
+      )
+      .all({ lib, itemKey }) as any[];
+    return rows.map((r) => ({ attachmentKey: r.attachment_key, dateAdded: r.date_added ?? null }));
+  }
+
   // ------------------------------------------------------------------ leases
 
   lease(name: string): LeaseRow | undefined {
@@ -621,6 +898,33 @@ function toLibraryRow(r: any): LibraryRow {
     scope: r.scope,
     itemWatermark: r.item_watermark,
     fulltextWatermark: r.fulltext_watermark ?? null,
+  };
+}
+
+function toExtractStateRow(r: any): ExtractStateRow {
+  return {
+    lib: r.lib,
+    attachmentKey: r.attachment_key,
+    itemKey: r.item_key ?? null,
+    textHash: r.text_hash ?? null,
+    extractor: r.extractor,
+    chars: r.chars,
+    indexedPages: r.indexed_pages ?? null,
+    totalPages: r.total_pages ?? null,
+    truncated: r.truncated === 1,
+    empty: r.empty === 1,
+    extractedAt: r.extracted_at,
+  };
+}
+
+function toAttachmentChoiceRow(r: any): AttachmentChoiceRow {
+  return {
+    lib: r.lib,
+    attachmentKey: r.attachment_key,
+    itemKey: r.item_key,
+    chosen: r.chosen === 1,
+    reason: (r.reason ?? null) as SkipReason | null,
+    decidedAt: r.decided_at,
   };
 }
 
