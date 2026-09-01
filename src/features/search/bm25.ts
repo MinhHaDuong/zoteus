@@ -1,5 +1,5 @@
-import { MIN_MATCH_TERMS, pruneTerms } from './query-terms.js';
-import { indexText, isStopword, tokenize } from './tokenize.js';
+import { highDfMinimum, MIN_DERIVATION_PASSAGES, MIN_MATCH_TERMS, pruneTerms } from './query-terms.js';
+import { indexText, tokenize } from './tokenize.js';
 
 interface Doc {
   id: string;
@@ -22,6 +22,8 @@ export interface BM25Hit {
 export class BM25Index {
   private readonly docs = new Map<string, Doc>();
   private readonly df = new Map<string, number>();
+  /** Cleared whenever `df` moves; see `commonTerms`. */
+  private common: Set<string> | undefined;
   private totalLength = 0;
 
   constructor(
@@ -46,6 +48,7 @@ export class BM25Index {
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
     for (const term of tf.keys()) this.df.set(term, (this.df.get(term) ?? 0) + 1);
     this.docs.set(id, { id, length: tokens.length, tf });
+    this.common = undefined;
     this.totalLength += tokens.length;
   }
 
@@ -60,12 +63,51 @@ export class BM25Index {
     }
     this.totalLength -= doc.length;
     this.docs.delete(id);
+    this.common = undefined;
     return true;
+  }
+
+  /**
+   * Whether a term appears in enough documents to be worth pruning off a query.
+   *
+   * This backend needs no stored droplist and no cadence rule, unlike the SQLite one: `df`
+   * is already exact and already resident, and it is rebuilt from the raw passage text on
+   * every load exactly as the postings are. So the answer is live by construction — an
+   * index written before this existed adopts it the moment it is read back, with no
+   * migration and nothing to recompute.
+   *
+   * Query side only. `addDoc` keeps indexing every term, because dropping them from the
+   * documents would both destroy the df this reads and make the degeneracy fallback — which
+   * exists precisely to search on those terms — unable to match anything.
+   */
+  isHighDf(term: string): boolean {
+    return this.commonTerms().has(term);
+  }
+
+  /**
+   * The terms this backend considers common, computed once per change to the index.
+   *
+   * Memoised because `search` asks per query term and the answer only moves when a document
+   * is added or removed. Guarded the same way the SQLite side guards its stored list: a set
+   * naming every term in the vocabulary is not a list of common terms, it is the vocabulary,
+   * and pruning by it empties every query. That happens whenever the corpus is too small for
+   * a document frequency to mean anything — three documents put the bar at one.
+   */
+  private commonTerms(): ReadonlySet<string> {
+    if (!this.common) {
+      const set = new Set<string>();
+      if (this.docs.size >= MIN_DERIVATION_PASSAGES) {
+        const floor = highDfMinimum(this.docs.size);
+        for (const [term, n] of this.df) if (n >= floor) set.add(term);
+      }
+      this.common = set.size >= this.df.size ? new Set<string>() : set;
+    }
+    return this.common;
   }
 
   search(query: string, topK = 10): BM25Hit[] {
     if (this.docs.size === 0) return [];
-    const qTerms = pruneTerms([...new Set(tokenize(query))], isStopword, MIN_MATCH_TERMS);
+    const qTerms = pruneTerms([...new Set(tokenize(query))], (t) => this.isHighDf(t), MIN_MATCH_TERMS, 'raw');
     const avgdl = this.totalLength / this.docs.size;
     const N = this.docs.size;
 

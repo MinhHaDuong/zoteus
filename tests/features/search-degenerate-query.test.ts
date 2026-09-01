@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createSearchIndex, nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { MemorySearchIndex, makeSnippet } from '../../src/features/search/index-manager.js';
 import type { SearchIndex } from '../../src/features/search/backend.js';
-import { isStopword, tokenize } from '../../src/features/search/tokenize.js';
+import { tokenize } from '../../src/features/search/tokenize.js';
 import { MIN_MATCH_TERMS, MIN_SNIPPET_TERMS, pruneTerms } from '../../src/features/search/query-terms.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
@@ -30,15 +30,35 @@ const items = [
   { key: 'P', data: { itemType: 'book', title: 'Pottery', abstractNote: 'Slipware and the reduction firing of a kiln' } },
 ];
 
+/**
+ * Enough passages for a document frequency to mean anything.
+ *
+ * The rule under test declines to derive a list below `MIN_DERIVATION_PASSAGES`, because a
+ * proportion of five documents is not a proportion. So a fixture that wants to exercise the
+ * derivation has to be a corpus, and this is the cheapest honest one: every filler item
+ * carries the same saturating vocabulary the narrative items above carry, so the ratios
+ * they were designed around survive being scaled up, and each has content of its own so it
+ * cannot be mistaken for a hit.
+ */
+const filler = Array.from({ length: 110 }, (_, i) => ({
+  key: `F${String(i).padStart(3, '0')}`,
+  data: {
+    itemType: 'journalArticle',
+    title: `Filler ${i}`,
+    abstractNote: `zoteus edition. The report of the survey number ${i} is to be filed with the registry of the office`,
+  },
+}));
+
+
 async function sqliteIndex(): Promise<SearchIndex> {
   const index = await createSearchIndex({ embedder: null, logger: silentLogger, backend: 'sqlite', jsonPath: '' });
-  await index.build(items);
+  await index.build([...items, ...filler]);
   return index;
 }
 
 async function memoryIndex(): Promise<SearchIndex> {
   const index = new MemorySearchIndex({ embedder: null, logger: silentLogger });
-  await index.build(items);
+  await index.build([...items, ...filler]);
   return index;
 }
 
@@ -104,25 +124,34 @@ describe('a query that prunes down to nothing is answered on what the user typed
     await index.close();
   });
 
-  sqliteIt('leaves an ordinary query pruned exactly as before', async () => {
+  sqliteIt('leaves an ordinary query pruned', async () => {
     const index = await sqliteIndex();
-    // The other half of the contract, and the one a reviewer should care about most: three
-    // content terms survive, the floor is met, and the function words are dropped as they
-    // always were. Nothing about ordinary search changes.
-    expect(pruneTerms([...new Set(tokenize('the growing of tomatoes in the greenhouse'))], isStopword, MIN_MATCH_TERMS))
+    // The other half of the contract, and the one a reviewer should care about most: enough
+    // content terms survive that the floor is met, the common ones are dropped, and the
+    // query lands on the one item that answers it. Nothing about ordinary search changes.
+    const common = (t: string) => ['the', 'of', 'and', 'to', 'be', 'in'].includes(t);
+    expect(pruneTerms([...new Set(tokenize('the growing of tomatoes in the greenhouse'))], common, MIN_MATCH_TERMS))
       .toEqual(['growing', 'tomatoes', 'greenhouse']);
-    expect(await keys(index, 'the growing of tomatoes in the greenhouse')).toEqual(['G']);
+    // Rank, not set, and the difference is the point: `in` appears in two of these ten
+    // items, so this corpus does not consider it common and does not drop it — where the
+    // shipped English list would have. D matches on `in` alone and ranks below the item
+    // that matches on three content words, which is BM25 doing exactly its job.
+    expect((await keys(index, 'the growing of tomatoes in the greenhouse'))[0]).toBe('G');
     await index.close();
   });
 
-  sqliteIt('answers a bare common word with nothing, and does it for free', async () => {
+  sqliteIt('answers a bare common word on the raw set, now that the list is measured', async () => {
     const index = await sqliteIndex();
-    // The regression this rule exists to avoid, pinned on both spellings. `thé` is French
-    // for tea and the tokenizer folds it onto `the`, so a French tea query reaches exactly
-    // this path — and must not come back with a page of English documents.
-    expect(await keys(index, 'the', 20)).toEqual([]);
+    // This inverts against the previous commit, deliberately, and it is the one visible
+    // consequence of the list ceasing to be curated. A hand-written list holds only words
+    // no query means, so emptying a query with it means the query meant nothing and the
+    // honest answer is nothing. A list measured from a corpus holds whatever that library
+    // is saturated with — which can be its own subject — so emptying a query with it does
+    // NOT license silence. See WhenNothingSurvives in query-terms.ts.
+    expect((await keys(index, 'the', 200)).length).toBeGreaterThan(0);
+    // What made silence attractive here is gone anyway: `thé` no longer folds onto `the`,
+    // so a French tea query is not this query and never reaches this path.
     expect(await keys(index, 'thé', 20)).toEqual([]);
-    expect(await keys(index, 'of the', 20)).toEqual([]);
     await index.close();
   });
 
@@ -141,7 +170,7 @@ describe('a query that prunes down to nothing is answered on what the user typed
     // parity suite compares them the same way. What is asserted is that the same terms
     // reached each one.
     for (const q of ['to be or not to be', 'the growing of tomatoes in the greenhouse', 'of the']) {
-      expect((await keys(sqlite, q, 20)).sort(), `sqlite vs memory on "${q}"`).toEqual((await keys(memory, q, 20)).sort());
+      expect((await keys(sqlite, q, 200)).sort(), `sqlite vs memory on "${q}"`).toEqual((await keys(memory, q, 200)).sort());
     }
     await sqlite.close();
   });
@@ -170,14 +199,20 @@ describe('snippets take the same rule at a lower floor', () => {
   const filler = 'the of and to be '.repeat(40);
   const text = `${filler}the tomatoes ripened in the greenhouse ${filler}`;
 
+  const common = (t: string) => ['the', 'of', 'and', 'to', 'be'].includes(t);
+
   it('centres on the content word rather than the passage opening', () => {
     // One term survives, and one is enough to know where to look.
-    expect(makeSnippet(text, 'the tomatoes')).toContain('tomatoes');
+    expect(makeSnippet(text, 'the tomatoes', 240, common)).toContain('tomatoes');
+    // The control: with nothing declared common, `the` is found at offset 0 and the
+    // snippet is the passage opening — which is what makes the assertion above mean
+    // something rather than passing for free.
+    expect(makeSnippet(text, 'the tomatoes')).not.toContain('tomatoes');
   });
 
   it('falls back to the passage opening only when nothing at all survives', () => {
     // Nothing left to centre on: the snippet is where it has always been, at character 0,
     // which is the pre-existing behaviour and not a regression this introduces.
-    expect(makeSnippet(text, 'the of and')).not.toContain('tomatoes');
+    expect(makeSnippet(text, 'the of and', 240, common)).not.toContain('tomatoes');
   });
 });
