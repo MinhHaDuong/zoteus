@@ -56,13 +56,18 @@ function harness(scope: 'local' | 'cloud' = 'local'): Harness {
   };
 }
 
-/** Everything the pipeline would have done, without a pipeline. */
+/**
+ * Everything the pipeline would have done, without a pipeline — including taking the row,
+ * which stopped being optional when completion became ownership-guarded (ticket 0567).
+ */
 function drain(ledger: Ledger, lib: number): number {
   let n = 0;
   for (;;) {
     const next = ledger.nextWorkOrder({ lib });
     if (!next) return n;
-    ledger.markDone(next.wid);
+    const input = next.signal ?? String(next.wid);
+    if (!ledger.claim(next.wid, 'uuid-drain', input, 30_000)) throw new Error(`unclaimable row ${next.wid}`);
+    if (!ledger.markDone(next.wid, 'uuid-drain', input)) throw new Error(`uncompletable row ${next.wid}`);
     n++;
   }
 }

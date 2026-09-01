@@ -76,6 +76,8 @@ export interface WorkOrderRow {
   dateAdded: string | null;
   status: WorkStatus;
   signal: string | null;
+  /** Why a row failed, as `markFailed` recorded it. Written since tranche 1, readable since 0567. */
+  note: string | null;
   claimedBy: string | null;
   claimedInput: string | null;
   claimExpiresAt: number | null;
@@ -582,24 +584,53 @@ export class Ledger {
     return Number(res.changes);
   }
 
-  markDone(wid: number): void {
-    this.db
+  /**
+   * Complete a row you hold — the other half of `claim()`'s compare-and-swap.
+   *
+   * Acquisition was already a CAS; completion was an unconditional `WHERE wid = ?`, which
+   * is the same race read from the other end. A holder that is slow rather than dead loses
+   * its row to the expiry sweep, watches another holder take it and finish it, and then
+   * writes its own late answer over that one — last write wins, with nothing raised.
+   * SPEC.md §5.2.5 buys recovery at the price of "at most one duplicated micro-batch",
+   * which is a duplicate *computation*; a duplicate *commit* that overwrites the live one
+   * is not what it bought. Guarding here rather than in each stage is what makes it true
+   * for the stages not written yet (ticket 0567).
+   *
+   * The guard is holder AND input, not holder alone: the same worker can re-claim a row it
+   * lost, against an input the tick has since re-derived, and a holder check would let the
+   * abandoned attempt complete the current one. `status = 'claimed'` is implied by
+   * `claimed_by` being non-null (the table's own CHECK) and stated anyway, so the statement
+   * reads as its own proof.
+   *
+   * Expiry is deliberately not in the guard. A claim that ran out while nobody else took
+   * the row is still that holder's to finish: cancelling it there would throw away a
+   * completed document for being late, and the only thing the guard has to prevent is
+   * writing over somebody else.
+   *
+   * Returns whether the completion applied. False means the row moved on without you.
+   */
+  markDone(wid: number, holder: string, claimedInput: string): boolean {
+    const res = this.db
       .prepare(
         `UPDATE stage_queue
             SET status = 'done', claimed_by = NULL, claimed_input = NULL, claim_expires_at = NULL
-          WHERE wid = ?`,
+          WHERE wid = :wid AND status = 'claimed' AND claimed_by = :holder AND claimed_input = :input`,
       )
-      .run(wid);
+      .run({ wid, holder, input: claimedInput });
+    return Number(res.changes) === 1;
   }
 
-  markFailed(wid: number, note?: string): void {
-    this.db
+  /** The failing half of `markDone`, under the same ownership guard. */
+  markFailed(wid: number, holder: string, claimedInput: string, note?: string): boolean {
+    const res = this.db
       .prepare(
         `UPDATE stage_queue
-            SET status = 'failed', claimed_by = NULL, claimed_input = NULL, claim_expires_at = NULL, note = ?
-          WHERE wid = ?`,
+            SET status = 'failed', claimed_by = NULL, claimed_input = NULL, claim_expires_at = NULL,
+                note = :note
+          WHERE wid = :wid AND status = 'claimed' AND claimed_by = :holder AND claimed_input = :input`,
       )
-      .run(note ?? null, wid);
+      .run({ wid, holder, input: claimedInput, note: note ?? null });
+    return Number(res.changes) === 1;
   }
 
   // ------------------------------------------------------------------ leases
@@ -637,6 +668,7 @@ function toWorkOrderRow(r: any): WorkOrderRow {
     dateAdded: r.date_added ?? null,
     status: r.status,
     signal: r.signal ?? null,
+    note: r.note ?? null,
     claimedBy: r.claimed_by ?? null,
     claimedInput: r.claimed_input ?? null,
     claimExpiresAt: r.claim_expires_at ?? null,

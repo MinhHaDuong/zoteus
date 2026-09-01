@@ -112,7 +112,10 @@ describeSqlite('conductor ledger: priority is an ORDER BY, not a scheduler', () 
       const next = ledger.nextWorkOrder({ lib });
       if (!next) break;
       drained.push(next.itemKey!);
-      ledger.markDone(next.wid);
+      // Claimed before it is completed, because completion is now guarded on holding the
+      // row (ticket 0567). `nextWorkOrder` is a read; it takes nothing.
+      expect(ledger.claim(next.wid, 'uuid-drain', next.itemKey!, 30_000)).toBe(true);
+      expect(ledger.markDone(next.wid, 'uuid-drain', next.itemKey!)).toBe(true);
     }
     expect(drained).toEqual(['REC001', 'NOTE01', 'BODYNEW', 'BODYOLD']);
     ledger.close();
@@ -159,6 +162,103 @@ describeSqlite('conductor ledger: row claims', () => {
     // retry after an expiry must not inherit the dead holder's idea of the input.
     expect(ledger.claim(wid, 'uuid-b', 'item:18', 30_000)).toBe(true);
     expect(ledger.row(wid)?.claimedInput).toBe('item:18');
+    ledger.close();
+  });
+});
+
+describeSqlite('conductor ledger: completing a claim you hold', () => {
+  /**
+   * Ticket 0567. `claim()` is a compare-and-swap; its two completion counterparts were
+   * not, so a holder that lost the row to expiry could still write over whoever took it
+   * next — last write wins, silently. The failure is not the duplicated work, which
+   * SPEC.md §5.2.5 accepts as the price of claim expiry ("at the cost of at most one
+   * duplicated micro-batch"): it is that the loser's result is the one that survives.
+   *
+   * `markFailed` is what makes the clobber visible here. Two `markDone` calls leave the
+   * same row state whether the guard held or not, so a test written that way would pass
+   * against the unguarded code and prove nothing.
+   */
+  function claimable(): { ledger: Ledger; clock: ManualClock; wid: number } {
+    const clock = new ManualClock(1_700_000_000_000);
+    const ledger = Ledger.open(':memory:', clock);
+    const oid = ledger.registerOrigin('server-aaa');
+    const lib = ledger.registerLibrary({ oid, kind: 'user', remoteId: 0, scope: 'local' });
+    const wid = ledger.enqueue({ lib, class: 'body', op: 'index', itemKey: 'REC001', dateAdded: '2026-01-01T00:00:00Z' });
+    return { ledger, clock, wid };
+  }
+
+  it('refuses a completion from the holder the row was taken away from', () => {
+    const { ledger, clock, wid } = claimable();
+    expect(ledger.claim(wid, 'uuid-a', 'item:17', 30_000)).toBe(true);
+
+    // A is slow, not dead: the claim runs out, the conductor's sweep returns the row, and
+    // B takes it and finishes it.
+    clock.advance(30_001);
+    expect(ledger.releaseExpiredClaims()).toBe(1);
+    expect(ledger.claim(wid, 'uuid-b', 'item:17', 30_000)).toBe(true);
+    expect(ledger.markDone(wid, 'uuid-b', 'item:17')).toBe(true);
+    expect(ledger.row(wid)?.status).toBe('done');
+
+    // A now comes back with the answer it was working on all along. It no longer owns the
+    // row, so its completion applies to nothing — and B's result stands.
+    expect(ledger.markFailed(wid, 'uuid-a', 'item:17', 'connection reset')).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('done');
+    expect(ledger.row(wid)?.note).toBeNull();
+    ledger.close();
+  });
+
+  it('refuses the same holder completing against superseded input', () => {
+    const { ledger, clock, wid } = claimable();
+    expect(ledger.claim(wid, 'uuid-a', 'item:17', 30_000)).toBe(true);
+    clock.advance(30_001);
+    expect(ledger.releaseExpiredClaims()).toBe(1);
+    // The same worker re-takes the row, and the tick has re-derived it in the meantime:
+    // a holder check alone cannot tell this attempt from the abandoned one.
+    expect(ledger.claim(wid, 'uuid-a', 'item:18', 30_000)).toBe(true);
+
+    expect(ledger.markDone(wid, 'uuid-a', 'item:17')).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('claimed');
+    expect(ledger.markDone(wid, 'uuid-a', 'item:18')).toBe(true);
+    expect(ledger.row(wid)?.status).toBe('done');
+    ledger.close();
+  });
+
+  it('lets a live holder complete, either way, and clears the claim', () => {
+    const { ledger, wid } = claimable();
+    expect(ledger.claim(wid, 'uuid-a', 'item:17', 30_000)).toBe(true);
+    expect(ledger.markDone(wid, 'uuid-a', 'item:17')).toBe(true);
+    const done = ledger.row(wid);
+    expect(done?.status).toBe('done');
+    expect(done?.claimedBy).toBeNull();
+    expect(done?.claimedInput).toBeNull();
+
+    const { ledger: other, wid: otherWid } = claimable();
+    expect(other.claim(otherWid, 'uuid-a', 'item:17', 30_000)).toBe(true);
+    expect(other.markFailed(otherWid, 'uuid-a', 'item:17', 'no text')).toBe(true);
+    const failed = other.row(otherWid);
+    expect(failed?.status).toBe('failed');
+    expect(failed?.note).toBe('no text');
+    expect(failed?.claimedBy).toBeNull();
+    ledger.close();
+    other.close();
+  });
+
+  it('still lets a holder finish after its own claim expired, while nobody else took it', () => {
+    // Expiry alone does not cancel the work. Only losing the row to another holder does,
+    // which is the case the guard exists for — and the difference is what keeps a slow
+    // worker's finished document from being thrown away for being late.
+    const { ledger, clock, wid } = claimable();
+    expect(ledger.claim(wid, 'uuid-a', 'item:17', 30_000)).toBe(true);
+    clock.advance(30_001);
+    expect(ledger.markDone(wid, 'uuid-a', 'item:17')).toBe(true);
+    expect(ledger.row(wid)?.status).toBe('done');
+    ledger.close();
+  });
+
+  it('refuses to complete a row nobody has claimed', () => {
+    const { ledger, wid } = claimable();
+    expect(ledger.markDone(wid, 'uuid-a', 'item:17')).toBe(false);
+    expect(ledger.row(wid)?.status).toBe('pending');
     ledger.close();
   });
 });
