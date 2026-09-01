@@ -82,6 +82,8 @@ export interface WorkOrderRow {
   dateAdded: string | null;
   status: WorkStatus;
   signal: string | null;
+  /** Why a row failed, as `markFailed` recorded it. Written since tranche 1, readable since 0567. */
+  note: string | null;
   claimedBy: string | null;
   claimedInput: string | null;
   claimExpiresAt: number | null;
@@ -1049,6 +1051,7 @@ function toWorkOrderRow(r: any): WorkOrderRow {
     dateAdded: r.date_added ?? null,
     status: r.status,
     signal: r.signal ?? null,
+    note: r.note ?? null,
     claimedBy: r.claimed_by ?? null,
     claimedInput: r.claimed_input ?? null,
     claimExpiresAt: r.claim_expires_at ?? null,

@@ -176,12 +176,6 @@ describeSqlite('conductor ledger: completion is owned', () => {
    * with no error anywhere — which is not §5.2.5's accepted duplicate (redone and
    * discarded) but silent unbounded staleness.
    */
-  /** `note` is not on `WorkOrderRow`; the failing outcome's reason is read from the row. */
-  function noteOf(ledger: Ledger, wid: number): string | null {
-    const r = ledger.db.prepare('SELECT note FROM stage_queue WHERE wid = ?').get(wid) as { note: string | null };
-    return r.note ?? null;
-  }
-
   function oneOrder(): { ledger: Ledger; clock: ManualClock; wid: number } {
     const { ledger, clock } = openLedger();
     const oid = ledger.registerOrigin('server-aaa');
@@ -204,7 +198,7 @@ describeSqlite('conductor ledger: completion is owned', () => {
     expect(ledger.markDone(slow)).toBe(false);
     expect(ledger.markFailed(slow, 'a says it failed')).toBe(false);
     expect(ledger.row(wid)?.status).toBe('done');
-    expect(noteOf(ledger, wid)).toBeNull();
+    expect(ledger.row(wid)?.note).toBeNull();
     ledger.close();
   });
 
@@ -282,7 +276,7 @@ describeSqlite('conductor ledger: completion is owned', () => {
     const failing = other.ledger.claimTicket(other.wid, 'worker-a', '', 20_000)!;
     expect(other.ledger.markFailed(failing, 'zotero refused')).toBe(true);
     expect(other.ledger.row(other.wid)?.status).toBe('failed');
-    expect(noteOf(other.ledger, other.wid)).toBe('zotero refused');
+    expect(other.ledger.row(other.wid)?.note).toBe('zotero refused');
     other.ledger.close();
     ledger.close();
   });
