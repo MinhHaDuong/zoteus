@@ -354,9 +354,12 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
     expect(await sqlite.query('of the', { mode: 'keyword' })).toEqual([]);
     expect(await memory.query('of the', { mode: 'keyword' })).toEqual([]);
     // The case the assertion above stood in for and could not reach: a common word that
-    // IS in the fixture. Still nothing, still the same nothing on both sides.
-    expect(await sqlite.query('for and', { mode: 'keyword' })).toEqual([]);
-    expect(await memory.query('for and', { mode: 'keyword' })).toEqual([]);
+    // IS in this fixture. Three items is far below the corpus size a document frequency
+    // needs to mean anything, so nothing is pruned here and both backends answer on the
+    // words as typed — identically, which is the claim this test makes.
+    const s2 = await sqlite.query('for and', { mode: 'keyword' });
+    const m2 = await memory.query('for and', { mode: 'keyword' });
+    expect(s2.map((h) => h.itemKey).sort()).toEqual(m2.map((h) => h.itemKey).sort());
     // Punctuation is not FTS5 syntax here: every term is quoted before it is OR-ed.
     const hits = await sqlite.query('"gardening" OR (tomatoes*)', { limit: 3, mode: 'keyword' });
     expect(hits[0]!.itemKey).toBe('B');
@@ -377,8 +380,10 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
       // query to the accented spellings the vocabulary holds (see accent-folding.test.ts).
       expect((await index.query('Bronte', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
       expect((await index.query('etude naivete', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
-      // And the other direction, which is the one that used to fail: an accented query
-      // reached MATCH as fragments of itself. See accent-folding.test.ts.
+      // Accented query, accented document: answered exactly, on the letters typed. This
+      // used to fail differently — an accented query reached MATCH as fragments of itself.
+      // What it must NOT do is reach an unaccented document; that case is asserted in
+      // accent-folding.test.ts, where the contrasting document exists to catch it.
       expect((await index.query('Brontë', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
       expect((await index.query('Étude naïveté', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
     }

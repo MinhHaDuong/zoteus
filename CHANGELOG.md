@@ -23,6 +23,20 @@ All notable changes to Zoteus are documented here. The format is based on
   A migrated index cannot be opened by an older build — downgrading sidelines it and
   starts an empty one, so the library would need a rebuild there.
 
+- **The common-word list is measured from the library instead of shipped with the code.**
+  The 29 hard-coded English function words are gone. At the end of a full build the SQLite
+  backend scans the keyword index's own term vocabulary (`fts5vocab`) and stores, in
+  `meta`, the terms appearing in 30% or more of the passages; a delta update rederives the
+  list only when the passage count has drifted by more than 10%. The list is applied to
+  queries only — both backends keep indexing every term — and the in-memory backend
+  answers from its resident document frequencies, storing nothing. An index built by an
+  earlier version prunes nothing until its next build or update, at which point it adopts
+  a list of its own: nothing is stranded, no rebuild is forced, and the schema version
+  does not change. One behavior changes with the list's provenance: a query in which no
+  term survives the prune now runs as typed instead of returning nothing, because a
+  measured list can hold the library's own subject words, and silence would be a worse
+  answer than a slow one.
+
 ### Fixed
 - **A migration that failed for a transient reason discarded an intact index.** Any
   error inside the schema-upgrade ladder — a full disk as much as a corrupt page — used

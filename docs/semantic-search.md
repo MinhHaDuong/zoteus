@@ -514,17 +514,32 @@ Marks are stripped (for the expansion map's keys) the way `unicode61` strips the
 further — `ø œ æ ł đ ð þ ß` are letters to it rather than accented forms, so they are
 letters here too, and `søren` does not answer to `soren`.
 
-**Common words.** Some words are too common in a library to rank on — searching them
-walks a long posting list to separate almost nothing — so they are dropped from the query
-before it runs. They are still indexed — only queries prune, and both backends index every
-term — so a search that needs one of these words can still reach the documents holding it.
+**Common words.** A keyword query is answered by OR-ing its terms, so a term that occurs
+in most of the library costs a full posting-list walk and separates nothing. Zoteus used to
+handle that with 29 hard-coded English function words, dropped from every query and every
+document. That list is wrong for a multilingual library — German `die` and English `die`
+are one string in the index, so no list can drop one and keep the other — and it is a guess
+about frequency rather than a measurement of it: `energy` sits at 26% document frequency in
+one real library, higher than several words that were on the list.
 
-Dropping them stops when it would change the question rather than shorten it. If fewer
-terms survive the prune than were dropped, the query runs on what you typed instead: `to
-be or not to be` is otherwise answered by a single-word search for `not`, which returns a
-confidently-ranked page of unrelated results. If nothing survives at all, the search
-returns nothing, as it always has — a query of nothing but common words has no answer to
-give, and inventing one would be slower and no more useful.
+Zoteus now measures the library instead. At the end of a full build it scans the keyword
+index's own term vocabulary (`fts5vocab`, a view over the index — no new tables, no
+rebuild) and records the terms that appear in **30% or more** of the passages. That list is
+applied to queries only, never to documents, and it is stored in the index, so it costs
+nothing at query time and nothing at startup. On a 477 512-passage library it is 23 terms
+and 75 bytes, and deriving it costs one scan of 639 888 vocabulary terms — a couple of
+seconds against a build that takes minutes. A delta update does not redo it unless the
+passage count has moved by more than 10%, since a handful of new items cannot change a
+30% threshold.
+
+Two consequences worth knowing. A query in which **no term survives** the prune is sent
+unpruned: a measured list can hold the library's own subject words (`economics` reaches 35%
+of the English passages of one real library), so answering such a query with silence would
+look like an empty library. While any term survives, the survivors are what runs — they
+are, by measurement, the words this library can discriminate on, and the prune is never
+abandoned on their account. And an index built by an earlier version prunes nothing
+until its next build or update, at which point it adopts a list of its own; nothing is
+stranded and no rebuild is forced.
 
 **Where the files are.** `<ZOTEUS_DATA_DIR>/search-index.sqlite` beside the older
 `search-index.json` (and `search-index-<userId>.*` per tenant in multi-tenant mode). SQLite
