@@ -318,7 +318,11 @@ export class Ledger {
    *    stamping before reading destroyed the evidence at the moment it mattered.
    * 2. **`auto_vacuum` is set before WAL and before the first table.** Either one after it
    *    makes it a silent no-op, and §5.2.7's idle `incremental_vacuum` would then never
-   *    reclaim a page — a defect with no symptom but a file that grows forever.
+   *    reclaim a page — a defect with no symptom but a file that keeps growing. Not
+   *    unrecoverable: `PRAGMA auto_vacuum=INCREMENTAL` followed by a full `VACUUM` does
+   *    restore it (measured, and it survives reopen). What it is not is *self*-correcting,
+   *    and nothing here would ever notice it needed correcting — which is why the order is
+   *    a rule rather than advice, and why `autoVacuumIncremental` reports the header.
    */
   static open(path: string, clock: Clock = systemClock, opts: LedgerOpenOptions = {}): Ledger {
     if (path !== ':memory:' && existsSync(path)) {
