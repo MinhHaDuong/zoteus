@@ -55,6 +55,15 @@ export interface ZoteusConfig {
   indexAnnOversample: number;
   /** Floor on that candidate set, so a small page still rescores a real neighbourhood. */
   indexAnnMinCandidates: number;
+  /**
+   * Open the v2 conductor store (`search-index-v2.sqlite`) beside the v1 index.
+   *
+   * Off by default, and the default is the point: v2 is being built tranche by tranche and
+   * nothing reads it yet, so a server that created the file for every user would be
+   * shipping a new artifact into their data directory in exchange for nothing. v1 is
+   * untouched either way — the two are separate files with separate write-ahead logs.
+   */
+  conductor: boolean;
   scholarProviders: string[];
   dataDir: string;
   /**
@@ -199,6 +208,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_INDEX_ANN: bool(true),
         ZOTEUS_INDEX_ANN_OVERSAMPLE: z.coerce.number().int().positive().default(DEFAULT_ANN_OVERSAMPLE),
         ZOTEUS_INDEX_ANN_MIN_CANDIDATES: z.coerce.number().int().positive().default(DEFAULT_ANN_MIN_CANDIDATES),
+        ZOTEUS_CONDUCTOR: bool(false),
         ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
         ZOTEUS_DATA_DIR: z.string().min(1).optional(),
         ZOTERO_DATA_DIR: z.string().min(1).optional(),
@@ -340,6 +350,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     indexAnn: parsed.ZOTEUS_INDEX_ANN,
     indexAnnOversample: parsed.ZOTEUS_INDEX_ANN_OVERSAMPLE,
     indexAnnMinCandidates: parsed.ZOTEUS_INDEX_ANN_MIN_CANDIDATES,
+    conductor: parsed.ZOTEUS_CONDUCTOR,
     scholarProviders: parsed.ZOTEUS_SCHOLAR_PROVIDERS.split(',')
       .map((s) => s.trim())
       .filter(Boolean),

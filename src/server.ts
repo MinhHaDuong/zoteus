@@ -16,6 +16,8 @@ import { StyleResolver } from './features/citation/styles.js';
 import { TranslationServerClient } from './features/citation/translation-server.js';
 import { createSearchIndex } from './features/search/factory.js';
 import type { SearchIndex } from './features/search/backend.js';
+import type { Ledger } from './features/search/conductor/ledger.js';
+import { conductorLedgerPath, openConductorLedger } from './features/search/conductor/store.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
 import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext, type ToolContextSource, type ToolDefinition } from './registry/registry.js';
@@ -124,6 +126,29 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   const stale = search.buildStatus().vectorsStaleReason;
   if (stale) logger.warn(stale);
   logger.debug(`search index backend: ${search.storage} (${searchIndexPath})`);
+  // The v2 store (SPEC.md §5.2.2), beside v1 and independent of it: a second file with its
+  // own write-ahead log, so opening it takes no lock v1 waits on and vice versa. Nothing
+  // reads it yet — the conductor's tranches are still landing — which is why it is opt-in
+  // rather than created in every data directory for a feature that has no query path.
+  //
+  // A failure here must not take the server with it, for the same reason a corrupt v1 index
+  // does not: everything the server actually serves today is unaffected by a store nothing
+  // consults, and refusing to start over it would be absurd.
+  let conductorLedger: Ledger | undefined;
+  if (config.conductor) {
+    try {
+      conductorLedger = openConductorLedger({
+        dataDir: config.dataDir,
+        ...(overrides.zoteroUserId === undefined ? {} : { zoteroUserId: overrides.zoteroUserId }),
+      });
+      logger.debug(
+        `conductor store: ${conductorLedgerPath(config.dataDir, overrides.zoteroUserId)} ` +
+          `(fts ${conductorLedger.ftsStorage}, auto_vacuum ${conductorLedger.autoVacuumIncremental ? 'incremental' : 'off'})`,
+      );
+    } catch (e) {
+      logger.error(`The conductor store could not be opened: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
   const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
 
   /**
@@ -169,6 +194,7 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     styles,
     translation,
     search,
+    conductorLedger,
     scholar,
     fetcher,
     logger,
@@ -338,6 +364,14 @@ export class ContextCache {
       await c.search.close().catch((e) => {
         c.logger.debug(`Closing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`);
       });
+      // Independently of the two above, and for the same reason they are independent of
+      // each other: closing is what checkpoints the write-ahead log and releases the file
+      // handle, so a v1 index that failed to close must not cost the v2 store its close.
+      try {
+        c.conductorLedger?.close();
+      } catch (e) {
+        c.logger.debug(`Closing the conductor store on shutdown: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }));
   }
 
