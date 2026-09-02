@@ -326,7 +326,7 @@ const measuredEntries = CANDIDATES.flatMap((candidate) =>
   ),
 ).filter((entry) => entry.id !== 'granite-97m-multilingual-r2-q8');
 
-/** Unchanged default plus every model/dtype combination measured on CPU. */
+/** Unchanged default plus measured CPU candidates, excluding evidence-rejected cells. */
 export const EMBEDDER_ENTRIES: Readonly<Record<string, EmbedderEntry>> = Object.freeze(
   Object.fromEntries([
     [INCUMBENT_LOCAL_ENTRY.id, INCUMBENT_LOCAL_ENTRY],
