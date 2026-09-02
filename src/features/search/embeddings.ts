@@ -255,6 +255,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += size) {
       const batch = texts.slice(i, i + size);
+      await this.assertWithinCap(extractor, batch, i);
       const tensor = await extractor(batch, { pooling: 'mean', normalize: true });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
@@ -266,6 +267,53 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     }
     return out;
   }
+
+  /**
+   * The model's token window, read from the pipeline's tokenizer once it is loaded, or
+   * null when the runtime does not publish one. This is the number the chunker's budget
+   * must stay under; publishing it here keeps the two from drifting apart.
+   */
+  async maxTokens(): Promise<number | null> {
+    return tokenCap(await this.ensure());
+  }
+
+  /**
+   * The embed call's contract: an over-length text is a bug, not an input. The
+   * feature-extraction pipeline tokenizes with truncation on and offers no way to say
+   * otherwise, so a text past the model's window would embed its head and drop its tail in
+   * silence (measured on the incumbent: the first 512 tokens, not a word about the rest).
+   * So the tokens are counted first, with the pipeline's own tokenizer and truncation off,
+   * and an over-length text throws, naming itself. When the extractor publishes no
+   * tokenizer, nothing can be counted and nothing is asserted: that is the test double's
+   * case, and the reason the real pipeline's cap is read rather than assumed.
+   */
+  private async assertWithinCap(extractor: any, batch: string[], offset: number): Promise<void> {
+    const cap = tokenCap(extractor);
+    if (cap === null) return;
+    const tokenizer = extractor.tokenizer;
+    for (let b = 0; b < batch.length; b++) {
+      const encoded = await tokenizer(batch[b], { truncation: false, add_special_tokens: true });
+      const ids = encoded?.input_ids;
+      const count: number | undefined = ids?.dims?.[ids.dims.length - 1] ?? ids?.data?.length ?? ids?.length;
+      if (typeof count !== 'number') return;
+      if (count > cap) {
+        throw new Error(
+          `embed: text ${offset + b} is ${count} tokens, over the model's ${cap}-token window; ` +
+            'the chunker must never produce this, and the runtime would truncate it in silence',
+        );
+      }
+    }
+  }
+}
+
+/** The tokenizer's published window, when it publishes a finite one. */
+function tokenCap(extractor: any): number | null {
+  const tokenizer = extractor?.tokenizer;
+  if (typeof tokenizer !== 'function') return null;
+  const raw = Number(tokenizer.model_max_length);
+  // An unset window arrives as a sentinel near 1e30; treat anything past a million as unset.
+  if (!Number.isFinite(raw) || raw <= 0 || raw > 1_000_000) return null;
+  return Math.floor(raw);
 }
 
 export interface ApiEmbeddingOptions {
