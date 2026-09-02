@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { Ledger } from '../../src/features/search/conductor/ledger.js';
+import type { AttachmentDecision } from '../../src/features/search/conductor/ledger.js';
 import { ManualClock } from '../fixtures/clock.js';
 import { completeByHand } from '../fixtures/claims.js';
 
@@ -313,6 +314,147 @@ describeSqlite('conductor ledger: the lease table', () => {
     expect(ledger.lease('conductor')?.holder).toBe('uuid-a');
     // A live lease is not stealable.
     expect(take('uuid-b').changes).toBe(0);
+    ledger.close();
+  });
+});
+
+describeSqlite("conductor ledger: D6's choice set is written whole or not at all", () => {
+  /**
+   * Ticket 0570. `ExtractStage.decide()` reads the candidate set and writes the whole
+   * choice set for an item, and it is reached two ways: from `complete()`, inside the
+   * stage's transaction, and from `next()` via `isChosen()`, in autocommit. In the second
+   * one a crash between two siblings used to leave some rows carrying the new decision and
+   * some the old — a set with two chosen attachments, which `isChosen` then reads as
+   * settled because it short-circuits on whatever `attachmentChoice` returns.
+   *
+   * The atomicity therefore belongs to the primitive, not to one call site, and these two
+   * tests are the two halves of that: the interruption, and the nesting the fix could
+   * break — `BEGIN IMMEDIATE` inside an open transaction is an error on SQLite.
+   */
+
+  function libraryWithChoice(): { ledger: Ledger; lib: number } {
+    const { ledger } = openLedger();
+    const oid = ledger.registerOrigin('server-aaa');
+    const lib = ledger.registerLibrary({ oid, kind: 'user', remoteId: 0, scope: 'local' });
+    // The settled set: the oldest attachment carries the text, its siblings say why not.
+    ledger.putAttachmentChoice(lib, 'ITEM0001', [
+      { attachmentKey: 'ATTA0001', chosen: true },
+      { attachmentKey: 'ATTA0002', chosen: false, reason: 'not-first-with-text' },
+      { attachmentKey: 'ATTA0003', chosen: false, reason: 'not-first-with-text' },
+    ]);
+    return { ledger, lib };
+  }
+
+  /** The next extraction moved the choice from ATTA0001 to ATTA0002. */
+  const relocated: AttachmentDecision[] = [
+    { attachmentKey: 'ATTA0002', chosen: true },
+    { attachmentKey: 'ATTA0001', chosen: false, reason: 'different-text' },
+    { attachmentKey: 'ATTA0003', chosen: false, reason: 'not-first-with-text' },
+  ];
+
+  /**
+   * Run `body` with the nth row-write of the choice set replaced by a throw.
+   *
+   * A power cut cannot be staged, so the injected failure stands in for one: it happens
+   * between two `run`s of the same loop, which is exactly the window the ticket is about.
+   * Only `run` is intercepted, and only on the statement that writes `attachment_choice`,
+   * so the transaction's own `BEGIN`/`COMMIT`/`ROLLBACK` (`exec`, not `prepare`) and every
+   * other statement are untouched.
+   */
+  function interruptAfter(ledger: Ledger, rows: number, body: () => void): void {
+    const realPrepare = ledger.db.prepare.bind(ledger.db);
+    let written = 0;
+    (ledger.db as unknown as { prepare: unknown }).prepare = (sql: string) => {
+      const stmt = realPrepare(sql);
+      if (!sql.includes('INSERT INTO attachment_choice')) return stmt;
+      return {
+        ...stmt,
+        run: (...args: unknown[]) => {
+          if (written++ === rows) throw new Error('injected crash mid-choice-set');
+          return (stmt.run as (...a: unknown[]) => unknown)(...args);
+        },
+      };
+    };
+    try {
+      body();
+    } finally {
+      (ledger.db as unknown as { prepare: unknown }).prepare = realPrepare;
+    }
+  }
+
+  it('leaves the old choice set intact when the write is interrupted between two siblings', () => {
+    const { ledger, lib } = libraryWithChoice();
+
+    expect(() =>
+      interruptAfter(ledger, 1, () => ledger.putAttachmentChoice(lib, 'ITEM0001', relocated)),
+    ).toThrow(/injected crash/);
+
+    // Whole or not at all: the set that is readable is the one that was there before, not
+    // the first row of the new one grafted onto the last two of the old.
+    const stored = ledger.attachmentChoices(lib, 'ITEM0001');
+    expect(stored.map((r) => [r.attachmentKey, r.chosen, r.reason])).toEqual([
+      ['ATTA0001', true, null],
+      ['ATTA0002', false, 'not-first-with-text'],
+      ['ATTA0003', false, 'not-first-with-text'],
+    ]);
+    // The half-written state named by name, because it is what `isChosen` cannot detect:
+    // two attachments of one item both claiming the body text.
+    expect(stored.filter((r) => r.chosen)).toHaveLength(1);
+
+    // And the ledger is usable afterwards — a rollback that left the transaction open
+    // would fail the next write instead, which is a different bug with the same test.
+    ledger.putAttachmentChoice(lib, 'ITEM0001', relocated);
+    expect(ledger.attachmentChoice(lib, 'ATTA0002')?.chosen).toBe(true);
+    expect(ledger.attachmentChoice(lib, 'ATTA0001')?.reason).toBe('different-text');
+    ledger.close();
+  });
+
+  it('writes the set from inside an open transaction, which is how `complete()` reaches it', () => {
+    // The way the fix breaks. `complete()` already holds a transaction when `decide()` runs
+    // under it, so a wrapper that always says `BEGIN IMMEDIATE` throws "cannot start a
+    // transaction within a transaction" on the one path that was already correct.
+    const { ledger, lib } = libraryWithChoice();
+
+    expect(() =>
+      ledger.transaction(() => {
+        ledger.putAttachmentChoice(lib, 'ITEM0001', relocated);
+      }),
+    ).not.toThrow();
+
+    expect(ledger.attachmentChoice(lib, 'ATTA0002')?.chosen).toBe(true);
+    expect(ledger.attachmentChoice(lib, 'ATTA0001')?.chosen).toBe(false);
+    ledger.close();
+  });
+
+  it('rolls the whole outer transaction back when the enclosing work fails', () => {
+    // The other half of nesting: an inner savepoint that committed on its own would let a
+    // choice set survive the failure of the completion it was part of, which is the
+    // asymmetry this ticket exists to remove, pointing the other way.
+    const { ledger, lib } = libraryWithChoice();
+
+    expect(() =>
+      ledger.transaction(() => {
+        ledger.putAttachmentChoice(lib, 'ITEM0001', relocated);
+        throw new Error('the completion this choice set belonged to lost its claim');
+      }),
+    ).toThrow(/lost its claim/);
+
+    expect(ledger.attachmentChoice(lib, 'ATTA0001')?.chosen).toBe(true);
+    expect(ledger.attachmentChoice(lib, 'ATTA0002')?.chosen).toBe(false);
+    ledger.close();
+  });
+
+  it('still writes every row when nothing interrupts it', () => {
+    // The control. An atomicity fix that quietly dropped rows would pass the test above.
+    const { ledger, lib } = libraryWithChoice();
+    ledger.putAttachmentChoice(lib, 'ITEM0001', relocated);
+    const stored = ledger.attachmentChoices(lib, 'ITEM0001');
+    expect(stored).toHaveLength(3);
+    expect(stored.map((r) => [r.attachmentKey, r.chosen])).toEqual([
+      ['ATTA0001', false],
+      ['ATTA0002', true],
+      ['ATTA0003', false],
+    ]);
     ledger.close();
   });
 });
