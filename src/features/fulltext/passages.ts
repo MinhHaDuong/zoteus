@@ -14,7 +14,11 @@ export interface Passage {
 }
 
 /** Proportional, clamped, 1-based page estimate. Undefined when totals are missing. */
-export function approxPage(charStart: number, totalChars: number, totalPages?: number): number | undefined {
+export function approxPage(
+  charStart: number,
+  totalChars: number,
+  totalPages?: number,
+): number | undefined {
   if (!totalPages || totalPages < 1 || !totalChars || totalChars < 1) return undefined;
   const p = Math.ceil(((charStart + 1) / totalChars) * totalPages);
   return Math.min(Math.max(p, 1), totalPages);
@@ -49,7 +53,8 @@ function cosine(a: number[], b: number[]): number {
 /** Reciprocal-rank fusion over lists of chunk indices. */
 function fuse(lists: number[][], k = 60): number[] {
   const scores = new Map<number, number>();
-  for (const list of lists) list.forEach((id, rank) => scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank + 1)));
+  for (const list of lists)
+    list.forEach((id, rank) => scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank + 1)));
   return [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
 }
 
@@ -60,7 +65,7 @@ export interface RankOptions {
   totalChars?: number;
   totalPages?: number;
   /** Optional vector reranker (e.g. ctx.search.embed). Bounded to BM25 candidates. */
-  embed?: (texts: string[]) => Promise<number[][]>;
+  embed?: (texts: string[], role?: 'query' | 'passage') => Promise<number[][]>;
 }
 
 /**
@@ -82,7 +87,10 @@ export async function rankPassages(opts: RankOptions): Promise<Passage[]> {
   if (opts.embed && bm25Hits.length > 1) {
     try {
       const candTexts = bm25Hits.map((h) => chunks[Number(h.id)]!.text);
-      const [qv, ...cvs] = await opts.embed([opts.query, ...candTexts]);
+      // Keep these sequential: API providers are quota-bound and a local pipeline is not
+      // promised re-entrant. Role-aware templates require two calls, not concurrent calls.
+      const [qv] = await opts.embed([opts.query], 'query');
+      const cvs = await opts.embed(candTexts, 'passage');
       if (qv && qv.length) {
         const vecOrder = cvs
           .map((v, i) => ({ idx: Number(bm25Hits[i]!.id), score: cosine(qv, v ?? []) }))

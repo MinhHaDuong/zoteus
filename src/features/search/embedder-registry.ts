@@ -11,19 +11,18 @@
  *
  * So the configuration lives here, in one place, as one record per embedder, rather than
  * spread across a constructor default, a call-site literal and a runtime default nobody
- * wrote down. Today there is exactly one record: the MiniLM chain zoteus has always used.
- * This file adds no selector and no second entry.
+ * wrote down. The default remains the MiniLM chain zoteus has always used. The other
+ * records are pinned combinations that the measurement campaign actually exercised.
  *
- * WHAT IS AUTHORITATIVE TODAY, AND WHAT IS NOT. {@link APPLIED_FIELDS} lists the fields
- * the loader actually reads; {@link DECLARED_ONLY_FIELDS} lists the fields this record
- * declares but nothing yet consumes. The split is deliberate and it is checked by
- * tests/features/embedder-registry-characterization.test.ts, because a field that is
- * declared and silently unused is worse than a field that is absent: it reads as a
- * guarantee. Making the second list authoritative — and proving each field affects the
- * vectors or the identity as declared — is the next stage of the work, not this one.
+ * Every vector field is authoritative: it either drives the runtime or is validated
+ * against the runtime seam that drives it, and all of them enter the fingerprint. The
+ * characterization and authority tests keep a declared field from becoming a silent
+ * no-op, because such a field reads as a guarantee while producing another vector chain.
  */
 
 /** Shape version of {@link EmbedderEntry}. Bump when a field is added, dropped, or re-meant. */
+import { createHash } from 'node:crypto';
+
 export const EMBEDDER_REGISTRY_VERSION = 1;
 
 /** Pooling strategies @huggingface/transformers exposes for feature extraction. */
@@ -69,23 +68,141 @@ export interface EmbedderEntry {
   readonly sources: Readonly<Record<string, string>>;
 }
 
-/** Fields of the record the loader reads today. */
-export const APPLIED_FIELDS = ['model', 'pooling', 'normalize'] as const;
-
-/**
- * Fields the record declares that nothing consumes yet. Each is the value the incumbent
- * chain resolves to on its own, recorded so the next stage can make it authoritative
- * without changing what the vectors are.
- */
-export const DECLARED_ONLY_FIELDS = [
+const VECTOR_FIELDS = [
+  'model',
   'revision',
   'device',
   'dtype',
   'graphFile',
+  'pooling',
+  'normalize',
   'template',
   'windowTokens',
   'dimension',
 ] as const;
+const ENTRY_FIELDS = ['id', ...VECTOR_FIELDS, 'sources'] as const;
+const DEVICES: readonly EmbedderDevice[] = ['cpu', 'wasm', 'webgpu'];
+const DTYPES: readonly EmbedderDtype[] = [
+  'fp32',
+  'fp16',
+  'q8',
+  'int8',
+  'uint8',
+  'q4',
+  'q4f16',
+  'bnb4',
+];
+const POOLINGS: readonly EmbedderPooling[] = ['mean', 'cls', 'last_token'];
+const GRAPH_BY_DTYPE: Readonly<Record<EmbedderDtype, string>> = {
+  fp32: 'onnx/model.onnx',
+  fp16: 'onnx/model_fp16.onnx',
+  q8: 'onnx/model_quantized.onnx',
+  int8: 'onnx/model_int8.onnx',
+  uint8: 'onnx/model_uint8.onnx',
+  q4: 'onnx/model_q4.onnx',
+  q4f16: 'onnx/model_q4f16.onnx',
+  bnb4: 'onnx/model_bnb4.onnx',
+};
+
+/** Stable identity of every choice that can move or reinterpret a vector. */
+export function entryFingerprint(entry: EmbedderEntry): string {
+  const vectorShape = {
+    version: EMBEDDER_REGISTRY_VERSION,
+    model: entry.model,
+    revision: entry.revision,
+    device: entry.device,
+    dtype: entry.dtype,
+    graphFile: entry.graphFile,
+    pooling: entry.pooling,
+    normalize: entry.normalize,
+    template: { query: entry.template.query, passage: entry.template.passage },
+    windowTokens: entry.windowTokens,
+    dimension: entry.dimension,
+  };
+  return createHash('sha256').update(JSON.stringify(vectorShape)).digest('hex');
+}
+
+/** Frozen digest of the exact chain that historically persisted as local:<model>. */
+export const LEGACY_INCUMBENT_FINGERPRINT =
+  '7f4772a04b6cc79bbcd93f8772db5271f997927e97cb30911cb6e738d7373f6d';
+
+/** Runtime boundary for registry data: incomplete or widened records fail before model I/O. */
+export function parseEmbedderEntry(value: unknown): EmbedderEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Embedder entry must be an object.');
+  const row = value as Record<string, unknown>;
+  const unknown = Object.keys(row).filter(
+    (key) => !(ENTRY_FIELDS as readonly string[]).includes(key),
+  );
+  if (unknown.length)
+    throw new Error(`Embedder entry has unknown field(s): ${unknown.join(', ')}.`);
+  for (const key of ENTRY_FIELDS)
+    if (!(key in row)) throw new Error(`Embedder entry is missing ${key}.`);
+  const strings = ['id', 'model', 'revision', 'device', 'dtype', 'graphFile', 'pooling'] as const;
+  for (const key of strings)
+    if (typeof row[key] !== 'string' || !(row[key] as string))
+      throw new Error(`Embedder entry ${key} must be a non-empty string.`);
+  if (typeof row.normalize !== 'boolean')
+    throw new Error('Embedder entry normalize must be boolean.');
+  if (!DEVICES.includes(row.device as EmbedderDevice))
+    throw new Error(`Embedder entry has unsupported device ${row.device}.`);
+  if (!DTYPES.includes(row.dtype as EmbedderDtype))
+    throw new Error(`Embedder entry has unsupported dtype ${row.dtype}.`);
+  if (!POOLINGS.includes(row.pooling as EmbedderPooling))
+    throw new Error(`Embedder entry has unsupported pooling ${row.pooling}.`);
+  const expectedGraph = GRAPH_BY_DTYPE[row.dtype as EmbedderDtype];
+  if (row.graphFile !== expectedGraph) {
+    throw new Error(`Embedder entry graphFile must be ${expectedGraph} for dtype ${row.dtype}.`);
+  }
+  for (const key of ['windowTokens', 'dimension'] as const) {
+    if (!Number.isInteger(row[key]) || (row[key] as number) <= 0)
+      throw new Error(`Embedder entry ${key} must be a positive integer.`);
+  }
+  const template = row.template as Record<string, unknown> | undefined;
+  if (
+    !template ||
+    Object.keys(template).sort().join(',') !== 'passage,query' ||
+    typeof template.query !== 'string' ||
+    typeof template.passage !== 'string'
+  ) {
+    throw new Error('Embedder entry template must contain exactly query and passage strings.');
+  }
+  if (!row.sources || typeof row.sources !== 'object' || Array.isArray(row.sources))
+    throw new Error('Embedder entry sources must be an object.');
+  for (const field of VECTOR_FIELDS) {
+    if (
+      typeof (row.sources as Record<string, unknown>)[field] !== 'string' ||
+      !(row.sources as Record<string, string>)[field]
+    ) {
+      throw new Error(`Embedder entry sources must document ${field}.`);
+    }
+  }
+  const frozenTemplate = Object.freeze({
+    query: template.query,
+    passage: template.passage,
+  }) as EmbedderTemplate;
+  const frozenSources = Object.freeze({ ...(row.sources as Record<string, string>) });
+  return Object.freeze({
+    id: row.id,
+    model: row.model,
+    revision: row.revision,
+    device: row.device,
+    dtype: row.dtype,
+    graphFile: row.graphFile,
+    pooling: row.pooling,
+    normalize: row.normalize,
+    template: frozenTemplate,
+    windowTokens: row.windowTokens,
+    dimension: row.dimension,
+    sources: frozenSources,
+  }) as EmbedderEntry;
+}
+
+/** Fields of the record the loader reads today. */
+export const APPLIED_FIELDS = VECTOR_FIELDS;
+
+/** Fields the record declares that nothing consumes yet. Kept explicit for the guard test. */
+export const DECLARED_ONLY_FIELDS = [] as const;
 
 /** Fields that describe the record rather than the embedder. */
 export const ENTRY_METADATA_FIELDS = ['id', 'sources'] as const;
@@ -99,29 +216,28 @@ export const ENTRY_METADATA_FIELDS = ['id', 'sources'] as const;
  * retrieval silently when it is wrong, so that it reads as a worse model rather than as a
  * bug.
  */
-export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = {
+export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = parseEmbedderEntry({
   id: 'minilm-l6-v2',
   model: 'Xenova/all-MiniLM-L6-v2',
-  revision: 'main',
+  revision: '751bff37182d3f1213fa05d7196b954e230abad9',
   device: 'cpu',
   dtype: 'fp32',
   graphFile: 'onnx/model.onnx',
   pooling: 'mean',
   normalize: true,
   template: { query: '', passage: '' },
-  windowTokens: 256,
+  windowTokens: 512,
   dimension: 384,
   sources: {
     model: 'the constructor default this record replaces (LocalEmbeddingProvider)',
     revision:
-      "not pinned by the caller, so @huggingface/transformers resolves 'main'; that pointed at " +
-      '751bff37182d3f1213fa05d7196b954e230abad9 on 2026-09-02',
+      'Xenova/all-MiniLM-L6-v2 repository commit characterized on 2026-09-02; pinned so a later ' +
+      'change to main cannot silently move vectors under the same entry',
     device:
       "DEFAULT_DEVICE in @huggingface/transformers 4.2.0 src/utils/devices.js: 'cpu' under Node, " +
       "'wasm' elsewhere",
     dtype:
-      'DEFAULT_DEVICE_DTYPE in the same package: fp32 for every device except wasm, which defaults ' +
-      'to q8. Nothing pins it today, which is why the value is device-dependent rather than fixed',
+      'DEFAULT_DEVICE_DTYPE in the same package historically selected fp32 under Node; the registry now pins it',
     graphFile: 'DEFAULT_DTYPE_SUFFIX_MAPPING gives fp32 the empty suffix, i.e. onnx/model.onnx',
     pooling:
       '1_Pooling/config.json on sentence-transformers/all-MiniLM-L6-v2 (pooling_mode_mean_tokens ' +
@@ -131,11 +247,116 @@ export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = {
       'call site passes normalize: true',
     template: 'no prefix on the model card and none at the call site; measured, not assumed',
     windowTokens:
-      'sentence_bert_config.json max_seq_length on sentence-transformers/all-MiniLM-L6-v2. NOT ' +
-      "enforced today: the feature-extraction pipeline truncates at the tokenizer's own " +
-      'model_max_length, which tokenizer_config.json sets to 512, so a 660-token passage is cut at ' +
-      '512 and not at 256. Deciding which of the two is authoritative moves vectors and therefore ' +
-      'belongs to the stage that makes these fields authoritative, not to this one',
+      "tokenizer_config.json model_max_length on Xenova/all-MiniLM-L6-v2. The model card's 256-token " +
+      'sentence-transformers training window is descriptive, but the incumbent runtime has always ' +
+      'truncated at 512; pinning that effective value preserves its vectors',
     dimension: 'hidden_size in config.json, and the observed width of every vector produced',
   },
-};
+});
+
+type Candidate = Pick<
+  EmbedderEntry,
+  'id' | 'model' | 'revision' | 'pooling' | 'normalize' | 'template' | 'windowTokens' | 'dimension'
+>;
+
+const CANDIDATES: readonly Candidate[] = [
+  {
+    id: 'granite-97m-multilingual-r2',
+    model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
+    revision: '536a9f241cb3f02a9c5995a1e708c784bd274859',
+    pooling: 'cls',
+    normalize: true,
+    template: { query: '', passage: '' },
+    windowTokens: 32768,
+    dimension: 384,
+  },
+  {
+    id: 'granite-311m-multilingual-r2',
+    model: 'onnx-community/granite-embedding-311m-multilingual-r2-ONNX',
+    revision: '8f039f21d4181327268271bea4b11ddcc7eef88d',
+    pooling: 'cls',
+    normalize: true,
+    template: { query: '', passage: '' },
+    windowTokens: 32768,
+    dimension: 768,
+  },
+  {
+    id: 'arctic-embed-m-v2',
+    model: 'Snowflake/snowflake-arctic-embed-m-v2.0',
+    revision: '95c2741480856aa9666782eb4afe11959938017f',
+    pooling: 'cls',
+    normalize: true,
+    template: { query: 'query: ', passage: '' },
+    windowTokens: 32768,
+    dimension: 768,
+  },
+  {
+    id: 'gte-multilingual-base',
+    model: 'onnx-community/gte-multilingual-base',
+    revision: '2edbf5e672aab465f9ed4c154a8b61791c082c69',
+    pooling: 'cls',
+    normalize: true,
+    template: { query: '', passage: '' },
+    windowTokens: 32768,
+    dimension: 768,
+  },
+  {
+    id: 'multilingual-e5-small',
+    model: 'Xenova/multilingual-e5-small',
+    revision: '761b726dd34fb83930e26aab4e9ac3899aa1fa78',
+    pooling: 'mean',
+    normalize: true,
+    template: { query: 'query: ', passage: 'passage: ' },
+    windowTokens: 512,
+    dimension: 384,
+  },
+  {
+    id: 'multilingual-e5-base',
+    model: 'Xenova/multilingual-e5-base',
+    revision: '1ec9243030a27d1a115d5c340572074c125b58b2',
+    pooling: 'mean',
+    normalize: true,
+    template: { query: 'query: ', passage: 'passage: ' },
+    windowTokens: 512,
+    dimension: 768,
+  },
+];
+
+const MEASURED_DTYPES = ['fp32', 'q8', 'uint8'] as const;
+const measuredEntries = CANDIDATES.flatMap((candidate) =>
+  MEASURED_DTYPES.map((dtype) =>
+    parseEmbedderEntry({
+      ...candidate,
+      id: `${candidate.id}-${dtype}`,
+      device: 'cpu',
+      dtype,
+      graphFile: GRAPH_BY_DTYPE[dtype],
+      sources: Object.fromEntries(
+        VECTOR_FIELDS.map((field) => [
+          field,
+          'Pinned from the benchmark registry and the model repository configuration used by the measured CPU cell.',
+        ]),
+      ),
+    }),
+  ),
+);
+
+/** Unchanged default plus every model/dtype combination measured on CPU. */
+export const EMBEDDER_ENTRIES: Readonly<Record<string, EmbedderEntry>> = Object.freeze(
+  Object.fromEntries([
+    [INCUMBENT_LOCAL_ENTRY.id, INCUMBENT_LOCAL_ENTRY],
+    ...measuredEntries.map((entry) => [entry.id, entry] as const),
+  ]),
+);
+
+/** Resolve a user-facing entry id. A raw model repository is intentionally not accepted. */
+export function selectEmbedderEntry(id?: string): EmbedderEntry {
+  if (!id) return INCUMBENT_LOCAL_ENTRY;
+  const entry = EMBEDDER_ENTRIES[id];
+  if (!entry) {
+    throw new Error(
+      `Unknown local embedder entry "${id}". Choose one of: ${Object.keys(EMBEDDER_ENTRIES).join(', ')}.`,
+    );
+  }
+  return entry;
+}

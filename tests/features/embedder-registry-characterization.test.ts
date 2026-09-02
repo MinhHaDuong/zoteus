@@ -68,14 +68,14 @@ describe('incumbent local embedder: the registry entry', () => {
     expect(INCUMBENT_LOCAL_ENTRY).toMatchObject({
       id: 'minilm-l6-v2',
       model: 'Xenova/all-MiniLM-L6-v2',
-      revision: 'main',
+      revision: '751bff37182d3f1213fa05d7196b954e230abad9',
       device: 'cpu',
       dtype: 'fp32',
       graphFile: 'onnx/model.onnx',
       pooling: 'mean',
       normalize: true,
       template: { query: '', passage: '' },
-      windowTokens: 256,
+      windowTokens: 512,
       dimension: 384,
     });
   });
@@ -86,13 +86,12 @@ describe('incumbent local embedder: the registry entry', () => {
     }
   });
 
-  it('is the only entry: no selector, no alternative', async () => {
+  it('remains the default entry after alternatives are added', async () => {
     const registry: Record<string, unknown> =
       await import('../../src/features/search/embedder-registry.js');
-    const entries = Object.entries(registry).filter(
-      ([, v]) => v && typeof v === 'object' && !Array.isArray(v) && 'model' in (v as object),
+    expect((registry.selectEmbedderEntry as (id?: string) => unknown)()).toBe(
+      INCUMBENT_LOCAL_ENTRY,
     );
-    expect(entries.map(([name]) => name)).toEqual(['INCUMBENT_LOCAL_ENTRY']);
   });
 
   it('partitions its fields into applied and declared-only, with nothing falling between', () => {
@@ -100,7 +99,19 @@ describe('incumbent local embedder: the registry entry', () => {
     expect(new Set(claimed).size, 'a field is claimed twice').toBe(claimed.length);
     expect([...claimed].sort()).toEqual(Object.keys(INCUMBENT_LOCAL_ENTRY).sort());
     // Frozen on purpose: this list shrinks only when a field is genuinely made authoritative.
-    expect([...APPLIED_FIELDS]).toEqual(['model', 'pooling', 'normalize']);
+    expect([...APPLIED_FIELDS]).toEqual([
+      'model',
+      'revision',
+      'device',
+      'dtype',
+      'graphFile',
+      'pooling',
+      'normalize',
+      'template',
+      'windowTokens',
+      'dimension',
+    ]);
+    expect([...DECLARED_ONLY_FIELDS]).toEqual([]);
   });
 });
 
@@ -132,11 +143,13 @@ const pipelineArgs = [];
 const extractorOptions = [];
 async function pipeline(...args) {
   pipelineArgs.push(args);
-  return async (input, options) => {
+  const extractor = async (input, options) => {
     extractorOptions.push(options);
     const batch = Array.isArray(input) ? input : [input];
-    return { data: new Float32Array(batch.length * 3).fill(0.25), dims: [batch.length, 3] };
+    return { data: new Float32Array(batch.length * 384).fill(0.25), dims: [batch.length, 384] };
   };
+  extractor.tokenizer = { model_max_length: 512 };
+  return extractor;
 }
 module.exports = { env, pipeline, pipelineArgs, extractorOptions };
 `,
@@ -149,12 +162,18 @@ module.exports = { env, pipeline, pipelineArgs, extractorOptions };
 
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-  it("names the entry's model to the pipeline, and passes nothing else", async () => {
+  it("names the entry's model and complete loader options to the pipeline", async () => {
     stub.pipelineArgs.length = 0;
     stub.extractorOptions.length = 0;
     const provider = new LocalEmbeddingProvider(undefined, undefined, { transformersPath: root });
     await provider.embed(['a passage']);
-    expect(stub.pipelineArgs).toEqual([['feature-extraction', 'Xenova/all-MiniLM-L6-v2']]);
+    expect(stub.pipelineArgs).toEqual([
+      [
+        'feature-extraction',
+        'Xenova/all-MiniLM-L6-v2',
+        { revision: '751bff37182d3f1213fa05d7196b954e230abad9', device: 'cpu', dtype: 'fp32' },
+      ],
+    ]);
   });
 
   it('pools by mean and normalizes, and asks for nothing the entry does not declare', async () => {
@@ -167,12 +186,17 @@ module.exports = { env, pipeline, pipelineArgs, extractorOptions };
 
   it('prefixes neither queries nor passages', async () => {
     const seen: string[][] = [];
-    const provider = new LocalEmbeddingProvider(undefined, async () => {
-      return async (texts: string[]) => {
-        seen.push(texts);
-        return { data: new Float32Array(texts.length * 3).fill(0.25), dims: [texts.length, 3] };
-      };
-    });
+    const extractor: any = async (texts: string[]) => {
+      seen.push(texts);
+      return { data: new Float32Array(texts.length * 3).fill(0.25), dims: [texts.length, 3] };
+    };
+    extractor.tokenizer = { model_max_length: 512 };
+    const provider = new LocalEmbeddingProvider(
+      { ...INCUMBENT_LOCAL_ENTRY, dimension: 3 },
+      async () => {
+        return extractor;
+      },
+    );
     await provider.embed(['how does carbon pricing change industrial investment?']);
     expect(seen).toEqual([['how does carbon pricing change industrial investment?']]);
   });
