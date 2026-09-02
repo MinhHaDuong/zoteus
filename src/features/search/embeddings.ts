@@ -3,20 +3,27 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
-import { INCUMBENT_LOCAL_ENTRY } from './embedder-registry.js';
+import {
+  INCUMBENT_LOCAL_ENTRY,
+  LEGACY_INCUMBENT_FINGERPRINT,
+  entryFingerprint,
+  parseEmbedderEntry,
+  selectEmbedderEntry,
+  type EmbedderEntry,
+} from './embedder-registry.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 
 export interface EmbeddingProvider {
   readonly name: string;
   /** Model producing the vectors; part of the index's embedder identity. */
   readonly model?: string;
-  embed(texts: string[]): Promise<number[][]>;
+  embed(texts: string[], role?: 'query' | 'passage'): Promise<number[][]>;
 }
 
 /** npm package that provides the on-device model runtime (optional, not bundled; see below). */
 export const TRANSFORMERS_MODULE = '@huggingface/transformers';
 
-/** Per-provider default models. ZOTEUS_EMBEDDING_MODEL overrides whichever one is active. */
+/** API-provider defaults. On the local path ZOTEUS_EMBEDDING_MODEL selects a registry entry. */
 export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
   openai: 'text-embedding-3-small',
   gemini: 'text-embedding-004',
@@ -27,7 +34,13 @@ export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
  * usually, a dimension), so an index persists this and refuses to rank its stored vectors
  * against queries embedded by a different one. See SearchIndex.loadFromJSON.
  */
-export function embedderIdentity(p: { name: string; model?: string }): string {
+export function embedderIdentity(p: {
+  name: string;
+  model?: string;
+  vectorFingerprint?: string;
+  legacyIdentity?: boolean;
+}): string {
+  if (p.vectorFingerprint && !p.legacyIdentity) return `${p.name}:registry-v${p.vectorFingerprint}`;
   return p.model ? `${p.name}:${p.model}` : p.name;
 }
 
@@ -145,7 +158,9 @@ function modulePath(specifier: string): string {
  * unavailable". Desktop bundles get different advice from npm installs because there is
  * no `npm i` step to have skipped: the package has to live outside the bundle.
  */
-export function missingTransformersHint(config?: Pick<ZoteusConfig, 'dist' | 'transformersPath'>): string {
+export function missingTransformersHint(
+  config?: Pick<ZoteusConfig, 'dist' | 'transformersPath'>,
+): string {
   const bundled = config?.dist === 'mcpb' || config?.dist === 'dxt';
   // The FIRST sentence is the short cause that ends up in the one-line embedder label
   // (see shortCause in index-manager); everything after it is the remedy. Keep it short.
@@ -183,9 +198,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   /** Texts handed to the transformers pipeline in a single call. */
   static readonly BATCH_SIZE = DEFAULT_EMBED_BATCH_SIZE;
   private extractor: any;
+  readonly entry: EmbedderEntry;
+  readonly model: string;
+  readonly vectorFingerprint: string;
+  readonly legacyIdentity: boolean;
   constructor(
-    /** Defaults to the registry's incumbent entry; see embedder-registry.ts. */
-    readonly model = INCUMBENT_LOCAL_ENTRY.model,
+    /** Defaults to the registry's incumbent entry; a string remains a test/back-compat seam. */
+    entry: EmbedderEntry | string = INCUMBENT_LOCAL_ENTRY,
     /** Injectable extractor factory (tests); defaults to the transformers.js pipeline. */
     private readonly loadExtractor?: () => Promise<any>,
     private readonly opts: {
@@ -198,18 +217,38 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       /** Pause between batches in ms (see batchPause). */
       batchDelayMs?: number;
     } = {},
-  ) {}
+  ) {
+    this.entry = parseEmbedderEntry(
+      typeof entry === 'string' ? { ...INCUMBENT_LOCAL_ENTRY, model: entry } : entry,
+    );
+    this.model = this.entry.model;
+    this.vectorFingerprint = entryFingerprint(this.entry);
+    this.legacyIdentity = this.vectorFingerprint === LEGACY_INCUMBENT_FINGERPRINT;
+  }
+
+  /** Options that select the actual graph/runtime chain. Exposed for characterization tests. */
+  get loaderOptions(): {
+    revision: string;
+    device: EmbedderEntry['device'];
+    dtype: EmbedderEntry['dtype'];
+  } {
+    return { revision: this.entry.revision, device: this.entry.device, dtype: this.entry.dtype };
+  }
 
   private async ensure(): Promise<any> {
     if (this.extractor) return this.extractor;
     if (this.loadExtractor) {
       this.extractor = await this.loadExtractor();
+      this.assertTokenizerWindow(this.extractor);
       return this.extractor;
     }
     const specifier = resolveTransformers(this.opts.transformersPath);
     if (!specifier)
       throw new Error(
-        missingTransformersHint({ dist: this.opts.dist, transformersPath: this.opts.transformersPath }),
+        missingTransformersHint({
+          dist: this.opts.dist,
+          transformersPath: this.opts.transformersPath,
+        }),
       );
     let transformers: any;
     try {
@@ -232,7 +271,9 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     // The package ships both an ESM and a CJS build; a resolved CJS entry arrives under `default`.
     const pipeline = transformers.pipeline ?? transformers.default?.pipeline;
     if (typeof pipeline !== 'function') {
-      throw new Error(`${TRANSFORMERS_MODULE} loaded but exposes no pipeline(). Is the install complete?`);
+      throw new Error(
+        `${TRANSFORMERS_MODULE} loaded but exposes no pipeline(). Is the install complete?`,
+      );
     }
     // Pin the model cache before the pipeline downloads anything. The package's default
     // caches weights inside its own install directory, which outlives the data directory —
@@ -241,8 +282,22 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     // is supposed to be the whole uninstall, and the weights are its largest artifact.
     const env = transformers.env ?? transformers.default?.env;
     if (env && this.opts.modelCacheDir) env.cacheDir = this.opts.modelCacheDir;
-    this.extractor = await pipeline('feature-extraction', this.model);
+    this.extractor = await pipeline('feature-extraction', this.model, this.loaderOptions);
+    if (!this.extractor.tokenizer) {
+      throw new Error(`Local embedder ${this.entry.id} loaded without an addressable tokenizer.`);
+    }
+    this.assertTokenizerWindow(this.extractor);
     return this.extractor;
+  }
+
+  private assertTokenizerWindow(extractor: any): void {
+    const actual = extractor.tokenizer?.model_max_length;
+    if (actual !== this.entry.windowTokens) {
+      throw new Error(
+        `Local embedder ${this.entry.id} tokenizer window is ${String(actual)}; ` +
+          `the pinned registry entry requires ${this.entry.windowTokens}.`,
+      );
+    }
   }
 
   /**
@@ -250,23 +305,35 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
    * per text), yielding to the event loop between batches so long builds stay
    * responsive and interruptible. Returns exactly one vector per input text.
    */
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<number[][]> {
     if (texts.length === 0) return [];
     const extractor = await this.ensure();
     const size = Math.max(1, this.opts.batchSize ?? LocalEmbeddingProvider.BATCH_SIZE);
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += size) {
-      const batch = texts.slice(i, i + size);
+      const prefix = this.entry.template[role];
+      const batch = texts.slice(i, i + size).map((text) => `${prefix}${text}`);
       // Pooling and normalization are not call-site taste: they are properties of the
       // model, published in its own configuration, and a wrong pooling mode produces
       // vectors that load and rank and are quietly worse. They come from the entry.
       const tensor = await extractor(batch, {
-        pooling: INCUMBENT_LOCAL_ENTRY.pooling,
-        normalize: INCUMBENT_LOCAL_ENTRY.normalize,
+        pooling: this.entry.pooling,
+        normalize: this.entry.normalize,
       });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
-      const dim = dims && dims.length > 1 ? dims[dims.length - 1]! : data.length / batch.length;
+      const shapeIsExact =
+        dims?.length === 2 &&
+        dims[0] === batch.length &&
+        dims[1] === this.entry.dimension &&
+        data.length === batch.length * this.entry.dimension;
+      if (!shapeIsExact) {
+        throw new Error(
+          `Local embedder ${this.entry.id} produced tensor shape ${JSON.stringify(dims)} with ${data.length} values; ` +
+            `expected ${this.entry.dimension} dimensions in shape [${batch.length},${this.entry.dimension}].`,
+        );
+      }
+      const dim = this.entry.dimension;
       for (let b = 0; b < batch.length; b++) {
         out.push(Array.from(data.slice(b * dim, (b + 1) * dim)));
       }
@@ -332,7 +399,10 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
         body: JSON.stringify({
-          requests: texts.map((t) => ({ model: `models/${this.model}`, content: { parts: [{ text: t }] } })),
+          requests: texts.map((t) => ({
+            model: `models/${this.model}`,
+            content: { parts: [{ text: t }] },
+          })),
         }),
       },
     );
@@ -361,8 +431,8 @@ export interface EmbedderSelection {
  * embed is known at startup, before a build silently produces an index with 0 vectors.
  */
 export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): EmbedderSelection {
-  // ZOTEUS_EMBEDDING_MODEL names the model of whichever API provider is active; the batch
-  // and delay dials apply to every provider that batches.
+  // On API paths ZOTEUS_EMBEDDING_MODEL is a provider model name. The local path resolves
+  // it separately as a curated registry id. Batch and delay apply to every provider.
   const api: ApiEmbeddingOptions = {
     model: config.embeddingModel,
     batchSize: config.embedBatchSize,
@@ -376,30 +446,47 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         const unavailable =
           'OPENAI_API_KEY is unset. No vectors are produced; keyword (BM25) search still works. ' +
           'Set the key, or pick another ZOTEUS_EMBEDDINGS provider.';
-        logger?.warn(`ZOTEUS_EMBEDDINGS=openai but OPENAI_API_KEY is unset; using keyword-only search.`);
+        logger?.warn(
+          `ZOTEUS_EMBEDDINGS=openai but OPENAI_API_KEY is unset; using keyword-only search.`,
+        );
         return { provider: null, configured: 'openai', unavailable };
       }
-      return { provider: new ApiEmbeddingProvider('openai', process.env.OPENAI_API_KEY, api), configured: 'openai' };
+      return {
+        provider: new ApiEmbeddingProvider('openai', process.env.OPENAI_API_KEY, api),
+        configured: 'openai',
+      };
     case 'gemini':
       if (!process.env.GEMINI_API_KEY) {
         const unavailable =
           'GEMINI_API_KEY is unset. No vectors are produced; keyword (BM25) search still works. ' +
           'Set the key, or pick another ZOTEUS_EMBEDDINGS provider.';
-        logger?.warn(`ZOTEUS_EMBEDDINGS=gemini but GEMINI_API_KEY is unset; using keyword-only search.`);
+        logger?.warn(
+          `ZOTEUS_EMBEDDINGS=gemini but GEMINI_API_KEY is unset; using keyword-only search.`,
+        );
         return { provider: null, configured: 'gemini', unavailable };
       }
-      return { provider: new ApiEmbeddingProvider('gemini', process.env.GEMINI_API_KEY, api), configured: 'gemini' };
+      return {
+        provider: new ApiEmbeddingProvider('gemini', process.env.GEMINI_API_KEY, api),
+        configured: 'gemini',
+      };
     case 'local':
-    default:
+    default: {
+      // On the local path this setting names a complete curated entry, never a raw HF repo.
+      // Resolve it before probing or touching the index so a typo cannot degrade silently.
+      const entry = selectEmbedderEntry(config.embeddingModel);
       if (!resolveTransformers(config.transformersPath)) {
         logger?.warn(
           `ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed` +
             `${searchedFrom(config.transformersPath)}; using keyword-only search.`,
         );
-        return { provider: null, configured: 'local', unavailable: missingTransformersHint(config) };
+        return {
+          provider: null,
+          configured: 'local',
+          unavailable: missingTransformersHint(config),
+        };
       }
       return {
-        provider: new LocalEmbeddingProvider(undefined, undefined, {
+        provider: new LocalEmbeddingProvider(entry, undefined, {
           transformersPath: config.transformersPath,
           dist: config.dist,
           modelCacheDir: join(config.dataDir, 'models'),
@@ -408,5 +495,6 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         }),
         configured: 'local',
       };
+    }
   }
 }
