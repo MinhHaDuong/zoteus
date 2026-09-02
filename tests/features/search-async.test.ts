@@ -3,30 +3,47 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { MemorySearchIndex } from '../../src/features/search/index-manager.js';
-import { FakeEmbeddingProvider, LocalEmbeddingProvider } from '../../src/features/search/embeddings.js';
+import {
+  FakeEmbeddingProvider,
+  LocalEmbeddingProvider,
+} from '../../src/features/search/embeddings.js';
 import type { EmbeddingProvider } from '../../src/features/search/embeddings.js';
 import { saveIndex, loadIndex } from '../../src/features/search/persistence.js';
+import { INCUMBENT_LOCAL_ENTRY } from '../../src/features/search/embedder-registry.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
 function makeLibrary(n: number): any[] {
   return Array.from({ length: n }, (_, i) => ({
     key: `K${i}`,
-    data: { itemType: 'journalArticle', title: `Item ${i}`, abstractNote: `abstract body number ${i}` },
+    data: {
+      itemType: 'journalArticle',
+      title: `Item ${i}`,
+      abstractNote: `abstract body number ${i}`,
+    },
   }));
 }
 
 function pager(library: any[], pageSize = 100) {
-  return async (start: number) => ({ items: library.slice(start, start + pageSize), totalResults: library.length });
+  return async (start: number) => ({
+    items: library.slice(start, start + pageSize),
+    totalResults: library.length,
+  });
 }
 
 function tmpIndexFile(): string {
-  return join(tmpdir(), `zoteus-search-async-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+  return join(
+    tmpdir(),
+    `zoteus-search-async-${process.pid}-${Math.random().toString(36).slice(2)}.json`,
+  );
 }
 
 describe('SearchIndex.buildIncremental', () => {
   it('completes and reports live progress state transitions', async () => {
-    const search = new MemorySearchIndex({ embedder: new FakeEmbeddingProvider(), logger: silentLogger });
+    const search = new MemorySearchIndex({
+      embedder: new FakeEmbeddingProvider(),
+      logger: silentLogger,
+    });
     expect(search.buildStatus().state).toBe('idle');
     const job = search.buildIncremental(pager(makeLibrary(30)), { maxItems: 30 });
     expect(search.isBuilding).toBe(true);
@@ -78,7 +95,8 @@ describe('SearchIndex.buildIncremental', () => {
     const search = new MemorySearchIndex({ embedder: stalling, logger: silentLogger });
     const job = search.buildIncremental(pager(makeLibrary(400), 50));
     // Wait until we're mid-build (first page fetched, stalled in embedding).
-    for (let i = 0; i < 500 && search.buildStatus().itemsFetched === 0; i++) await new Promise((r) => setTimeout(r, 2));
+    for (let i = 0; i < 500 && search.buildStatus().itemsFetched === 0; i++)
+      await new Promise((r) => setTimeout(r, 2));
     expect(search.isBuilding).toBe(true);
     expect(search.requestStop()).toBe(true);
     release();
@@ -115,13 +133,15 @@ describe('incremental atomic persistence', () => {
         const parsed = JSON.parse(await readFile(file, 'utf8')); // must NEVER throw mid-build
         expect(Array.isArray(parsed.chunks)).toBe(true);
         expect(Array.isArray(parsed.vectors)).toBe(true);
-        if (parsed.chunks.length > 0 && parsed.chunks.length < library.length) sawValidPartial = true;
+        if (parsed.chunks.length > 0 && parsed.chunks.length < library.length)
+          sawValidPartial = true;
         // a concurrent reader could even query this snapshot
         const partial = new MemorySearchIndex({ embedder: null });
         partial.loadFromJSON(parsed);
         expect(partial.status().items).toBeGreaterThan(0);
       } catch (e: any) {
-        if (e?.code !== 'ENOENT') throw new Error(`index file was corrupt mid-build: ${e?.message ?? e}`);
+        if (e?.code !== 'ENOENT')
+          throw new Error(`index file was corrupt mid-build: ${e?.message ?? e}`);
       }
       await new Promise((r) => setTimeout(r, 2));
     }
@@ -151,7 +171,8 @@ describe('incremental atomic persistence', () => {
       persistEveryMs: 0,
       persist: () => saveIndex(search, file),
     });
-    for (let i = 0; i < 500 && search.buildStatus().itemsFetched < 50; i++) await new Promise((r) => setTimeout(r, 2));
+    for (let i = 0; i < 500 && search.buildStatus().itemsFetched < 50; i++)
+      await new Promise((r) => setTimeout(r, 2));
     search.requestStop();
     gate.release();
     const stopped = await job;
@@ -174,10 +195,15 @@ describe('LocalEmbeddingProvider batching (fake extractor)', () => {
       const batch = Array.isArray(input) ? input : [input];
       calls.push(batch);
       const data = new Float32Array(batch.length * dim);
-      for (let b = 0; b < batch.length; b++) for (let d = 0; d < dim; d++) data[b * dim + d] = b + 1 + d * 0.01;
+      for (let b = 0; b < batch.length; b++)
+        for (let d = 0; d < dim; d++) data[b * dim + d] = b + 1 + d * 0.01;
       return { data, dims: [batch.length, dim] };
     };
-    const provider = new LocalEmbeddingProvider('test-model', async () => fakeExtractor);
+    (fakeExtractor as any).tokenizer = { model_max_length: 512 };
+    const provider = new LocalEmbeddingProvider(
+      { ...INCUMBENT_LOCAL_ENTRY, model: 'test-model', dimension: dim },
+      async () => fakeExtractor,
+    );
     const texts = Array.from({ length: 70 }, (_, i) => `passage ${i}`);
     const vecs = await provider.embed(texts);
     expect(vecs).toHaveLength(70); // same count in, same count out
@@ -195,7 +221,10 @@ describe('LocalEmbeddingProvider batching (fake extractor)', () => {
     const load = vi.fn(async () => {
       throw new Error('should not be called');
     });
-    const provider = new LocalEmbeddingProvider('test-model', load);
+    const provider = new LocalEmbeddingProvider(
+      { ...INCUMBENT_LOCAL_ENTRY, model: 'test-model', dimension: 8 },
+      load,
+    );
     expect(await provider.embed([])).toEqual([]);
     expect(load).not.toHaveBeenCalled();
   });

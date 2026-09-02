@@ -81,8 +81,14 @@ export const UNREADABLE_STORE = 'the search index cannot be read';
 const PAGE_GROUP = 100;
 
 function itemText(d: any): string {
-  const creators = (d.creators ?? []).map((c: any) => c.lastName ?? c.name).filter(Boolean).join(' ');
-  const tags = (d.tags ?? []).map((t: any) => t.tag).filter(Boolean).join(' ');
+  const creators = (d.creators ?? [])
+    .map((c: any) => c.lastName ?? c.name)
+    .filter(Boolean)
+    .join(' ');
+  const tags = (d.tags ?? [])
+    .map((t: any) => t.tag)
+    .filter(Boolean)
+    .join(' ');
   return [d.title, d.abstractNote, creators, tags, d.date, d.publicationTitle, d.bookTitle, d.note]
     .filter(Boolean)
     .join('. ');
@@ -143,7 +149,9 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
   for (const list of lists) {
     list.forEach((hit, rank) => scores.set(hit.id, (scores.get(hit.id) ?? 0) + 1 / (k + rank + 1)));
   }
-  return [...scores.entries()].map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score);
+  return [...scores.entries()]
+    .map(([id, score]) => ({ id, score }))
+    .sort((a, b) => b.score - a.score);
 }
 
 /** Build a readable, query-centred snippet trimmed to word boundaries. */
@@ -558,7 +566,12 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   protected reconcileVectorProvenance(): void {
     const current = this.embedderId;
-    if (current && this.vectorEmbedderId && this.vectorEmbedderId !== current && this.counts().vectors > 0) {
+    if (
+      current &&
+      this.vectorEmbedderId &&
+      this.vectorEmbedderId !== current &&
+      this.counts().vectors > 0
+    ) {
       this.dropStaleVectors(
         `The stored vectors were built with ${this.vectorEmbedderId}, but this server now embeds with ${current}.`,
       );
@@ -618,9 +631,9 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /** Embed arbitrary texts with the configured provider (empty array if none). */
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<number[][]> {
     if (!this.opts.embedder) return [];
-    return this.opts.embedder.embed(texts);
+    return this.opts.embedder.embed(texts, role);
   }
 
   status(): SearchIndexStatus {
@@ -647,12 +660,14 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.library) s.library = this.library;
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
-    if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
+    if (this.opts.embedder?.entryId ?? this.opts.embedder?.model)
+      s.embedderModel = this.opts.embedder?.entryId ?? this.opts.embedder?.model;
     if (this.vectorsStale) s.vectorsStaleReason = this.vectorsStale;
     if (this.vectorScan) s.vectorScan = this.vectorScan;
     if (this.vectorScanNotice) s.vectorScanNotice = this.vectorScanNotice;
     if (this.storeNotice) s.storageNotice = this.storeNotice;
-    if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
+    if (this.fulltextEnabled && this.fulltextUnavailable)
+      s.fulltextReason = this.fulltextUnavailable;
     if (this.ownWordsUnavailable) s.ownWordsReason = this.ownWordsUnavailable;
     return s;
   }
@@ -705,7 +720,12 @@ export abstract class SearchIndexBase implements SearchIndex {
       const extra = opts.extraText?.get(key);
       const text = extra ? `${base}. ${extra}` : base;
       for (const ch of chunkText(text)) {
-        const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
+        const rec: ChunkRecord = {
+          id: `${key}#${ch.index}`,
+          itemKey: key,
+          title: d.title ?? '(untitled)',
+          text: ch.text,
+        };
         this.putPassage(rec);
         // Same rule as the incremental path: a vector the store can produce for itself is
         // never bought from the embedder a second time (#34).
@@ -760,10 +780,16 @@ export abstract class SearchIndexBase implements SearchIndex {
    * no Last-Modified-Version at all, which is precisely why the version stamp could never
    * be the resume cursor (#24).
    */
-  private offsetStillHolds(cp: BuildCheckpoint, page: PageResult, backend: VersionBackend | undefined): boolean {
+  private offsetStillHolds(
+    cp: BuildCheckpoint,
+    page: PageResult,
+    backend: VersionBackend | undefined,
+  ): boolean {
     if (cp.backend !== backend) return false;
-    if (cp.itemsAvailable && page.totalResults && cp.itemsAvailable !== page.totalResults) return false;
-    if (cp.crawlVersion && page.lastModifiedVersion && cp.crawlVersion !== page.lastModifiedVersion) return false;
+    if (cp.itemsAvailable && page.totalResults && cp.itemsAvailable !== page.totalResults)
+      return false;
+    if (cp.crawlVersion && page.lastModifiedVersion && cp.crawlVersion !== page.lastModifiedVersion)
+      return false;
     return true;
   }
 
@@ -781,7 +807,10 @@ export abstract class SearchIndexBase implements SearchIndex {
    * never re-chunked or re-embedded, and only the work since the last commit is redone
    * (#24). `opts.fresh` is how a caller asks for the old behaviour outright.
    */
-  async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
+  async buildIncremental(
+    fetchPage: PageFetcher,
+    opts: IncrementalBuildOptions = {},
+  ): Promise<IndexBuildStatus> {
     this.refuseIfFaulted();
     // Before anything is cleared: a build for a different library than the rows held must
     // refuse here rather than reach reset() below (startIndexBuild also asserts this
@@ -837,8 +866,10 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
     // A resumed build inherits the body passages the interrupted one committed, so it is a
     // full-text index whether or not this run was asked to crawl any more of them.
-    this.fulltextEnabled = Boolean(opts.fulltextFor) || (resume ? this.counts().fulltextPassages > 0 : false);
-    this.ownWordsEnabled = Boolean(opts.ownWords) || (resume ? this.counts().ownWordsPassages > 0 : false);
+    this.fulltextEnabled =
+      Boolean(opts.fulltextFor) || (resume ? this.counts().fulltextPassages > 0 : false);
+    this.ownWordsEnabled =
+      Boolean(opts.ownWords) || (resume ? this.counts().ownWordsPassages > 0 : false);
     // Same rule as full text: a rebuild is the retry, so a library whose children have
     // since become listable stops reporting the old reason.
     this.ownWordsUnavailable = undefined;
@@ -880,7 +911,9 @@ export abstract class SearchIndexBase implements SearchIndex {
      * or removed between the passes shift the pagination under it, so the second crawl
      * would fetch text for items this index does not hold and miss ones it does.
      */
-    const worklist: Array<{ key: string; title: string }> | undefined = opts.fulltextFor ? [] : undefined;
+    const worklist: Array<{ key: string; title: string }> | undefined = opts.fulltextFor
+      ? []
+      : undefined;
     // A resume's crawl never re-reads the items it inherited, so their place in the
     // full-text worklist comes from the store instead, in the order they were indexed.
     // Appended one by one rather than spread: the list is as long as the library, and a
@@ -1014,7 +1047,8 @@ export abstract class SearchIndexBase implements SearchIndex {
         if (pageItems.length === 0) break;
         if (!this.itemsTotal && page.totalResults) {
           this.itemsAvailable = page.totalResults;
-          this.itemsTotal = maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
+          this.itemsTotal =
+            maxItems !== undefined ? Math.min(page.totalResults, maxItems) : page.totalResults;
         }
         /**
          * Items of this page the crawl actually got through, which is what `start` may
@@ -1039,7 +1073,12 @@ export abstract class SearchIndexBase implements SearchIndex {
           // writing them with the item means one commit covers the item entirely — which
           // is what lets a resume step over an item by key and know it is complete.
           if (entry && opts.ownWords) {
-            this.addOwnWords(entry.key, entry.title, await opts.ownWords.textsFor(entry.key), pending);
+            this.addOwnWords(
+              entry.key,
+              entry.title,
+              await opts.ownWords.textsFor(entry.key),
+              pending,
+            );
           }
           // Recorded now, crawled in the second pass. Truncating here rather than there is
           // what keeps the item cap honest without re-checking it against a moving count.
@@ -1163,7 +1202,9 @@ export abstract class SearchIndexBase implements SearchIndex {
       this.buildState = 'done';
       if (resume) noteResumed();
       const final = this.buildStatus();
-      this.opts.logger?.info(`index build ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`);
+      this.opts.logger?.info(
+        `index build ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`,
+      );
       opts.onProgress?.(final);
       return final;
     } catch (e) {
@@ -1337,14 +1378,21 @@ export abstract class SearchIndexBase implements SearchIndex {
         maybeLog();
         if (start >= page.totalResults) break;
       }
-      if (!token.cancelled) await this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, true);
+      if (!token.cancelled)
+        await this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, true);
 
       if (!token.cancelled && opts.fulltextCatchUp && opts.fulltextFor) {
-        const catchUp = await this.fulltextCatchUp(opts, known, refreshed, pending, token, fulltextLimit);
+        const catchUp = await this.fulltextCatchUp(
+          opts,
+          known,
+          refreshed,
+          pending,
+          token,
+          fulltextLimit,
+        );
         fulltextCursor = catchUp.version;
         caughtUp = catchUp.items;
       }
-
 
       if (!token.cancelled) {
         const live = await opts.liveKeys();
@@ -1379,7 +1427,14 @@ export abstract class SearchIndexBase implements SearchIndex {
       // not have its notes re-indexed on the way out, and `known` is only the surviving
       // set once that pass has taken its keys out of it.
       if (!token.cancelled && opts.ownWords) {
-        ownWordsRefreshed = await this.ownWordsCatchUp(opts, fromVersion, known, refreshed, pending, token);
+        ownWordsRefreshed = await this.ownWordsCatchUp(
+          opts,
+          fromVersion,
+          known,
+          refreshed,
+          pending,
+          token,
+        );
       }
 
       if (!token.cancelled && reconciled && crawlVersion) {
@@ -1434,7 +1489,9 @@ export abstract class SearchIndexBase implements SearchIndex {
           'stamp was left where it was, so the next action:"update" repeats this delta.';
       }
       const final = this.buildStatus();
-      this.opts.logger?.info(`index update ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`);
+      this.opts.logger?.info(
+        `index update ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`,
+      );
       opts.onProgress?.(final);
       return final;
     } catch (e) {
@@ -1658,7 +1715,12 @@ export abstract class SearchIndexBase implements SearchIndex {
       // changed. Its own words are replaced wholesale, which is also how a note that lost
       // a paragraph stops being findable by the paragraph it lost.
       this.clearOwnWords(key);
-      this.addOwnWords(key, this.itemTitle(key) ?? '(untitled)', await access.textsFor(key), pending);
+      this.addOwnWords(
+        key,
+        this.itemTitle(key) ?? '(untitled)',
+        await access.textsFor(key),
+        pending,
+      );
       items++;
       await this.embedPending(pending, token, batchSize, delayMs, false);
     }
@@ -1687,7 +1749,9 @@ export abstract class SearchIndexBase implements SearchIndex {
           try {
             return await opts.fulltextFor!(key, item);
           } catch (e) {
-            this.opts.logger?.debug(`full text for ${key} skipped: ${e instanceof Error ? e.message : String(e)}`);
+            this.opts.logger?.debug(
+              `full text for ${key} skipped: ${e instanceof Error ? e.message : String(e)}`,
+            );
             return undefined;
           }
         }),
@@ -1759,7 +1823,12 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /** Chunk a single library item into the keyword index and queue passages for embedding. */
-  private addOneItem(item: any, pending: ChunkRecord[], fulltext?: string, ownWords?: OwnWordsEntry[]): void {
+  private addOneItem(
+    item: any,
+    pending: ChunkRecord[],
+    fulltext?: string,
+    ownWords?: OwnWordsEntry[],
+  ): void {
     const entry = this.addMetadata(item, pending);
     if (!entry) return;
     if (fulltext) this.addFulltext(entry.key, entry.title, fulltext, pending);
@@ -1775,7 +1844,10 @@ export abstract class SearchIndexBase implements SearchIndex {
    * come back to this item later without holding on to the raw item: the pair is a couple
    * of hundred bytes where the item is a few kilobytes (#23).
    */
-  private addMetadata(item: any, pending: ChunkRecord[]): { key: string; title: string } | undefined {
+  private addMetadata(
+    item: any,
+    pending: ChunkRecord[],
+  ): { key: string; title: string } | undefined {
     const d = item.data ?? item;
     const key = item.key ?? d.key;
     if (!key) return undefined;
@@ -1818,7 +1890,12 @@ export abstract class SearchIndexBase implements SearchIndex {
    * (chunked only when a note is long enough to need it), so each is retrievable on its
    * own terms and can leave on its own when it is deleted.
    */
-  private addOwnWords(itemKey: string, title: string, entries: OwnWordsEntry[], pending: ChunkRecord[]): void {
+  private addOwnWords(
+    itemKey: string,
+    title: string,
+    entries: OwnWordsEntry[],
+    pending: ChunkRecord[],
+  ): void {
     for (const entry of entries) {
       for (const ch of chunkText(entry.text, FULLTEXT_CHUNK_SIZE, FULLTEXT_CHUNK_OVERLAP)) {
         const rec: ChunkRecord = {
@@ -1862,7 +1939,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     let vector: RankedId[] = [];
     if (mode !== 'keyword' && this.opts.embedder && this.counts().vectors) {
       try {
-        const [qv] = await this.opts.embedder.embed([q]);
+        const [qv] = await this.opts.embedder.embed([q], 'query');
         const dim = this.vectorDimension();
         // Index files written before the embedder identity was persisted carry no
         // provenance, so a model switch under one shows up only here, as a query of a
@@ -1886,7 +1963,12 @@ export abstract class SearchIndexBase implements SearchIndex {
       const rec = this.passage(id);
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
-      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
+      const hit: SearchHit = {
+        itemKey: rec.itemKey,
+        title: rec.title,
+        snippet: makeSnippet(rec.text, q),
+        score,
+      };
       // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
       // zotero_get_fulltext, whereas a metadata one is just the abstract — and a note or
       // annotation is the reader's own, which is a different thing again to be told.

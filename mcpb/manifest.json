@@ -65,7 +65,7 @@
     "embedding_model": {
       "type": "string",
       "title": "Embedding model",
-      "description": "Model used by the API provider selected above: text-embedding-3-small for openai, text-embedding-004 for gemini. Ignored by local embeddings. Vectors from two models are not comparable, so the index is dropped (with a notice) and has to be rebuilt after you change this. Leave empty to use the provider's own default.",
+      "description": "For local embeddings, a curated entry id such as multilingual-e5-small-q8; leave empty for minilm-l6-v2. For openai or gemini, the API model name; leave empty for that provider's default. Changing it invalidates stored vectors and requires an index rebuild.",
       "required": false
     },
     "embed_batch_size": {

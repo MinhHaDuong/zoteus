@@ -150,7 +150,7 @@ export interface SearchIndexStatus {
   embedder: string;
   /** The requested ZOTEUS_EMBEDDINGS value, whether or not it works. */
   embedderConfigured: string;
-  /** Model the active embedder uses, when it names one (ZOTEUS_EMBEDDING_MODEL). */
+  /** Curated local entry id, or API model name (ZOTEUS_EMBEDDING_MODEL). */
   embedderModel?: string;
   /** True only while the configured provider is genuinely producing vectors. */
   embedderActive: boolean;
@@ -568,9 +568,12 @@ export interface SearchIndex {
   /** Cooperatively cancel the running build. Returns false if nothing is building. */
   requestStop(): boolean;
   /** Embed arbitrary texts with the configured provider (empty array if none). */
-  embed(texts: string[]): Promise<number[][]>;
+  embed(texts: string[], role?: 'query' | 'passage'): Promise<number[][]>;
   build(libraryItems: any[], opts?: BuildOptions): Promise<SearchIndexStatus>;
-  buildIncremental(fetchPage: PageFetcher, opts?: IncrementalBuildOptions): Promise<IndexBuildStatus>;
+  buildIncremental(
+    fetchPage: PageFetcher,
+    opts?: IncrementalBuildOptions,
+  ): Promise<IndexBuildStatus>;
   /**
    * Refuse to index `library` over the rows of a different one. Throws, naming both,
    * when the store is non-empty and stamped with another library; silent otherwise

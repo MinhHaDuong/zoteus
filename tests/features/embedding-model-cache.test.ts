@@ -3,7 +3,11 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../../src/config.js';
-import { createEmbeddingProvider, LocalEmbeddingProvider, resolveTransformers } from '../../src/features/search/embeddings.js';
+import {
+  createEmbeddingProvider,
+  LocalEmbeddingProvider,
+  resolveTransformers,
+} from '../../src/features/search/embeddings.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} } as any;
 
@@ -27,17 +31,22 @@ beforeAll(async () => {
   root = mkdtempSync(join(tmpdir(), 'zoteus-model-cache-'));
   const pkg = join(root, 'node_modules', '@huggingface', 'transformers');
   mkdirSync(pkg, { recursive: true });
-  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@huggingface/transformers', main: 'index.cjs' }));
+  writeFileSync(
+    join(pkg, 'package.json'),
+    JSON.stringify({ name: '@huggingface/transformers', main: 'index.cjs' }),
+  );
   writeFileSync(
     join(pkg, 'index.cjs'),
     `const env = { cacheDir: ${JSON.stringify(DEFAULT_STUB_CACHE)} };
 const seen = [];
 async function pipeline() {
   seen.push(env.cacheDir); // what the cache pointed at when the pipeline was constructed
-  return async (input) => {
+  const extractor = async (input) => {
     const batch = Array.isArray(input) ? input : [input];
-    return { data: new Float32Array(batch.length * 2).fill(0.5), dims: [batch.length, 2] };
+    return { data: new Float32Array(batch.length * 384).fill(0.5), dims: [batch.length, 384] };
   };
+  extractor.tokenizer = { model_max_length: 512 };
+  return extractor;
 }
 module.exports = { env, pipeline, seen };
 `,
@@ -70,7 +79,9 @@ describe('model weights land under the data directory', () => {
     expect(unavailable).toBeUndefined();
 
     const vecs = await provider!.embed(['a passage']);
-    expect(vecs).toEqual([[0.5, 0.5]]);
+    expect(vecs).toHaveLength(1);
+    expect(vecs[0]).toHaveLength(384);
+    expect(vecs[0]!.every((value) => value === 0.5)).toBe(true);
     // Deleting dataDir now removes the weights along with the index.
     expect(stubModule.seen).toEqual([join(dataDir, 'models')]);
     expect(stubModule.env.cacheDir).toBe(join(dataDir, 'models'));

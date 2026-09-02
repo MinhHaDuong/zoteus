@@ -5,6 +5,7 @@ M6 adds local-first hybrid retrieval: BM25 keyword scoring fused with vector sim
 ## Tools
 
 ### `zotero_index` — manage the index
+
 The build runs **asynchronously on the server** so the tool call returns immediately and
 can never time out the MCP client, even on very large libraries.
 
@@ -37,15 +38,15 @@ can never time out the MCP client, even on very large libraries.
   `state` is `error`. Backward-compatible fields (`documents`, `vectors`, `items`,
   `embedder`, `builtFromVersion`) are still present. Progress is also logged on the
   server (every 500 items / 10s).
-  `embedder` is what is *actually* producing vectors, not what was requested: three extra
+  `embedder` is what is _actually_ producing vectors, not what was requested: three extra
   fields split the two apart, so a keyword-only index always explains itself.
   | Field | Meaning |
   |---|---|
   | `embedderConfigured` | the `ZOTEUS_EMBEDDINGS` value that was asked for |
-  | `embedderModel` | the model it embeds with (`ZOTEUS_EMBEDDING_MODEL`), when it names one |
+  | `embedderModel` | the active model or curated local entry (`ZOTEUS_EMBEDDING_MODEL`), when it names one |
   | `embedderActive` | `true` only while that provider is genuinely embedding |
   | `embedderReason` | present when it is not: why, and what to do about it |
-  | `vectorsStaleReason` | present when stored vectors were dropped because another model had produced them (see [Tuning API embeddings](#tuning-api-embeddings)) |
+  | `vectorsStaleReason` | present when stored vectors were dropped because another embedding chain had produced them (see [Choosing and tuning embeddings](#choosing-and-tuning-embeddings)) |
 
   Three more fields describe the store rather than the embedder: `storage` (`sqlite` or
   `memory`, see [Storage backends](#storage-backends)), `storageNotice` (present when
@@ -53,6 +54,7 @@ can never time out the MCP client, even on very large libraries.
   index could not be written). Two more describe how the last semantic query ranked
   vectors: `vectorScan` (`codes` or `exact`) and `vectorScanNotice`, see
   [Two-stage vector search](#two-stage-vector-search).
+
 - `action: "stop"` cooperatively cancels a running job. A build halts between
   pages/batches and the partial index is kept and stays searchable; it also leaves a
   checkpoint, so the next `action:"build"` carries on from it rather than starting over. A
@@ -80,7 +82,7 @@ and the index file is keyed by the Zoteus data dir (plus the authenticated user 
 multi-tenant mode), never by the library id the read happened to use.
 
 **One index file, one library.** Because the file is keyed by the data dir, a build for a
-*different* library than the one the index holds would silently erase it — or, where an
+_different_ library than the one the index holds would silently erase it — or, where an
 interrupted build left a checkpoint, resume into it and leave one file holding two
 libraries' rows. The index
 therefore stamps the library it was built for (the personal library counts as one library
@@ -98,6 +100,7 @@ reported by `zotero_index action:"status"` and repeated in every `zotero_semanti
 summary, because a build whose artifact never reached disk still reports `state: "done"`.
 
 ### `zotero_semantic_search` — search by meaning
+
 - `q` — natural-language query. `mode`: `auto` (hybrid, default), `keyword` (BM25), or `semantic` (vector).
 - Returns ranked items with a snippet and fused score. The index is built automatically on first use (see `auto_build` below), or ahead of time with `zotero_index`.
 - `auto_build` (default `true`) — when the index is empty the tool starts a background build itself and tells you to poll `zotero_index` action:"status" until `done`, then retry, instead of returning a bare error; pass `auto_build: false` to opt out.
@@ -151,16 +154,16 @@ moved**:
    Either way the stamp does not move, and the next `update` simply repeats the delta.
 
 **When it falls back to a full rebuild.** An update is refused whenever a delta would be
-*wrong* rather than merely stale. The fallback is never silent: the rebuild starts
+_wrong_ rather than merely stale. The fallback is never silent: the rebuild starts
 immediately and `updateNotice` (repeated in the `status` summary) says which case it was.
 
-| Condition | Why a delta cannot work |
-|---|---|
-| No version stamp | An index built before 1.7, imported from an older JSON file, or left by a cancelled build, covers an unknown slice of the library. The rebuild it falls back to **resumes** that cancelled build rather than starting over, see [Resuming an interrupted build](#resuming-an-interrupted-build). |
-| The serving backend changed | The desktop app and the cloud number their library versions independently, so a stamp from one names a different point in the other's sequence. Closing Zotero between runs is enough to trigger this. |
-| The embedding model changed | Only the changed items would come back with vectors in the new space; the rest would be ranked against a foreign one. (Same rule as [Changing the model](#tuning-api-embeddings).) |
-| The store cannot delete rows | Deleted items could never leave the index. Both shipped backends can, so this is a guard for future stores. |
-| The census came back empty | Treated as a failed read, not an emptied library: deletions are skipped, the stamp is withheld, and `updateNotice` says so rather than erasing the index. |
+| Condition                    | Why a delta cannot work                                                                                                                                                                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| No version stamp             | An index built before 1.7, imported from an older JSON file, or left by a cancelled build, covers an unknown slice of the library. The rebuild it falls back to **resumes** that cancelled build rather than starting over, see [Resuming an interrupted build](#resuming-an-interrupted-build). |
+| The serving backend changed  | The desktop app and the cloud number their library versions independently, so a stamp from one names a different point in the other's sequence. Closing Zotero between runs is enough to trigger this.                                                                                           |
+| The embedding model changed  | Only the changed items would come back with vectors in the new space; the rest would be ranked against a foreign one. (Same rule as [Changing the model](#tuning-api-embeddings).)                                                                                                               |
+| The store cannot delete rows | Deleted items could never leave the index. Both shipped backends can, so this is a guard for future stores.                                                                                                                                                                                      |
+| The census came back empty   | Treated as a failed read, not an emptied library: deletions are skipped, the stamp is withheld, and `updateNotice` says so rather than erasing the index.                                                                                                                                        |
 
 ### Text extracted after the build
 
@@ -175,8 +178,8 @@ So a build records a second cursor beside the version stamp (`fulltextVersion` i
 asks `/fulltext?since=<that cursor>` for what has been extracted since. New text is
 attached to its parent item through the same attachment map the build uses, replacing that
 item's body passages and leaving its metadata ones alone. `updateNotice` counts them
-separately, because they are a different question answered by a different sequence: *"N
-unchanged item(s) gained newly extracted attachment full text."*
+separately, because they are a different question answered by a different sequence: _"N
+unchanged item(s) gained newly extracted attachment full text."_
 
 - **On a library where nothing was extracted, this costs one request.** The probe comes
   first and on its own; only a non-empty answer is worth building the attachment map.
@@ -226,18 +229,18 @@ finds it and carries on:
 That is the only behavioural difference between the two actions.
 
 **The item cap still applies.** An update maintains the subset the index already holds: an
-item already indexed is refreshed however full the index is, a *new* one only while there
+item already indexed is refreshed however full the index is, a _new_ one only while there
 is room under `ZOTEUS_INDEX_MAX_ITEMS` (or `limit`). If the previous build was truncated,
 `updateNotice` says that the items the cap left out stay unindexed until a full
 `action:"build"` covers them.
 
 **Cost.** Measured shape rather than a benchmark, because the ratio is what matters: an
-update's work is proportional to the *delta*, a build's to the *library*.
+update's work is proportional to the _delta_, a build's to the _library_.
 
-| | items fetched | passages embedded | requests |
-|---|---:|---:|---:|
-| `action:"build"`, 5000-item library | 5000 | all of them | 50 item pages (+ full-text reads) |
-| `action:"update"`, 7 items changed | 7 | 7 items' worth | 1 item page + 1 census page |
+|                                     | items fetched | passages embedded |                          requests |
+| ----------------------------------- | ------------: | ----------------: | --------------------------------: |
+| `action:"build"`, 5000-item library |          5000 |       all of them | 50 item pages (+ full-text reads) |
+| `action:"update"`, 7 items changed  |             7 |    7 items' worth |       1 item page + 1 census page |
 
 With `ZOTEUS_EMBEDDINGS=openai` that is the difference between re-embedding the whole
 library and embedding seven items: minutes and real API spend against seconds and
@@ -327,7 +330,7 @@ nothing else. The local API is one desktop application, sharing a process with Z
 its sync engine and its own PDF indexer, and it has no rate limiter: it answers everything
 until it cannot. Four continuous body reads were enough to stop Zotero 10 answering on port
 23119 at all, 60 to 90 seconds into a 358-attachment crawl. That is worse than a slow build,
-because local-API reachability is a session-wide fact: the moment it goes, *every* read and
+because local-API reachability is a session-wide fact: the moment it goes, _every_ read and
 write falls back to the Web API, which is the slower, rate-limited path the crawl was
 avoiding in the first place.
 
@@ -343,17 +346,17 @@ that owns the attachment, with the item's title, and de-duplicated against its m
 passages, so one paper never floods the result list.
 
 **How it is resolved.** Two library-wide reads, not per-item probing: one
-`/fulltext?since=0` call names every attachment that *has* extracted text, and paging
+`/fulltext?since=0` call names every attachment that _has_ extracted text, and paging
 `itemType=attachment` maps each one to its parent. Only that intersection is fetched, so
 the number of full-text requests equals the number of attachments that actually have text.
 
 **Cost.** This is the expensive option, which is why it is off by default. Measured on a
 212-item library with 151 extracted PDFs:
 
-| | passages | index file (JSON backend) | build (keyword-only, desktop app) |
-|---|---:|---:|---:|
-| metadata only | 687 | 0.4 MB | 0.2 s |
-| `fulltext: true` | 6246 | 7.9 MB | 4.0 s |
+|                  | passages | index file (JSON backend) | build (keyword-only, desktop app) |
+| ---------------- | -------: | ------------------------: | --------------------------------: |
+| metadata only    |      687 |                    0.4 MB |                             0.2 s |
+| `fulltext: true` |     6246 |                    7.9 MB |                             4.0 s |
 
 Roughly **9× the passages**, which is also how a mid-sized library reaches the JSON
 backend's ceiling: full text is the usual reason to be on the SQLite backend (see
@@ -385,7 +388,7 @@ on its metadata for all of it rather than only at the end. A build stopped durin
 pass therefore leaves complete metadata and partial full text, which is worth knowing before
 you decide whether to resume it.
 
-The version stamp an `action:"update"` diffs against is written only when *both* passes have
+The version stamp an `action:"update"` diffs against is written only when _both_ passes have
 finished. A build interrupted during the body crawl is deliberately left unstamped, because
 a stamp would make the next update skip every item whose attachments were never read: those
 items are unchanged in Zotero, so they would appear in no delta, ever. The checkpoint is
@@ -454,23 +457,23 @@ bulkier rows. Refusing on the one signal that actually correlates says only what
 
 Where the index lives is set by **`ZOTEUS_INDEX_BACKEND`**:
 
-| Value | Behaviour |
-|---|---|
-| `auto` (default) | SQLite when the runtime provides `node:sqlite` (**Node 22.13+**), otherwise the JSON file, with one info line on startup saying so. |
-| `sqlite` | Require SQLite. On a Node without `node:sqlite` the server **fails to start** rather than quietly falling back to the backend with the ceiling. |
-| `memory` | The legacy in-memory index persisted as one JSON file. |
+| Value            | Behaviour                                                                                                                                       |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `auto` (default) | SQLite when the runtime provides `node:sqlite` (**Node 22.13+**), otherwise the JSON file, with one info line on startup saying so.             |
+| `sqlite`         | Require SQLite. On a Node without `node:sqlite` the server **fails to start** rather than quietly falling back to the backend with the ceiling. |
+| `memory`         | The legacy in-memory index persisted as one JSON file.                                                                                          |
 
 **Why there are two.** The JSON backend keeps every passage and vector in JS memory and
 saves them with a single `JSON.stringify`. That string cannot exceed V8's maximum length
 (~512 MB), so past roughly 250k passages the index can no longer be saved, and a file
-anywhere near that size can no longer be *read* either: a 463 MB `search-index.json` needs
+anywhere near that size can no longer be _read_ either: a 463 MB `search-index.json` needs
 about 5.4 GB of heap to parse and OOMs stock Node. Measured on the same 7540-item library
 (issue #10):
 
-| | build | resident memory | query | reload |
-|---|---:|---:|---:|---|
-| JSON (`memory`) | 337 s | 5370 MB | 370-500 ms | re-parses the whole file |
-| SQLite (`sqlite`) | 46.6 s | 162 MB | 1-76 ms | opens the file |
+|                   |  build | resident memory |      query | reload                   |
+| ----------------- | -----: | --------------: | ---------: | ------------------------ |
+| JSON (`memory`)   |  337 s |         5370 MB | 370-500 ms | re-parses the whole file |
+| SQLite (`sqlite`) | 46.6 s |          162 MB |    1-76 ms | opens the file           |
 
 The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 2`,
 ranked with `bm25()`) and vectors as per-passage `BLOB`s, so a keyword search reads only
@@ -512,13 +515,13 @@ database, so a repair that dropped the passages and kept the stamp would leave a
 index reporting itself as up to date. Removing the file removes the stamp with it.
 
 The same applies to a `search-index.json` that cannot be parsed. It used to load as an
-*empty* index, which reads exactly like a library holding nothing — and, because loading
+_empty_ index, which reads exactly like a library holding nothing — and, because loading
 resets before it parses, the next clean shutdown wrote that emptiness back over the file.
 A JSON artifact that fails to parse is now refused, left untouched on disk, and repaired by
 the same `action:"build"`.
 
 **An older schema version is upgraded in place.** When Zoteus bumps the index schema, a
-database stamped with an earlier version of *this* schema is migrated where it lies: the
+database stamped with an earlier version of _this_ schema is migrated where it lies: the
 ladder of upgrade steps runs inside one transaction with the new stamp, so the file is
 either fully upgraded or fully unchanged, and nothing is re-crawled or re-embedded.
 `storageNotice` says what moved it forward. A step that fails rolls the whole thing back
@@ -541,14 +544,14 @@ of the passage text and the model, neither of which a schema change touches. So 
 moved-aside database stays open as a read-only vector source, and every passage the rebuild
 re-reads with the same id and byte-identical text takes its vector from there instead of
 being embedded again. Only genuinely new or edited text costs embedding time. The reuse is
-refused outright when the embedder has changed (`embedderId` covers provider *and* model),
+refused outright when the embedder has changed (`embedderId` covers provider _and_ model),
 and `storageNotice` prices the rebuild either way: how many passages must be re-indexed, how
 many vectors that involves, and whether they have to be paid for.
 
 **Migration is automatic and lossless.** The first time the SQLite backend opens a data dir
 that holds a `search-index.json` and no database, it imports the JSON index and leaves the
 file exactly where it was (a downgrade to an older Node still finds it). If the JSON file is
-larger than **200 MB** it is *not* parsed, because that parse is the failure mode described
+larger than **200 MB** it is _not_ parsed, because that parse is the failure mode described
 above: nothing is imported, the file is left alone, and `zotero_index action:"status"`
 reports the reason and asks for one `action:"build"`. Either way the outcome is in
 `storageNotice`, never silent.
@@ -571,7 +574,7 @@ code**: one bit per dimension, set where that coordinate is above the corpus mea
 3072-dimensional vector becomes 384 bytes. A query is centred on the same mean, reduced to
 the same 384 bytes, and compared against every code by **Hamming distance** (a XOR and a
 popcount over `Uint32Array`s, which is cheap enough to do a quarter of a million times).
-That first pass produces a *candidate pool*, and only those candidates' real float32
+That first pass produces a _candidate pool_, and only those candidates' real float32
 vectors are read and ranked by the exact cosine the full scan used.
 
 Two properties follow, and they are the whole design:
@@ -582,7 +585,7 @@ Two properties follow, and they are the whole design:
 - **What can be lost is recall, not correctness.** A relevant passage the codes rank
   outside the pool is not seen at all. Measured on real embeddings against the exact
   ranking, a pool of 8x the result set recovered 0.953 of it and 16x recovered 0.986, and
-  the codes get *better* as vectors get wider (0.953 at 384 dimensions, 0.997 at 1024),
+  the codes get _better_ as vectors get wider (0.953 at 384 dimensions, 0.997 at 1024),
   because a wider vector makes a longer code. Binary codes with no rescore recovered only
   0.592, which is why the float32 vectors stay in the index.
 
@@ -608,11 +611,11 @@ reported by `zotero_index action:"status"` as `vectorScan` (`codes` or `exact`),
 `vectorScanNotice` explaining anything that needs explaining: the fallback, or the
 one-time backfill.
 
-| Variable | Default | What it changes |
-|---|---|---|
-| `ZOTEUS_INDEX_ANN` | `true` | The escape hatch. `false` turns the coded path off entirely: every semantic query scans every vector, exactly as before, and no codes are written. |
-| `ZOTEUS_INDEX_ANN_OVERSAMPLE` | `16` | Candidates rescored per vector hit the fusion asks for. Higher is more accurate and slower; the measured recall at 4x/8x/16x was 0.884/0.953/0.986. |
-| `ZOTEUS_INDEX_ANN_MIN_CANDIDATES` | `500` | Floor on that pool, so a small `limit` still rescores a real neighbourhood. It is also the size below which an index is simply scanned exactly. |
+| Variable                          | Default | What it changes                                                                                                                                     |
+| --------------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ZOTEUS_INDEX_ANN`                | `true`  | The escape hatch. `false` turns the coded path off entirely: every semantic query scans every vector, exactly as before, and no codes are written.  |
+| `ZOTEUS_INDEX_ANN_OVERSAMPLE`     | `16`    | Candidates rescored per vector hit the fusion asks for. Higher is more accurate and slower; the measured recall at 4x/8x/16x was 0.884/0.953/0.986. |
+| `ZOTEUS_INDEX_ANN_MIN_CANDIDATES` | `500`   | Floor on that pool, so a small `limit` still rescores a real neighbourhood. It is also the size below which an index is simply scanned exactly.     |
 
 `bench/two-stage-search.ts` measures both paths over a synthetic index of any shape
 (`npx tsx bench/two-stage-search.ts --vectors 255703 --dim 3072`).
@@ -621,28 +624,46 @@ one-time backfill.
 
 Set `ZOTEUS_EMBEDDINGS`:
 
-| Value | Behaviour |
-|---|---|
-| `local` (default) | On-device embeddings via `@huggingface/transformers` (model `all-MiniLM-L6-v2`). **No data leaves your machine.** |
-| `openai` / `gemini` | API embeddings (opt-in; requires `OPENAI_API_KEY` / `GEMINI_API_KEY`; data is sent to the provider). |
-| `off` | Keyword-only (BM25). |
+| Value               | Behaviour                                                                                                         |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `local` (default)   | On-device embeddings via `@huggingface/transformers` (model `all-MiniLM-L6-v2`). **No data leaves your machine.** |
+| `openai` / `gemini` | API embeddings (opt-in; requires `OPENAI_API_KEY` / `GEMINI_API_KEY`; data is sent to the provider).              |
+| `off`               | Keyword-only (BM25).                                                                                              |
 
-### Tuning API embeddings
+### Choosing and tuning embeddings
 
 Three variables tune whichever provider is active, and all three default to today's
 behaviour:
 
-| Variable | Default | What it changes |
-|---|---|---|
-| `ZOTEUS_EMBEDDING_MODEL` | provider default | The model the active **API** provider embeds with: `text-embedding-3-small` (openai) or `text-embedding-004` (gemini). |
-| `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call — one API request, or one local pipeline call. |
-| `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop; a positive value sleeps. |
+| Variable                      | Default          | What it changes                                                                        |
+| ----------------------------- | ---------------- | -------------------------------------------------------------------------------------- |
+| `ZOTEUS_EMBEDDING_MODEL`      | provider default | A curated entry id for `local`; a model name for an API provider.                      |
+| `ZOTEUS_EMBED_BATCH_SIZE`     | `32`             | Passages per embedding call — one API request, or one local pipeline call.             |
+| `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0`              | Pause between those calls. `0` only yields to the event loop; a positive value sleeps. |
+
+Unset local configuration preserves the existing `minilm-l6-v2` chain. The measured
+multilingual entries are the six base ids `granite-97m-multilingual-r2`,
+`granite-311m-multilingual-r2`, `arctic-embed-m-v2`, `gte-multilingual-base`,
+`multilingual-e5-small`, and `multilingual-e5-base`, suffixed with `-fp32`, `-q8`,
+or `-uint8`. The evidence-rejected `granite-97m-multilingual-r2-q8` combination is not
+selectable. For example:
+
+```bash
+ZOTEUS_EMBEDDINGS=local
+ZOTEUS_EMBEDDING_MODEL=multilingual-e5-small-q8
+```
+
+Each id pins the repository revision, graph dtype, pooling, normalization, query/passage
+prefixes, tokenizer window, and vector width. The execution provider remains the runtime
+default until it has separately passed the device compatibility probe. Arbitrary Hugging Face names and
+per-field overrides are deliberately rejected: a combination that merely loads can still
+produce incompatible or incorrectly interpreted vectors.
 
 The last two are what a large build is tuned with. An embeddings request is rejected as a
 whole when it carries more tokens than the provider accepts (OpenAI answers `400` above
 300K tokens per request), and full-text passages, at 1200 characters each, reach that
 ceiling far sooner than metadata ones do: lower `ZOTEUS_EMBED_BATCH_SIZE` until a request
-fits. `ZOTEUS_EMBED_BATCH_DELAY_MS` bounds the request *rate* instead, which is how a build
+fits. `ZOTEUS_EMBED_BATCH_DELAY_MS` bounds the request _rate_ instead, which is how a build
 of tens of thousands of passages stays under a tokens-per-minute limit rather than being
 throttled by the provider.
 
@@ -714,7 +735,7 @@ upgrading the Node version later breaks a path that used to work, silently. A st
 directory belongs to no version manager and survives both (#38).
 
 Living outside the bundle also means surviving extension updates, which wipe anything
-installed *into* the extension folder. The variable accepts a `node_modules` directory, the
+installed _into_ the extension folder. The variable accepts a `node_modules` directory, the
 package directory itself, or an npm prefix whose modules live under `lib/node_modules`. It
 works for npm/Docker installs too, whenever the module lives somewhere the server cannot
 resolve on its own.

@@ -251,6 +251,23 @@ describe.each(backends)('SearchIndex contract (%s backend)', (backend) => {
     await store.close();
   });
 
+  it('drops vectors when only a local registry fingerprint changes', async () => {
+    const local = (id: string, vectorFingerprint: string): EmbeddingProvider => ({
+      name: 'local',
+      model: 'same/repository',
+      entryId: id,
+      vectorFingerprint,
+      embed: async (texts) => texts.map(() => [1, 0, 0]),
+    } as EmbeddingProvider);
+    const store = new Store(backend);
+    const index = await store.open({ embedder: local('model-fp32', 'aaa'), configured: 'local' });
+    await index.build(items);
+    const switched = await store.reopen({ embedder: local('model-q8', 'bbb'), configured: 'local' });
+    expect(switched.buildStatus().vectors).toBe(0);
+    expect(switched.buildStatus().vectorsStaleReason).toContain('registry-vbbb');
+    await store.close();
+  });
+
   it('reports a build it could not save instead of claiming it is done', async () => {
     const store = new Store(backend);
     const index = await store.open();

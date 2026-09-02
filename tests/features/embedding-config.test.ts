@@ -8,8 +8,13 @@ import {
   createEmbeddingProvider,
   type EmbeddingProvider,
 } from '../../src/features/search/embeddings.js';
+import { INCUMBENT_LOCAL_ENTRY } from '../../src/features/search/embedder-registry.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from '../../src/features/search/limits.js';
-import { startIndexBuild, staleVectorsNotice, statusSummary } from '../../src/features/search/build.js';
+import {
+  startIndexBuild,
+  staleVectorsNotice,
+  statusSummary,
+} from '../../src/features/search/build.js';
 import { loadConfig } from '../../src/config.js';
 import semanticSearch from '../../src/tools/semantic-search.js';
 
@@ -31,14 +36,20 @@ function captureEmbeddingRequests(): Captured[] {
     const json = url.includes('openai')
       ? { data: (body.input as string[]).map(() => ({ embedding: [1, 0, 0] })) }
       : { embeddings: (body.requests as unknown[]).map(() => ({ values: [1, 0, 0] })) };
-    return new Response(JSON.stringify(json), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(json), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
   }) as typeof fetch;
   vi.stubGlobal('fetch', stub);
   return calls;
 }
 
 /** An embedder that records the batches it is handed, so batching itself is observable. */
-function recordingEmbedder(name = 'recorder', model?: string): EmbeddingProvider & { batches: string[][] } {
+function recordingEmbedder(
+  name = 'recorder',
+  model?: string,
+): EmbeddingProvider & { batches: string[][] } {
   const batches: string[][] = [];
   return {
     name,
@@ -54,12 +65,19 @@ function recordingEmbedder(name = 'recorder', model?: string): EmbeddingProvider
 function makeLibrary(n: number): any[] {
   return Array.from({ length: n }, (_, i) => ({
     key: `K${i}`,
-    data: { itemType: 'journalArticle', title: `Item ${i}`, abstractNote: `abstract body number ${i}` },
+    data: {
+      itemType: 'journalArticle',
+      title: `Item ${i}`,
+      abstractNote: `abstract body number ${i}`,
+    },
   }));
 }
 
 function pager(library: any[], pageSize = 100) {
-  return async (start: number) => ({ items: library.slice(start, start + pageSize), totalResults: library.length });
+  return async (start: number) => ({
+    items: library.slice(start, start + pageSize),
+    totalResults: library.length,
+  });
 }
 
 /** Minimal context for the fire-and-forget build path (router + config + index). */
@@ -163,7 +181,9 @@ describe('the API providers embed with the configured model', () => {
 
   it("accepts a Gemini model written with Google's models/ prefix", async () => {
     const calls = captureEmbeddingRequests();
-    const provider = new ApiEmbeddingProvider('gemini', 'key', { model: 'models/gemini-embedding-001' });
+    const provider = new ApiEmbeddingProvider('gemini', 'key', {
+      model: 'models/gemini-embedding-001',
+    });
     await provider.embed(['a']);
     expect(provider.model).toBe('gemini-embedding-001'); // identity is the bare name
     expect(calls[0]!.url).not.toContain('models/models/');
@@ -178,10 +198,14 @@ describe('the API providers embed with the configured model', () => {
         ZOTEUS_EMBEDDINGS: 'openai',
         ZOTEUS_EMBEDDING_MODEL: 'text-embedding-3-large',
       } as any);
-      expect(createEmbeddingProvider(config, silentLogger).provider?.model).toBe('text-embedding-3-large');
+      expect(createEmbeddingProvider(config, silentLogger).provider?.model).toBe(
+        'text-embedding-3-large',
+      );
       // Unset means the provider's own default, not an empty model name.
       const bare = loadConfig({ ZOTEUS_EMBEDDINGS: 'openai' } as any);
-      expect(createEmbeddingProvider(bare, silentLogger).provider?.model).toBe(DEFAULT_API_MODELS.openai);
+      expect(createEmbeddingProvider(bare, silentLogger).provider?.model).toBe(
+        DEFAULT_API_MODELS.openai,
+      );
     } finally {
       if (previous === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = previous;
@@ -228,7 +252,9 @@ describe('passages per embedding request', () => {
 
   it('sends the texts it is given in one request when unset (unchanged behaviour)', async () => {
     const calls = captureEmbeddingRequests();
-    await new ApiEmbeddingProvider('openai', 'key').embed(Array.from({ length: 7 }, (_, i) => `p${i}`));
+    await new ApiEmbeddingProvider('openai', 'key').embed(
+      Array.from({ length: 7 }, (_, i) => `p${i}`),
+    );
     expect(calls).toHaveLength(1);
     expect(calls[0]!.body.input).toHaveLength(7);
   });
@@ -241,7 +267,12 @@ describe('passages per embedding request', () => {
       batches.push(batch);
       return { data: new Float32Array(batch.length * dim).fill(0.5), dims: [batch.length, dim] };
     };
-    const provider = new LocalEmbeddingProvider('test-model', async () => extractor, { batchSize: 10 });
+    (extractor as any).tokenizer = { model_max_length: 512 };
+    const provider = new LocalEmbeddingProvider(
+      { ...INCUMBENT_LOCAL_ENTRY, model: 'test-model', dimension: dim },
+      async () => extractor,
+      { batchSize: 10 },
+    );
     const vecs = await provider.embed(Array.from({ length: 25 }, (_, i) => `passage ${i}`));
 
     expect(batches.map((b) => b.length)).toEqual([10, 10, 5]);
@@ -305,31 +336,56 @@ describe('the pause between embedding batches', () => {
     const embedder = recordingEmbedder();
     const search = new MemorySearchIndex({ embedder, logger: silentLogger });
     startIndexBuild(
-      ctxFor(search, makeLibrary(40), { ZOTEUS_EMBED_BATCH_SIZE: '4', ZOTEUS_EMBED_BATCH_DELAY_MS: '37' }),
+      ctxFor(search, makeLibrary(40), {
+        ZOTEUS_EMBED_BATCH_SIZE: '4',
+        ZOTEUS_EMBED_BATCH_DELAY_MS: '37',
+      }),
     );
     await settle(search);
 
     // One pause per embedded batch, so the request rate is bounded by the delay.
-    expect(delays.filter((d) => d === 37).length).toBeGreaterThanOrEqual(embedder.batches.length - 1);
+    expect(delays.filter((d) => d === 37).length).toBeGreaterThanOrEqual(
+      embedder.batches.length - 1,
+    );
   });
 
   it('paces an API provider between its own requests', async () => {
     const delays = recordDelays();
     captureEmbeddingRequests();
-    await new ApiEmbeddingProvider('openai', 'key', { batchSize: 2, batchDelayMs: 42 }).embed(['a', 'b', 'c', 'd']);
+    await new ApiEmbeddingProvider('openai', 'key', { batchSize: 2, batchDelayMs: 42 }).embed([
+      'a',
+      'b',
+      'c',
+      'd',
+    ]);
     expect(delays.filter((d) => d === 42)).toHaveLength(1); // between the two requests, not after the last
+  });
+
+  it('paces two role-specific calls as two API requests', async () => {
+    const delays = recordDelays();
+    captureEmbeddingRequests();
+    const provider = new ApiEmbeddingProvider('openai', 'key', { batchDelayMs: 43 });
+    await provider.embed(['query']);
+    await provider.embed(['passage']);
+    expect(delays.filter((d) => d === 43)).toHaveLength(1);
   });
 });
 
 describe('vectors built with another model are not queried with this one', () => {
   const items = [
-    { key: 'A', data: { itemType: 'journalArticle', title: 'Neural networks', abstractNote: 'deep learning' } },
+    {
+      key: 'A',
+      data: { itemType: 'journalArticle', title: 'Neural networks', abstractNote: 'deep learning' },
+    },
     { key: 'B', data: { itemType: 'book', title: 'Gardening', abstractNote: 'tomatoes' } },
   ];
 
   /** An index built by `model`, serialized exactly as it would be persisted. */
   async function builtWith(model: string): Promise<any> {
-    const search = new MemorySearchIndex({ embedder: recordingEmbedder('openai', model), configured: 'openai' });
+    const search = new MemorySearchIndex({
+      embedder: recordingEmbedder('openai', model),
+      configured: 'openai',
+    });
     await search.build(items);
     return JSON.parse(JSON.stringify(search.toJSON()));
   }
@@ -340,6 +396,16 @@ describe('vectors built with another model are not queried with this one', () =>
       configured: 'openai',
       logger: silentLogger,
     });
+  }
+
+  function localEntry(id: string, fingerprint: string): EmbeddingProvider {
+    return {
+      name: 'local',
+      model: 'same/repository',
+      entryId: id,
+      vectorFingerprint: fingerprint,
+      embed: async (texts) => texts.map(() => [1, 0, 0]),
+    } as EmbeddingProvider;
   }
 
   it('persists the embedder identity with the vectors', async () => {
@@ -374,6 +440,16 @@ describe('vectors built with another model are not queried with this one', () =>
     expect(search.buildStatus().vectorsStaleReason).toBeUndefined();
   });
 
+  it('invalidates memory vectors when only the local entry fingerprint changes', async () => {
+    const built = new MemorySearchIndex({ embedder: localEntry('model-fp32', 'aaa') });
+    await built.build(items);
+    const saved = JSON.parse(JSON.stringify(built.toJSON()));
+    const switched = new MemorySearchIndex({ embedder: localEntry('model-q8', 'bbb') });
+    switched.loadFromJSON(saved);
+    expect(switched.buildStatus().vectors).toBe(0);
+    expect(switched.buildStatus().vectorsStaleReason).toContain('registry-vbbb');
+  });
+
   it('keeps them for an index file written before the identity was persisted', async () => {
     const saved = await builtWith('text-embedding-3-small');
     delete saved.embedderId; // provenance unknown, not known-wrong
@@ -386,7 +462,11 @@ describe('vectors built with another model are not queried with this one', () =>
 
   it('stays silent with no active embedder, which never queries them anyway', async () => {
     const saved = await builtWith('text-embedding-3-small');
-    const search = new MemorySearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
+    const search = new MemorySearchIndex({
+      embedder: null,
+      configured: 'off',
+      logger: silentLogger,
+    });
     search.loadFromJSON(saved);
 
     expect(search.buildStatus().vectors).toBe(saved.vectors.length);
@@ -403,7 +483,9 @@ describe('vectors built with another model are not queried with this one', () =>
     const s = search.buildStatus();
     expect(s.vectorsStaleReason).toBeUndefined();
     expect(s.vectors).toBeGreaterThan(0);
-    expect(JSON.parse(JSON.stringify(search.toJSON())).embedderId).toBe('openai:text-embedding-3-large');
+    expect(JSON.parse(JSON.stringify(search.toJSON())).embedderId).toBe(
+      'openai:text-embedding-3-large',
+    );
   });
 
   it('catches a switch under a legacy index file at query time, by vector width', async () => {
@@ -414,7 +496,11 @@ describe('vectors built with another model are not queried with this one', () =>
       model: 'text-embedding-3-large',
       embed: async (texts) => texts.map(() => [1, 0, 0, 0, 0]),
     };
-    const search = new MemorySearchIndex({ embedder: wider, configured: 'openai', logger: silentLogger });
+    const search = new MemorySearchIndex({
+      embedder: wider,
+      configured: 'openai',
+      logger: silentLogger,
+    });
     search.loadFromJSON(saved);
     expect(search.buildStatus().vectors).toBeGreaterThan(0); // provenance unknown so far
 
@@ -433,7 +519,9 @@ describe('vectors built with another model are not queried with this one', () =>
     const search = indexUsing('text-embedding-3-large');
     search.loadFromJSON(saved);
 
-    const res = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, { search } as any);
+    const res = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, {
+      search,
+    } as any);
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toContain('re-embed');
 
