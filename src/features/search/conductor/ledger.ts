@@ -419,6 +419,16 @@ export class Ledger {
   /** Which FTS layout this file uses. Probed once at creation and then read, not re-probed. */
   readonly ftsStorage: FtsStorage;
   private readonly clock: Clock;
+  /**
+   * How many `transaction()` calls are open on this handle, so a nested one can tell.
+   *
+   * Counted here rather than asked of SQLite because `transaction()` is the only thing that
+   * opens a transaction on this handle — the one raw statement the class exposes, §5.2.5's
+   * election, is a single `UPDATE` — and because the runtime's own `isTransaction` is newer
+   * than the Node this package supports (`engines: >=20.19`). A counter that is wrong is a
+   * counter someone else's `BEGIN` made wrong, and there is no such `BEGIN`.
+   */
+  private txDepth = 0;
 
   private constructor(db: Database, clock: Clock, ftsStorage: FtsStorage) {
     this.db = db;
@@ -479,9 +489,27 @@ export class Ledger {
     this.db.close();
   }
 
-  /** Run `fn` inside one transaction. A tick's whole set of writes lands or none does. */
+  /**
+   * Run `fn` inside one transaction. A tick's whole set of writes lands or none does.
+   *
+   * Re-entrant, because the writes that need to be atomic are not all reached the same way:
+   * `putAttachmentChoice` is called both on its own and from inside a completion's
+   * transaction, and it cannot be atomic in one place and not the other without leaving the
+   * caller to remember which. `BEGIN IMMEDIATE` inside an open transaction is an error on
+   * SQLite ("cannot start a transaction within a transaction"), so a nested call takes a
+   * savepoint instead — the same guarantee to `fn`, and no second abstraction for a caller
+   * to choose between: everything still says `transaction()`.
+   *
+   * A savepoint is not a private commit. Releasing one only folds its writes into the
+   * enclosing transaction, so an outer failure still rolls the inner writes back with
+   * everything else — which is what the completion path wants, since a choice set that
+   * outlived the completion it belonged to would be the same asymmetry pointing the other
+   * way.
+   */
   transaction<T>(fn: () => T): T {
+    if (this.txDepth > 0) return this.nested(fn);
     this.db.exec('BEGIN IMMEDIATE');
+    this.txDepth = 1;
     try {
       const out = fn();
       this.db.exec('COMMIT');
@@ -489,6 +517,28 @@ export class Ledger {
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
+    } finally {
+      this.txDepth = 0;
+    }
+  }
+
+  /** `transaction()` when one is already open: a savepoint, named for the depth it sits at. */
+  private nested<T>(fn: () => T): T {
+    const name = `ledger_sp_${this.txDepth}`;
+    this.db.exec(`SAVEPOINT ${name}`);
+    this.txDepth++;
+    try {
+      const out = fn();
+      this.db.exec(`RELEASE ${name}`);
+      return out;
+    } catch (e) {
+      // Rolling back to a savepoint leaves it on the stack; the RELEASE is what pops it, and
+      // without it the enclosing transaction would carry a savepoint nothing will ever close.
+      this.db.exec(`ROLLBACK TO ${name}`);
+      this.db.exec(`RELEASE ${name}`);
+      throw e;
+    } finally {
+      this.txDepth--;
     }
   }
 
@@ -1241,7 +1291,18 @@ export class Ledger {
 
   // ------------------------------------------------------- first-with-text (D6)
 
-  /** Record the choice for one item: one chosen attachment, every other one with a reason. */
+  /**
+   * Record the choice for one item: one chosen attachment, every other one with a reason.
+   *
+   * One transaction, because the choice set is one fact spread over N rows: interrupted
+   * halfway it would leave some siblings carrying the new decision and some the old — two
+   * of them chosen, and no marker saying so — and `ExtractStage.isChosen` reads whatever
+   * `attachmentChoice` returns as settled. Atomic here rather than at the call site,
+   * because `decide()` reaches this from a completion (already inside a transaction) and
+   * from dispatch (not), and the weaker of the two paths is the one that decides what a
+   * reader can find (ticket 0570). `transaction()` is re-entrant, so the completion path
+   * nests rather than failing.
+   */
   putAttachmentChoice(lib: number, itemKey: string, decisions: AttachmentDecision[]): void {
     const stmt = this.db.prepare(
       `INSERT INTO attachment_choice(lib, attachment_key, item_key, chosen, reason, decided_at)
@@ -1253,16 +1314,18 @@ export class Ledger {
                decided_at = excluded.decided_at`,
     );
     const at = this.clock.now();
-    for (const d of decisions) {
-      stmt.run({
-        lib,
-        key: d.attachmentKey,
-        itemKey,
-        chosen: d.chosen ? 1 : 0,
-        reason: d.chosen ? null : (d.reason ?? null),
-        at,
-      });
-    }
+    this.transaction(() => {
+      for (const d of decisions) {
+        stmt.run({
+          lib,
+          key: d.attachmentKey,
+          itemKey,
+          chosen: d.chosen ? 1 : 0,
+          reason: d.chosen ? null : (d.reason ?? null),
+          at,
+        });
+      }
+    });
   }
 
   attachmentChoices(lib: number, itemKey: string): AttachmentChoiceRow[] {
