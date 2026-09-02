@@ -21,10 +21,16 @@ import type { ReconcileTick, TickReport } from './reconcile-tick.js';
  *    the write-ahead log before the successor spawns its own.
  * 3. **The lease is renewed immediately before the tick**, which is the long unit of work
  *    at this tranche's disposal, and the tick does not run if that renewal fails.
+ * 4. **The standing is re-read after the ticks**, because 3 is where a deposition is most
+ *    often noticed and the rest of the pass — the claim sweep, the spawn — is a
+ *    conductor's work. A pass that ran them on the way out would be a follower writing to
+ *    the ledger and a second worker starting under the successor's lease.
  *
  * **A follower writes nothing at all.** Not "writes nothing important": the follower path
  * below reaches no ledger statement, which is what keeps R6's query path write-free in
- * the database sense as well as the design sense.
+ * the database sense as well as the design sense. This holds for a P0 deposed *during* a
+ * pass and not only for one that began it as a follower: the two are the same process
+ * writing under a lease it does not hold, and only the timing differs.
  *
  * **Nothing here sleeps**, per `clock.ts`. `poll` is one pass and the host drives it; how
  * often it is driven changes only latency, never correctness, since every decision inside
@@ -138,6 +144,13 @@ export class Conductor {
       return this.report(election);
     }
     const ticks = await this.runTicks();
+    // The standing is re-read here, not assumed from the check above. `runTicks` renews
+    // immediately before every library's tick, so it is exactly where a deposition is most
+    // likely to be noticed — and everything below this line is a conductor's work: the sweep
+    // is a ledger write, and the spawn puts a worker under whatever lease is current. Run by
+    // a P0 that has just been deposed, they are §5.2.5's single writer becoming two, and the
+    // spawn undoes the kill the deposition callback has this instant performed.
+    if (!this.election.isConductor()) return this.report(election, ticks);
     // Rows whose holder died mid-document come back to the queue here, and this is the only
     // place that returns them. §5.2.5 recovers a stuck worker by claim expiry at the cost of
     // at most one duplicated micro-batch — but expiry is a *timestamp*, not an event, so

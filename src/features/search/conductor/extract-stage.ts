@@ -276,6 +276,21 @@ export class ExtractStage implements ExtractDispatcher {
    * It is re-derived rather than remembered, so the promise D6 makes about a later
    * extraction holds structurally: when an earlier attachment gains text, its row simply
    * sorts ahead and the output changes, with no invalidation to remember to run.
+   *
+   * Read-then-write, and reached two ways: from `complete()` inside the stage's own
+   * transaction, and from `next()` via `isChosen()` in autocommit. Of the two risks that
+   * asymmetry carried (ticket 0570), `putAttachmentChoice`'s own transaction closes one and
+   * not the other:
+   *
+   * - **Closed.** A crash between two siblings can no longer leave a half-written choice
+   *   set — two attachments of one item both chosen, which `isChosen` would read as
+   *   settled. The set is now stored whole or not at all from either caller.
+   * - **Not closed.** The *read* is still outside the write on the dispatch path, so two
+   *   live stages over one ledger could each derive a set and the later one overwrite a
+   *   correctly committed choice with a stale view. That needs a second writer, which
+   *   §5.2.5's lease is what forbids: the conductor is the only writer. Closing it here
+   *   would mean holding a transaction across the read as well, and it is defence in depth
+   *   against a state the lease already excludes, not a live defect.
    */
   decide(lib: number, itemKey: string): AttachmentDecision[] {
     const candidates = this.ledger.attachmentsWithText(lib, itemKey);

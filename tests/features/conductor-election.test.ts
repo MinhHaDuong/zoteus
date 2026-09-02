@@ -300,6 +300,98 @@ describeSqlite('conductor election: standing, transitions and the tick', () => {
     mine.close();
     theirs.close();
   });
+
+  it('ends the pass on a deposition inside the tick loop: no sweep, no successor worker', async () => {
+    /**
+     * The rest of the pass, which is not the tick. `poll` re-checks its standing once,
+     * before the ticks; a deposition noticed *inside* `runTicks` only breaks that loop, and
+     * everything after it used to run anyway — the claim sweep, which is a ledger write, and
+     * the spawn, which starts a fresh worker under a lease the successor already holds.
+     *
+     * Both are the single-writer guarantee of §5.2.5 breaking, and the second is worse than
+     * the first: the deposition callback has just killed this P0's worker precisely so it
+     * would stop pinning the write-ahead log, and the pass then starts another one.
+     */
+    const clock = new ManualClock(START);
+    const path = join(dataDir(), 'ledger.sqlite');
+    const mine = Ledger.open(path, clock);
+    const theirs = Ledger.open(path, clock);
+    const oid = mine.registerOrigin('server-aaa');
+    const libs = [
+      mine.registerLibrary({ oid, kind: 'user', remoteId: 0, scope: 'local' }),
+      mine.registerLibrary({ oid, kind: 'group', remoteId: 7, scope: 'cloud' }),
+    ];
+
+    // A row claimed by somebody else, on a TTL the tick's own clock jump will outrun. This
+    // is what makes "the follower reached no ledger statement" observable rather than
+    // asserted about an absence: with the sweep running, the row goes back to `pending`.
+    const wid = mine.enqueue({
+      lib: libs[0],
+      class: 'metadata',
+      op: 'index',
+      itemKey: 'REC001',
+      dateAdded: '2026-01-01T00:00:00Z',
+    });
+    expect(mine.claim(wid, 'uuid-a-worker', 'item:17', 1_000)).toBe(true);
+
+    const rival = new Lease({ ledger: theirs, clock, holder: 'uuid-rival' });
+    const tick: any = {
+      isDue: () => true,
+      runOnce: async (l: number) => {
+        // The row moves between the first library and the second, exactly as above.
+        clock.advance(LEASE_TTL_MS + 1);
+        rival.take();
+        return { lib: l } as any;
+      },
+    };
+    const spawned: FakeWorker[] = [];
+    const pipeline = {
+      hasWork: () => true,
+      spawn: (): WorkerControl => {
+        const w = new FakeWorker();
+        spawned.push(w);
+        return w;
+      },
+    };
+    const c = new Conductor({
+      ledger: mine,
+      clock,
+      tick,
+      worker: new FakeWorker(),
+      pipeline,
+      libraries: () => libs,
+    });
+
+    const report = await c.poll();
+
+    // Asserted as one shape rather than one line at a time, because the two consequences
+    // are independent: stopping at the first would say the sweep ran and leave the spawn —
+    // the worse of the two — unreported until the next round.
+    expect({
+      role: report.role,
+      workerKilled: report.workerKilled,
+      // "A follower writes nothing at all." Not "nothing important": the sweep is a ledger
+      // statement, and a deposed P0 running it decides the successor's queue for it.
+      releasedClaims: report.releasedClaims,
+      sweptRow: mine.row(wid)?.status,
+      // And no worker under a lease this process no longer holds — the successor's to spawn.
+      workersSpawned: spawned.length,
+      workerSpawned: report.workerSpawned ?? false,
+      workerAlive: report.workerAlive,
+    }).toEqual({
+      role: 'follower',
+      workerKilled: 'lease lost',
+      releasedClaims: 0,
+      sweptRow: 'claimed',
+      workersSpawned: 0,
+      workerSpawned: false,
+      workerAlive: false,
+    });
+    // The premise, so a run where nobody was deposed cannot satisfy the assertions above.
+    expect(theirs.lease(CONDUCTOR_LEASE)?.holder).toBe('uuid-rival');
+    mine.close();
+    theirs.close();
+  });
 });
 
 describeSqlite('conductor election: the R13 soak, in virtual time', () => {
