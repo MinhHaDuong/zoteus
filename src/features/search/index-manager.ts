@@ -660,7 +660,8 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.library) s.library = this.library;
     const reason = this.embedderReason;
     if (reason) s.embedderReason = reason;
-    if (this.opts.embedder?.model) s.embedderModel = this.opts.embedder.model;
+    if (this.opts.embedder?.entryId ?? this.opts.embedder?.model)
+      s.embedderModel = this.opts.embedder?.entryId ?? this.opts.embedder?.model;
     if (this.vectorsStale) s.vectorsStaleReason = this.vectorsStale;
     if (this.vectorScan) s.vectorScan = this.vectorScan;
     if (this.vectorScanNotice) s.vectorScanNotice = this.vectorScanNotice;

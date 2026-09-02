@@ -15,7 +15,6 @@ describe('authoritative embedder records', () => {
   it.each([
     ['model', 'example/model'],
     ['revision', 'deadbeef'],
-    ['device', 'wasm'],
     ['dtype', 'q8'],
     ['graphFile', 'onnx/model_quantized.onnx'],
     ['pooling', 'cls'],
@@ -52,6 +51,9 @@ describe('authoritative embedder records', () => {
     expect(() => parseEmbedderEntry({ ...INCUMBENT_LOCAL_ENTRY, pooling: 'none' })).toThrow(
       /pooling/i,
     );
+    expect(() => parseEmbedderEntry({ ...INCUMBENT_LOCAL_ENTRY, revision: 'main' })).toThrow(
+      /commit sha/i,
+    );
   });
 
   it('returns immutable rows so vectors cannot move under a captured fingerprint', () => {
@@ -61,7 +63,7 @@ describe('authoritative embedder records', () => {
     expect(Object.isFrozen(row.sources)).toBe(true);
   });
 
-  it('drives loader options, role templates, truncation and dimension checks', async () => {
+  it('drives loader options and role templates and verifies the tokenizer window', async () => {
     const calls: any[] = [];
     const extractor: any = vi.fn(async (texts: string[], options: unknown) => {
       calls.push({ texts, options });
@@ -72,7 +74,7 @@ describe('authoritative embedder records', () => {
       ...INCUMBENT_LOCAL_ENTRY,
       id: 'test-e5',
       model: 'example/e5',
-      revision: 'abc123',
+      revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       dtype: 'q8',
       graphFile: 'onnx/model_quantized.onnx',
       pooling: 'cls',
@@ -89,8 +91,17 @@ describe('authoritative embedder records', () => {
       { texts: ['query: question'], options: { pooling: 'cls', normalize: true } },
       { texts: ['passage: answer'], options: { pooling: 'cls', normalize: true } },
     ]);
-    expect(provider.loaderOptions).toEqual({ revision: 'abc123', device: 'cpu', dtype: 'q8' });
+    expect(provider.loaderOptions).toEqual({
+      revision: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      dtype: 'q8',
+      subfolder: 'onnx',
+      model_file_name: 'model',
+    });
     expect(extractor.tokenizer.model_max_length).toBe(17);
+  });
+
+  it('rejects the removed raw-model constructor seam', () => {
+    expect(() => new LocalEmbeddingProvider('example/model' as any)).toThrow(/complete registry entry/i);
   });
 
   it('fails before inference when the pinned tokenizer window disagrees', async () => {

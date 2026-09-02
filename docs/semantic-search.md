@@ -653,7 +653,8 @@ ZOTEUS_EMBEDDING_MODEL=multilingual-e5-small-q8
 ```
 
 Each id pins the repository revision, graph dtype, pooling, normalization, query/passage
-prefixes, tokenizer window, vector width, and CPU runtime. Arbitrary Hugging Face names and
+prefixes, tokenizer window, and vector width. The execution provider remains the runtime
+default until it has separately passed the device compatibility probe. Arbitrary Hugging Face names and
 per-field overrides are deliberately rejected: a combination that merely loads can still
 produce incompatible or incorrectly interpreted vectors.
 

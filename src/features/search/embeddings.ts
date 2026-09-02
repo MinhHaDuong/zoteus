@@ -17,6 +17,8 @@ export interface EmbeddingProvider {
   readonly name: string;
   /** Model producing the vectors; part of the index's embedder identity. */
   readonly model?: string;
+  /** Curated configuration id, when the provider is registry-backed. */
+  readonly entryId?: string;
   embed(texts: string[], role?: 'query' | 'passage'): Promise<number[][]>;
 }
 
@@ -27,6 +29,17 @@ export const TRANSFORMERS_MODULE = '@huggingface/transformers';
 export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
   openai: 'text-embedding-3-small',
   gemini: 'text-embedding-004',
+};
+
+const GRAPH_SUFFIX_BY_DTYPE: Readonly<Record<EmbedderEntry['dtype'], string>> = {
+  fp32: '',
+  fp16: '_fp16',
+  q8: '_quantized',
+  int8: '_int8',
+  uint8: '_uint8',
+  q4: '_q4',
+  q4f16: '_q4f16',
+  bnb4: '_bnb4',
 };
 
 /**
@@ -200,11 +213,12 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   private extractor: any;
   readonly entry: EmbedderEntry;
   readonly model: string;
+  readonly entryId: string;
   readonly vectorFingerprint: string;
   readonly legacyIdentity: boolean;
   constructor(
-    /** Defaults to the registry's incumbent entry; a string remains a test/back-compat seam. */
-    entry: EmbedderEntry | string = INCUMBENT_LOCAL_ENTRY,
+    /** Defaults to the registry's incumbent entry. Raw model names are never accepted. */
+    entry: EmbedderEntry = INCUMBENT_LOCAL_ENTRY,
     /** Injectable extractor factory (tests); defaults to the transformers.js pipeline. */
     private readonly loadExtractor?: () => Promise<any>,
     private readonly opts: {
@@ -218,10 +232,12 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       batchDelayMs?: number;
     } = {},
   ) {
-    this.entry = parseEmbedderEntry(
-      typeof entry === 'string' ? { ...INCUMBENT_LOCAL_ENTRY, model: entry } : entry,
-    );
+    if (typeof entry === 'string') {
+      throw new Error('LocalEmbeddingProvider requires a complete registry entry, not a raw model name.');
+    }
+    this.entry = parseEmbedderEntry(entry);
     this.model = this.entry.model;
+    this.entryId = this.entry.id;
     this.vectorFingerprint = entryFingerprint(this.entry);
     this.legacyIdentity = this.vectorFingerprint === LEGACY_INCUMBENT_FINGERPRINT;
   }
@@ -229,10 +245,18 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   /** Options that select the actual graph/runtime chain. Exposed for characterization tests. */
   get loaderOptions(): {
     revision: string;
-    device: EmbedderEntry['device'];
     dtype: EmbedderEntry['dtype'];
+    subfolder: string;
+    model_file_name: string;
   } {
-    return { revision: this.entry.revision, device: this.entry.device, dtype: this.entry.dtype };
+    const [subfolder, filename] = this.entry.graphFile.split('/');
+    const suffix = GRAPH_SUFFIX_BY_DTYPE[this.entry.dtype];
+    return {
+      revision: this.entry.revision,
+      dtype: this.entry.dtype,
+      subfolder: subfolder!,
+      model_file_name: filename!.slice(0, -suffix.length - '.onnx'.length),
+    };
   }
 
   private async ensure(): Promise<any> {
@@ -357,6 +381,7 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
   readonly name: string;
   /** Bare model name: the `models/` prefix is Gemini wire format, not part of the identity. */
   readonly model: string;
+  private requestMade = false;
   constructor(
     private readonly kind: 'openai' | 'gemini',
     private readonly apiKey: string,
@@ -371,8 +396,9 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
     const size = Math.max(1, this.opts.batchSize ?? texts.length);
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += size) {
+      if (this.requestMade) await batchPause(this.opts.batchDelayMs);
       out.push(...(await this.embedBatch(texts.slice(i, i + size))));
-      if (i + size < texts.length) await batchPause(this.opts.batchDelayMs);
+      this.requestMade = true;
     }
     return out;
   }
