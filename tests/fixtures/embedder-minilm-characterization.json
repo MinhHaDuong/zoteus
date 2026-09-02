@@ -1,9 +1,9 @@
 {
   "purpose": "Frozen output of the incumbent local MiniLM chain, captured before its configuration was moved into the embedder registry. Ticket 0489. These floats are the invariant the whole staged-registry contract rests on: any later stage that moves them has changed what the vectors mean.",
-  "capturedUtc": "2026-09-02T13:05Z",
+  "capturedUtc": "2026-09-02T11:00Z",
   "capturedFrom": "src/features/search/embeddings.ts at upstream b05ed69a88e3a0c1ef874f57f97a0e11ddf7ec3c (v1.12.0), LocalEmbeddingProvider with every default",
   "capturedOn": "node v22.23.1, linux-x86_64, @huggingface/transformers 4.2.0, onnxruntime-node 1.24.3, device cpu, dtype fp32 (onnx/model.onnx)",
-  "modelRevision": "Xenova/all-MiniLM-L6-v2 at main = 751bff37182d3f1213fa05d7196b954e230abad9, read from the hub API on 2026-09-02",
+  "modelRevision": "Xenova/all-MiniLM-L6-v2 at main = 751bff37182d3f1213fa05d7196b954e230abad9, read from the hub API on 2026-09-02T10:52Z",
   "determinism": "two consecutive captures on this machine were byte-identical",
   "vectorKey": "local:Xenova/all-MiniLM-L6-v2",
   "dimension": 384,
