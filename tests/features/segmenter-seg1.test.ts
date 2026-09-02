@@ -277,6 +277,57 @@ describe('seg/1 on a collection: signed entries, one per page run', () => {
   });
 });
 
+/**
+ * The newer extractor's shape at scale: every page opens with a running header that
+ * carries the page number ("INTRODUCTION 7" on recto, "7 THE BOOK" on verso), and the
+ * chapter headings sit among them.
+ */
+function pagedBook(): string {
+  const lines: string[] = ['THE BOOK', '', 'PREFACE', '', para(1, 6), ''];
+  let page = 2;
+  for (let c = 1; c <= 4; c++) {
+    const title = ['INTRODUCTION', 'METHODS', 'RESULTS', 'DISCUSSION'][c - 1]!;
+    lines.push(`\fChapter ${c}. ${title}`, '', para(c * 10, 7), '');
+    page++;
+    for (let p = 0; p < 6; p++) {
+      const head = p % 2 === 0 ? `${title} ${page}` : `${page} THE BOOK`;
+      lines.push(`\f${head}`, '', para(c * 10 + p + 1, 7), '');
+      page++;
+    }
+  }
+  return lines.join('\n');
+}
+
+/** A book whose every page opens with a different line: prose, or a running head naming the section. */
+function proseTopBook(): string {
+  const lines: string[] = ['ANOTHER BOOK', '', 'CONTENTS', '', '1. Alpha', '2. Beta', '3. Gamma', ''];
+  const heads = ['Alpha', 'Beta', 'Gamma'];
+  for (let c = 1; c <= 3; c++) {
+    lines.push(`\fChapter ${c}. ${heads[c - 1]}`, '', para(c * 3, 6), '');
+    for (let p = 0; p < 9; p++) lines.push(`\f${para(c * 100 + p, 7)}`, '');
+  }
+  return lines.join('\n');
+}
+
+describe('seg/1 on the newer extractor shape: running headers at every page top', () => {
+  it('never opens an entry on a running header, and strips the page number from a page-top title', () => {
+    const r = segment(pagedBook());
+    expect(r.documentClass).toBe('book');
+    const t = titles(r);
+    expect(t).toContain('Chapter 1. INTRODUCTION');
+    expect(t).toContain('Chapter 4. DISCUSSION');
+    expect(t.filter((x) => x !== null && /\d+ THE BOOK$|INTRODUCTION \d+$/.test(x))).toHaveLength(0);
+    // preface + 4 chapters + front matter
+    expect(r.entries.length).toBeLessThanOrEqual(6);
+  });
+
+  it('keeps a book whose pages open with prose a book, not a collection', () => {
+    const r = segment(proseTopBook());
+    expect(r.documentClass).toBe('book');
+    expect(titles(r)).toContain('Chapter 2. Beta');
+  });
+});
+
 describe('seg/1 below the confidence gate', () => {
   const text = unstructured();
   const r = segment(text);

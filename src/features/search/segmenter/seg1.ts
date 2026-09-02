@@ -130,8 +130,15 @@ export function normalizeHeading(s: string): string {
   let t = s.normalize('NFKD').replace(/\p{M}+/gu, '').toLowerCase();
   t = t.replace(/^\s*(?:(?:chapter|chapitre|kapitel|capitulo|capitolo|part|partie)\s+)?[\divxlc]+(?:[.)\-–]|\s)+/u, '');
   t = t.replace(/[\s.·]{3,}[\divxlc]*\s*$/u, '');
+  // A running header carries its page number: "Introduction 7", "7 Introduction".
+  t = t.replace(/\s+\d{1,4}$/u, '').replace(/^\d{1,4}\s+(?=\p{L})/u, '');
   t = t.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
   return t;
+}
+
+/** A page-top line stripped of a leading or trailing page number, for use as a title. */
+function stripPageNumber(s: string): string {
+  return s.replace(/\s+\d{1,4}$/u, '').replace(/^\d{1,4}\s+(?=\p{L})/u, '').trim();
 }
 
 /**
@@ -360,12 +367,21 @@ class Seg1 implements StreamingSegmenter {
     if (this.lastLineBlank) this.paragraphBoundary(off);
     this.lastLineBlank = false;
 
-    if (this.pendingHeaderAt >= 0) {
+    const pageFirst = this.pendingHeaderAt >= 0;
+    let runningHeader = false;
+    if (pageFirst) {
       // The first line of a page is its running header, or the heading that opens it.
+      // A running header repeats the previous pages' header, page number aside; that
+      // line is never a heading candidate, or every page would open an entry.
       if (trimmed.length <= 120 && this.pageHeaderAt.length < 200_000) {
+        const norm = normalizeHeader(trimmed);
+        const n = this.pageHeaderNorm.length;
+        for (let k = Math.max(0, n - 3); k < n; k++) {
+          if (norm.length >= 3 && this.pageHeaderNorm[k] === norm) runningHeader = true;
+        }
         this.pageHeaderAt.push(this.pendingHeaderAt);
         this.pageHeaderText.push(trimmed);
-        this.pageHeaderNorm.push(normalizeHeader(trimmed));
+        this.pageHeaderNorm.push(norm);
       }
       this.pendingHeaderAt = -1;
     }
@@ -403,7 +419,8 @@ class Seg1 implements StreamingSegmenter {
 
     if (trimmed.length > MAX_LINE) return;
     if (digitRatio(trimmed) > 0.4) return;
-    this.classify(trimmed, off);
+    if (runningHeader) return;
+    this.classify(pageFirst ? stripPageNumber(trimmed) : trimmed, off);
   }
 
   private paragraphBoundary(offset: number): void {
@@ -719,6 +736,17 @@ class Seg1 implements StreamingSegmenter {
    */
   private pageHeaderDrift(): Cut[] {
     if (this.formFeeds.length < 20) return [];
+    // A collection's units span pages under one header, so most pages repeat the header of
+    // a neighbour. A book whose every page opens with a different line, a running head that
+    // names the section or simply the first line of prose, has no such persistence, and its
+    // page-top lines are not unit boundaries.
+    const n = this.pageHeaderNorm.length;
+    let persistent = 0;
+    for (let i = 1; i < n; i++) {
+      const norm = this.pageHeaderNorm[i]!;
+      if (norm.length >= 3 && (norm === this.pageHeaderNorm[i - 1] || norm === this.pageHeaderNorm[i - 2])) persistent++;
+    }
+    if (n < 20 || persistent / (n - 1) < 0.5) return [];
     const cuts: Cut[] = [];
     const recent: string[] = [];
     const seenTitles = new Set<string>();
