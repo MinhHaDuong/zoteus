@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
+import { INCUMBENT_LOCAL_ENTRY } from './embedder-registry.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 
 export interface EmbeddingProvider {
@@ -183,7 +184,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   static readonly BATCH_SIZE = DEFAULT_EMBED_BATCH_SIZE;
   private extractor: any;
   constructor(
-    readonly model = 'Xenova/all-MiniLM-L6-v2',
+    /** Defaults to the registry's incumbent entry; see embedder-registry.ts. */
+    readonly model = INCUMBENT_LOCAL_ENTRY.model,
     /** Injectable extractor factory (tests); defaults to the transformers.js pipeline. */
     private readonly loadExtractor?: () => Promise<any>,
     private readonly opts: {
@@ -255,7 +257,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += size) {
       const batch = texts.slice(i, i + size);
-      const tensor = await extractor(batch, { pooling: 'mean', normalize: true });
+      // Pooling and normalization are not call-site taste: they are properties of the
+      // model, published in its own configuration, and a wrong pooling mode produces
+      // vectors that load and rank and are quietly worse. They come from the entry.
+      const tensor = await extractor(batch, {
+        pooling: INCUMBENT_LOCAL_ENTRY.pooling,
+        normalize: INCUMBENT_LOCAL_ENTRY.normalize,
+      });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
       const dim = dims && dims.length > 1 ? dims[dims.length - 1]! : data.length / batch.length;
