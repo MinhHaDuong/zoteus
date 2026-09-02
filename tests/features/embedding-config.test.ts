@@ -360,6 +360,15 @@ describe('the pause between embedding batches', () => {
     ]);
     expect(delays.filter((d) => d === 42)).toHaveLength(1); // between the two requests, not after the last
   });
+
+  it('paces two role-specific calls as two API requests', async () => {
+    const delays = recordDelays();
+    captureEmbeddingRequests();
+    const provider = new ApiEmbeddingProvider('openai', 'key', { batchDelayMs: 43 });
+    await provider.embed(['query']);
+    await provider.embed(['passage']);
+    expect(delays.filter((d) => d === 43)).toHaveLength(1);
+  });
 });
 
 describe('vectors built with another model are not queried with this one', () => {
@@ -387,6 +396,16 @@ describe('vectors built with another model are not queried with this one', () =>
       configured: 'openai',
       logger: silentLogger,
     });
+  }
+
+  function localEntry(id: string, fingerprint: string): EmbeddingProvider {
+    return {
+      name: 'local',
+      model: 'same/repository',
+      entryId: id,
+      vectorFingerprint: fingerprint,
+      embed: async (texts) => texts.map(() => [1, 0, 0]),
+    } as EmbeddingProvider;
   }
 
   it('persists the embedder identity with the vectors', async () => {
@@ -419,6 +438,16 @@ describe('vectors built with another model are not queried with this one', () =>
 
     expect(search.buildStatus().vectors).toBe(saved.vectors.length);
     expect(search.buildStatus().vectorsStaleReason).toBeUndefined();
+  });
+
+  it('invalidates memory vectors when only the local entry fingerprint changes', async () => {
+    const built = new MemorySearchIndex({ embedder: localEntry('model-fp32', 'aaa') });
+    await built.build(items);
+    const saved = JSON.parse(JSON.stringify(built.toJSON()));
+    const switched = new MemorySearchIndex({ embedder: localEntry('model-q8', 'bbb') });
+    switched.loadFromJSON(saved);
+    expect(switched.buildStatus().vectors).toBe(0);
+    expect(switched.buildStatus().vectorsStaleReason).toContain('registry-vbbb');
   });
 
   it('keeps them for an index file written before the identity was persisted', async () => {

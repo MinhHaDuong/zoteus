@@ -150,7 +150,7 @@ export interface SearchIndexStatus {
   embedder: string;
   /** The requested ZOTEUS_EMBEDDINGS value, whether or not it works. */
   embedderConfigured: string;
-  /** Model the active embedder uses, when it names one (ZOTEUS_EMBEDDING_MODEL). */
+  /** Curated local entry id, or API model name (ZOTEUS_EMBEDDING_MODEL). */
   embedderModel?: string;
   /** True only while the configured provider is genuinely producing vectors. */
   embedderActive: boolean;

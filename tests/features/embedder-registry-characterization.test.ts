@@ -69,7 +69,6 @@ describe('incumbent local embedder: the registry entry', () => {
       id: 'minilm-l6-v2',
       model: 'Xenova/all-MiniLM-L6-v2',
       revision: '751bff37182d3f1213fa05d7196b954e230abad9',
-      device: 'cpu',
       dtype: 'fp32',
       graphFile: 'onnx/model.onnx',
       pooling: 'mean',
@@ -102,7 +101,6 @@ describe('incumbent local embedder: the registry entry', () => {
     expect([...APPLIED_FIELDS]).toEqual([
       'model',
       'revision',
-      'device',
       'dtype',
       'graphFile',
       'pooling',
@@ -171,7 +169,12 @@ module.exports = { env, pipeline, pipelineArgs, extractorOptions };
       [
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2',
-        { revision: '751bff37182d3f1213fa05d7196b954e230abad9', device: 'cpu', dtype: 'fp32' },
+      {
+        revision: '751bff37182d3f1213fa05d7196b954e230abad9',
+        dtype: 'fp32',
+        subfolder: 'onnx',
+        model_file_name: 'model',
+      },
       ],
     ]);
   });

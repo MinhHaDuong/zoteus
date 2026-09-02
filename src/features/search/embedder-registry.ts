@@ -26,13 +26,10 @@ import { createHash } from 'node:crypto';
 export const EMBEDDER_REGISTRY_VERSION = 1;
 
 /** Pooling strategies @huggingface/transformers exposes for feature extraction. */
-export type EmbedderPooling = 'none' | 'mean' | 'cls' | 'last_token';
+export type EmbedderPooling = 'mean' | 'cls' | 'last_token';
 
 /** Numeric type of the ONNX graph that is loaded. */
 export type EmbedderDtype = 'fp32' | 'fp16' | 'q8' | 'int8' | 'uint8' | 'q4' | 'q4f16' | 'bnb4';
-
-/** Execution provider the graph runs on. */
-export type EmbedderDevice = 'cpu' | 'wasm' | 'webgpu';
 
 /** Prefixes an embedder wants in front of a query and in front of a passage. */
 export interface EmbedderTemplate {
@@ -48,8 +45,6 @@ export interface EmbedderEntry {
   readonly model: string;
   /** Revision of that repository. */
   readonly revision: string;
-  /** Execution provider. */
-  readonly device: EmbedderDevice;
   /** Numeric type of the graph. */
   readonly dtype: EmbedderDtype;
   /** Graph file that {@link dtype} selects inside the repository. */
@@ -60,7 +55,7 @@ export interface EmbedderEntry {
   readonly normalize: boolean;
   /** Prefixes the text carries. Empty strings mean none, which is a fact, not a default. */
   readonly template: EmbedderTemplate;
-  /** Tokens the model is meant to see. */
+  /** Exact tokenizer truncation cap the runtime must report. */
   readonly windowTokens: number;
   /** Width of the vector. */
   readonly dimension: number;
@@ -71,7 +66,6 @@ export interface EmbedderEntry {
 const VECTOR_FIELDS = [
   'model',
   'revision',
-  'device',
   'dtype',
   'graphFile',
   'pooling',
@@ -81,7 +75,6 @@ const VECTOR_FIELDS = [
   'dimension',
 ] as const;
 const ENTRY_FIELDS = ['id', ...VECTOR_FIELDS, 'sources'] as const;
-const DEVICES: readonly EmbedderDevice[] = ['cpu', 'wasm', 'webgpu'];
 const DTYPES: readonly EmbedderDtype[] = [
   'fp32',
   'fp16',
@@ -110,7 +103,6 @@ export function entryFingerprint(entry: EmbedderEntry): string {
     version: EMBEDDER_REGISTRY_VERSION,
     model: entry.model,
     revision: entry.revision,
-    device: entry.device,
     dtype: entry.dtype,
     graphFile: entry.graphFile,
     pooling: entry.pooling,
@@ -124,7 +116,7 @@ export function entryFingerprint(entry: EmbedderEntry): string {
 
 /** Frozen digest of the exact chain that historically persisted as local:<model>. */
 export const LEGACY_INCUMBENT_FINGERPRINT =
-  '7f4772a04b6cc79bbcd93f8772db5271f997927e97cb30911cb6e738d7373f6d';
+  '098eda2e37ba648b3a022a2a87f37f343b46b24812c24a73317b4e709971ee50';
 
 /** Runtime boundary for registry data: incomplete or widened records fail before model I/O. */
 export function parseEmbedderEntry(value: unknown): EmbedderEntry {
@@ -138,14 +130,14 @@ export function parseEmbedderEntry(value: unknown): EmbedderEntry {
     throw new Error(`Embedder entry has unknown field(s): ${unknown.join(', ')}.`);
   for (const key of ENTRY_FIELDS)
     if (!(key in row)) throw new Error(`Embedder entry is missing ${key}.`);
-  const strings = ['id', 'model', 'revision', 'device', 'dtype', 'graphFile', 'pooling'] as const;
+  const strings = ['id', 'model', 'revision', 'dtype', 'graphFile', 'pooling'] as const;
   for (const key of strings)
     if (typeof row[key] !== 'string' || !(row[key] as string))
       throw new Error(`Embedder entry ${key} must be a non-empty string.`);
   if (typeof row.normalize !== 'boolean')
     throw new Error('Embedder entry normalize must be boolean.');
-  if (!DEVICES.includes(row.device as EmbedderDevice))
-    throw new Error(`Embedder entry has unsupported device ${row.device}.`);
+  if (!/^[0-9a-f]{40}$/.test(row.revision as string))
+    throw new Error('Embedder entry revision must be a pinned 40-character commit SHA.');
   if (!DTYPES.includes(row.dtype as EmbedderDtype))
     throw new Error(`Embedder entry has unsupported dtype ${row.dtype}.`);
   if (!POOLINGS.includes(row.pooling as EmbedderPooling))
@@ -186,7 +178,6 @@ export function parseEmbedderEntry(value: unknown): EmbedderEntry {
     id: row.id,
     model: row.model,
     revision: row.revision,
-    device: row.device,
     dtype: row.dtype,
     graphFile: row.graphFile,
     pooling: row.pooling,
@@ -220,7 +211,6 @@ export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = parseEmbedderEntry({
   id: 'minilm-l6-v2',
   model: 'Xenova/all-MiniLM-L6-v2',
   revision: '751bff37182d3f1213fa05d7196b954e230abad9',
-  device: 'cpu',
   dtype: 'fp32',
   graphFile: 'onnx/model.onnx',
   pooling: 'mean',
@@ -233,9 +223,6 @@ export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = parseEmbedderEntry({
     revision:
       'Xenova/all-MiniLM-L6-v2 repository commit characterized on 2026-09-02; pinned so a later ' +
       'change to main cannot silently move vectors under the same entry',
-    device:
-      "DEFAULT_DEVICE in @huggingface/transformers 4.2.0 src/utils/devices.js: 'cpu' under Node, " +
-      "'wasm' elsewhere",
     dtype:
       'DEFAULT_DEVICE_DTYPE in the same package historically selected fp32 under Node; the registry now pins it',
     graphFile: 'DEFAULT_DTYPE_SUFFIX_MAPPING gives fp32 the empty suffix, i.e. onnx/model.onnx',
@@ -328,18 +315,16 @@ const measuredEntries = CANDIDATES.flatMap((candidate) =>
     parseEmbedderEntry({
       ...candidate,
       id: `${candidate.id}-${dtype}`,
-      device: 'cpu',
       dtype,
       graphFile: GRAPH_BY_DTYPE[dtype],
-      sources: Object.fromEntries(
-        VECTOR_FIELDS.map((field) => [
-          field,
-          'Pinned from the benchmark registry and the model repository configuration used by the measured CPU cell.',
-        ]),
-      ),
+      sources: Object.fromEntries(VECTOR_FIELDS.map((field) => [field,
+        field === 'windowTokens'
+          ? 'tokenizer_config.json model_max_length in the cached repository revision, verified with Transformers.js 4.2.0'
+          : 'bench/models.json and the model repository configuration used by the measured CPU cell',
+      ])),
     }),
   ),
-);
+).filter((entry) => entry.id !== 'granite-97m-multilingual-r2-q8');
 
 /** Unchanged default plus every model/dtype combination measured on CPU. */
 export const EMBEDDER_ENTRIES: Readonly<Record<string, EmbedderEntry>> = Object.freeze(
