@@ -263,7 +263,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     if (this.extractor) return this.extractor;
     if (this.loadExtractor) {
       this.extractor = await this.loadExtractor();
-      this.assertTokenizerWindow(this.extractor);
+      this.configureTokenizerWindow(this.extractor);
       return this.extractor;
     }
     const specifier = resolveTransformers(this.opts.transformersPath);
@@ -310,18 +310,36 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     if (!this.extractor.tokenizer) {
       throw new Error(`Local embedder ${this.entry.id} loaded without an addressable tokenizer.`);
     }
-    this.assertTokenizerWindow(this.extractor);
+    this.configureTokenizerWindow(this.extractor);
     return this.extractor;
   }
 
-  private assertTokenizerWindow(extractor: any): void {
-    const actual = extractor.tokenizer?.model_max_length;
-    if (actual !== this.entry.windowTokens) {
+  private configureTokenizerWindow(extractor: any): void {
+    const tokenizer = extractor.tokenizer;
+    const available = tokenizer?.model_max_length;
+    if (typeof available !== 'number' || available < this.entry.windowTokens) {
       throw new Error(
-        `Local embedder ${this.entry.id} tokenizer window is ${String(actual)}; ` +
-          `the pinned registry entry requires ${this.entry.windowTokens}.`,
+        `Local embedder ${this.entry.id} tokenizer window is ${String(available)}; ` +
+          `the registry entry requires capacity for ${this.entry.windowTokens}.`,
       );
     }
+    if (typeof tokenizer !== 'function') {
+      if (available !== this.entry.windowTokens) {
+        throw new Error(`Local embedder ${this.entry.id} cannot apply the registry tokenizer window.`);
+      }
+      return;
+    }
+    const cap = this.entry.windowTokens;
+    extractor.tokenizer = new Proxy(tokenizer, {
+      apply(target, thisArg, args: [unknown, Record<string, unknown>?]) {
+        const [texts, options = {}] = args;
+        return Reflect.apply(target, thisArg, [texts, { ...options, max_length: cap }]);
+      },
+      get(target, property, receiver) {
+        if (property === 'model_max_length') return cap;
+        return Reflect.get(target, property, receiver);
+      },
+    });
   }
 
   /**

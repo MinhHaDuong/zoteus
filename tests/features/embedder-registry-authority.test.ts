@@ -111,8 +111,28 @@ describe('authoritative embedder records', () => {
       { ...INCUMBENT_LOCAL_ENTRY, windowTokens: 17 },
       async () => extractor,
     );
-    await expect(provider.embed(['x'])).rejects.toThrow(/tokenizer window.*999.*17/i);
+    await expect(provider.embed(['x'])).rejects.toThrow(/cannot apply.*tokenizer window/i);
     expect(extractor).not.toHaveBeenCalled();
+  });
+
+  it('applies a smaller registry tokenizer cap to preprocessing', async () => {
+    const tokenizer = vi.fn(() => ({}));
+    Object.defineProperty(tokenizer, 'model_max_length', { value: 512 });
+    const extractor: any = vi.fn(async (texts: string[]) => {
+      extractor.tokenizer(texts, { padding: true, truncation: true });
+      return { data: new Float32Array(4), dims: [1, 4] };
+    });
+    extractor.tokenizer = tokenizer;
+    const provider = new LocalEmbeddingProvider(
+      { ...INCUMBENT_LOCAL_ENTRY, windowTokens: 17, dimension: 4 },
+      async () => extractor,
+    );
+    await provider.embed(['a deliberately long input']);
+    expect(tokenizer).toHaveBeenCalledWith(expect.anything(), {
+      padding: true,
+      truncation: true,
+      max_length: 17,
+    });
   });
 
   it('fails when the runtime emits the wrong dimension', async () => {

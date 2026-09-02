@@ -644,8 +644,9 @@ behaviour:
 Unset local configuration preserves the existing `minilm-l6-v2` chain. The measured
 multilingual entries are the six base ids `granite-97m-multilingual-r2`,
 `granite-311m-multilingual-r2`, `arctic-embed-m-v2`, `gte-multilingual-base`,
-`multilingual-e5-small`, and `multilingual-e5-base`, each suffixed with `-fp32`, `-q8`,
-or `-uint8`. For example:
+`multilingual-e5-small`, and `multilingual-e5-base`, suffixed with `-fp32`, `-q8`,
+or `-uint8`. The evidence-rejected `granite-97m-multilingual-r2-q8` combination is not
+selectable. For example:
 
 ```bash
 ZOTEUS_EMBEDDINGS=local

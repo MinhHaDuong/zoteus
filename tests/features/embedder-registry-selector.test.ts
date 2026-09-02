@@ -24,7 +24,7 @@ beforeAll(() => {
 afterAll(() => rmSync(runtimeRoot, { recursive: true, force: true }));
 
 describe('curated local embedder selector', () => {
-  it('contains the incumbent plus every measured CPU candidate/rung', () => {
+  it('contains measured CPU candidates except the evidence-rejected cell', () => {
     expect(Object.keys(EMBEDDER_ENTRIES)).toHaveLength(18);
     expect(EMBEDDER_ENTRIES['minilm-l6-v2']).toEqual(INCUMBENT_LOCAL_ENTRY);
     expect(EMBEDDER_ENTRIES['multilingual-e5-small-q8']).toMatchObject({
