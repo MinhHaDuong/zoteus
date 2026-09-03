@@ -92,6 +92,22 @@ export interface ZoteusConfig {
   dist?: string;
   allowInsecureHttp: boolean;
   metricsEnabled: boolean;
+  /** Bearer token demanded by /metrics and /usage.json; unset leaves both open. */
+  metricsToken?: string;
+  /**
+   * The usage log: one row per tool call and request in `<dataDir>/usage.sqlite`.
+   *
+   * Off unless asked for, and it never leaves the machine that wrote it. Zoteus is mostly
+   * a local desktop server and PRIVACY.md promises no analytics; an operator running a
+   * shared instance is a different case, and this is how they opt in.
+   */
+  usage: {
+    enabled: boolean;
+    /** Days of raw events kept. Daily rollups are kept regardless. */
+    retentionDays: number;
+    /** Whether a caller is recorded as their Zotero id, a salted hash of it, or not at all. */
+    identify: 'user' | 'hash' | 'none';
+  };
   readyzCheckZotero: boolean;
   mcpRateLimit: { windowMs: number; max: number };
   oauth: {
@@ -158,14 +174,16 @@ const knob = <T extends z.ZodTypeAny>(key: string, schema: T, into: Rejections) 
     // load rather than on the first person to mistype that field.
     throw new Error(`${key} must accept an absent variable: give it .default() or .optional()`);
   }
-  return z.preprocess((v) => (isUnset(v) ? undefined : v), schema).catch((ctx) => {
-    into.rejected.add(key);
-    into.warnings.push(
-      `${key}=${JSON.stringify(ctx.input)} is not usable, ` +
-        (absent.data === undefined ? 'ignoring it' : `using ${JSON.stringify(absent.data)}`),
-    );
-    return absent.data as z.output<T>;
-  });
+  return z
+    .preprocess((v) => (isUnset(v) ? undefined : v), schema)
+    .catch((ctx) => {
+      into.rejected.add(key);
+      into.warnings.push(
+        `${key}=${JSON.stringify(ctx.input)} is not usable, ` +
+          (absent.data === undefined ? 'ignoring it' : `using ${JSON.stringify(absent.data)}`),
+      );
+      return absent.data as z.output<T>;
+    });
 };
 
 /**
@@ -234,8 +252,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         // flipping it never needs a rebuild.
         ZOTEUS_ACCENT_EXPANSION: bool(true),
         ZOTEUS_INDEX_ANN: bool(true),
-        ZOTEUS_INDEX_ANN_OVERSAMPLE: z.coerce.number().int().positive().default(DEFAULT_ANN_OVERSAMPLE),
-        ZOTEUS_INDEX_ANN_MIN_CANDIDATES: z.coerce.number().int().positive().default(DEFAULT_ANN_MIN_CANDIDATES),
+        ZOTEUS_INDEX_ANN_OVERSAMPLE: z.coerce
+          .number()
+          .int()
+          .positive()
+          .default(DEFAULT_ANN_OVERSAMPLE),
+        ZOTEUS_INDEX_ANN_MIN_CANDIDATES: z.coerce
+          .number()
+          .int()
+          .positive()
+          .default(DEFAULT_ANN_MIN_CANDIDATES),
         ZOTEUS_SCHOLAR_PROVIDERS: z.string().default('openalex'),
         ZOTEUS_DATA_DIR: z.string().min(1).optional(),
         ZOTERO_DATA_DIR: z.string().min(1).optional(),
@@ -248,6 +274,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_DIST: z.string().min(1).optional(),
         ZOTEUS_ALLOW_INSECURE_HTTP: bool(false),
         ZOTEUS_METRICS_ENABLED: bool(false),
+        ZOTEUS_METRICS_TOKEN: z.string().min(1).optional(),
+        ZOTEUS_USAGE_LOG: bool(false),
+        ZOTEUS_USAGE_RETENTION_DAYS: z.coerce.number().int().positive().default(30),
+        ZOTEUS_USAGE_IDENTIFY: z.enum(['user', 'hash', 'none']).default('user'),
         ZOTEUS_READYZ_CHECK_ZOTERO: bool(true),
         ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC: z.coerce.number().int().nonnegative().default(60),
         ZOTEUS_MCP_RATE_LIMIT_MAX: z.coerce.number().int().nonnegative().default(120),
@@ -295,10 +325,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     throw new Error(`${key}=${JSON.stringify(env[key])} is not usable: ${why}${detail}`);
   };
   if (rejected.has('ZOTERO_LIBRARY_TYPE')) {
-    refuse('ZOTERO_LIBRARY_TYPE', 'refusing to guess whether to read and write a personal or a group library');
+    refuse(
+      'ZOTERO_LIBRARY_TYPE',
+      'refusing to guess whether to read and write a personal or a group library',
+    );
   }
   if (rejected.has('ZOTERO_LIBRARY_ID')) {
-    refuse('ZOTERO_LIBRARY_ID', 'refusing to fall back to whichever library the API key belongs to');
+    refuse(
+      'ZOTERO_LIBRARY_ID',
+      'refusing to fall back to whichever library the API key belongs to',
+    );
   }
 
   const oauthEnabled = parsed.ZOTEUS_OAUTH_ENABLED;
@@ -307,10 +343,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   const store = parsed.ZOTEUS_OAUTH_STORE;
   if (oauthEnabled) {
     if (rejected.has('ZOTEUS_OAUTH_MODE')) {
-      refuse('ZOTEUS_OAUTH_MODE', 'refusing to fall back to shared-passcode auth, which would serve every client from the operator\'s own Zotero key');
+      refuse(
+        'ZOTEUS_OAUTH_MODE',
+        "refusing to fall back to shared-passcode auth, which would serve every client from the operator's own Zotero key",
+      );
     }
     if (rejected.has('ZOTEUS_OAUTH_STORE')) {
-      refuse('ZOTEUS_OAUTH_STORE', 'refusing to fall back to in-memory tokens, which would skip the encryption key that file storage requires');
+      refuse(
+        'ZOTEUS_OAUTH_STORE',
+        'refusing to fall back to in-memory tokens, which would skip the encryption key that file storage requires',
+      );
     }
     if (!publicUrl) {
       if (rejected.has('ZOTEUS_PUBLIC_URL')) {
@@ -320,7 +362,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     }
     if (mode === 'passcode') {
       if (!parsed.ZOTEUS_OAUTH_PASSCODE) {
-        throw new Error('ZOTEUS_OAUTH_PASSCODE is required when ZOTEUS_OAUTH_ENABLED=true (passcode mode)');
+        throw new Error(
+          'ZOTEUS_OAUTH_PASSCODE is required when ZOTEUS_OAUTH_ENABLED=true (passcode mode)',
+        );
       }
       if (parsed.ZOTEUS_OAUTH_PASSCODE.length < MIN_PASSCODE_LENGTH) {
         throw new Error(
@@ -346,13 +390,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   // wrote into no restriction at all. Blank stays legal, because blank is how it is spelled
   // deliberately.
   if (parsed.ZOTEUS_CIMD_ENABLED && looksUnexpanded(env.ZOTEUS_CIMD_ALLOWED_HOSTS)) {
-    refuse('ZOTEUS_CIMD_ALLOWED_HOSTS', 'it looks like a reference that was never expanded, and an empty host list means no restriction at all');
+    refuse(
+      'ZOTEUS_CIMD_ALLOWED_HOSTS',
+      'it looks like a reference that was never expanded, and an empty host list means no restriction at all',
+    );
   }
 
   // #43 asked for a separate ZOTEUS_LOCAL_EMBEDDING_MODEL, and the answer was the knob that
   // already exists. Saying so is the point: a variable nothing reads is otherwise a setting
   // that appears to work and changes nothing.
-  if (env.ZOTEUS_LOCAL_EMBEDDING_MODEL !== undefined && !isUnset(env.ZOTEUS_LOCAL_EMBEDDING_MODEL)) {
+  if (
+    env.ZOTEUS_LOCAL_EMBEDDING_MODEL !== undefined &&
+    !isUnset(env.ZOTEUS_LOCAL_EMBEDDING_MODEL)
+  ) {
     warnings.push(
       'ZOTEUS_LOCAL_EMBEDDING_MODEL is not a Zoteus setting and is ignored; ZOTEUS_EMBEDDING_MODEL ' +
         'names the model of whichever ZOTEUS_EMBEDDINGS provider is active, local included',
@@ -432,6 +482,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     dist: parsed.ZOTEUS_DIST,
     allowInsecureHttp: parsed.ZOTEUS_ALLOW_INSECURE_HTTP,
     metricsEnabled: parsed.ZOTEUS_METRICS_ENABLED,
+    metricsToken: parsed.ZOTEUS_METRICS_TOKEN,
+    usage: {
+      enabled: parsed.ZOTEUS_USAGE_LOG,
+      retentionDays: parsed.ZOTEUS_USAGE_RETENTION_DAYS,
+      identify: parsed.ZOTEUS_USAGE_IDENTIFY,
+    },
     readyzCheckZotero: parsed.ZOTEUS_READYZ_CHECK_ZOTERO,
     mcpRateLimit: {
       windowMs: parsed.ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC * 1000,

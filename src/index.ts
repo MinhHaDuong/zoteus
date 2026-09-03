@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 import { loadConfig } from './config.js';
-import { buildServer, createServer, createDeferredServer, toolSelectionNotice, ContextCache } from './server.js';
+import {
+  buildContext,
+  buildServer,
+  createServer,
+  createDeferredServer,
+  toolSelectionNotice,
+  ContextCache,
+  type Telemetry,
+} from './server.js';
 import { startStdio } from './transports/stdio.js';
 import { startHttp } from './transports/http.js';
 import { buildOAuth } from './auth/router.js';
@@ -8,8 +16,10 @@ import { createLogger } from './lib/logger.js';
 import { createMetrics } from './lib/metrics.js';
 import { makeReadiness, storeCheck, zoteroPingCheck } from './lib/health.js';
 import { installShutdownHandlers } from './lib/lifecycle.js';
+import { openUsage } from './lib/usage/index.js';
 import type { ToolContext } from './registry/registry.js';
 import type { Server } from 'node:http';
+import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
 function flag(name: string): string | undefined {
@@ -30,16 +40,45 @@ async function main(): Promise<void> {
   // setting it could not use must not be the reason the server never starts (#18).
   for (const warning of config.warnings) logger.warn(`Configuration: ${warning}`);
 
+  // Opened before anything is built, so a context can be handed the recorder rather than
+  // reaching for a global, and so the first request is already being counted.
+  const usage = await openUsage({
+    enabled: config.usage.enabled,
+    path: join(config.dataDir, 'usage.sqlite'),
+    retentionDays: config.usage.retentionDays,
+    identify: config.usage.identify,
+    logger,
+  });
+
   const httpFlag = flag('http');
   if (httpFlag !== undefined) {
-    const { ctx } = await buildServer(config);
     const port = Number(flag('port') ?? process.env.PORT ?? 3939);
     const metrics = config.metricsEnabled ? createMetrics() : undefined;
+    const telemetry: Telemetry = { metrics, usage: usage?.recorder };
+    const { ctx } = await buildServer(config, telemetry);
     const oauth = await buildOAuth(config, {
-      onEvent: metrics ? (e) => metrics.inc(`${e === 'token_issued' ? 'tokens_issued' : 'auth_failures'}_total`) : undefined,
+      onEvent: (e) => {
+        metrics?.inc(`${e === 'token_issued' ? 'tokens_issued' : 'auth_failures'}_total`);
+        // The funnel an operator actually wants: how many people reached the gate, how
+        // many got a token, how many then called a tool. Carries no identity of its own —
+        // the auth layer knows who only after the step that succeeds.
+        usage?.recorder.record({
+          ts: Date.now(),
+          kind: 'auth',
+          name: e,
+          ok: e === 'token_issued',
+          ms: 0,
+        });
+      },
     });
     const host = flag('host') ?? process.env.HOST ?? (oauth ? '0.0.0.0' : '127.0.0.1');
-    const cache = new ContextCache(config, ctx);
+    if (metrics && oauth && !config.metricsToken) {
+      logger.warn(
+        'ZOTEUS_METRICS_ENABLED is on with OAuth (a reachable deployment) and no ZOTEUS_METRICS_TOKEN, ' +
+          'so /metrics is readable by anyone who can reach this server. Set a token, or block the path at your proxy.',
+      );
+    }
+    const cache = new ContextCache(config, ctx, 50, telemetry);
     const readiness = makeReadiness(
       {
         store: storeCheck(oauth?.store),
@@ -48,23 +87,31 @@ async function main(): Promise<void> {
       30_000,
     );
 
-    let lifecycle: { drainSessions: (ms: number) => Promise<void>; activeSessions: () => number } | undefined;
-    const httpServer: Server = await startHttp(async (authInfo) => createServer(await cache.resolve(authInfo)), {
-      port,
-      host,
-      logger,
-      oauth,
-      metrics,
-      readiness,
-      version: VERSION,
-      rateLimit: config.mcpRateLimit,
-      enableDnsRebindingProtection: Boolean(oauth),
-      allowedHosts: oauth?.allowedHosts,
-      allowInsecureBind: config.allowInsecureHttp,
-      registerLifecycle: (h) => {
-        lifecycle = h;
+    let lifecycle:
+      | { drainSessions: (ms: number) => Promise<void>; activeSessions: () => number }
+      | undefined;
+    const httpServer: Server = await startHttp(
+      async (authInfo) => createServer(await cache.resolve(authInfo)),
+      {
+        port,
+        host,
+        logger,
+        oauth,
+        metrics,
+        usage: usage?.recorder,
+        usageRollups: usage ? (from?: string) => usage.store.dailyRows(from) : undefined,
+        metricsToken: config.metricsToken,
+        readiness,
+        version: VERSION,
+        rateLimit: config.mcpRateLimit,
+        enableDnsRebindingProtection: Boolean(oauth),
+        allowedHosts: oauth?.allowedHosts,
+        allowInsecureBind: config.allowInsecureHttp,
+        registerLifecycle: (h) => {
+          lifecycle = h;
+        },
       },
-    });
+    );
 
     installShutdownHandlers({
       server: httpServer,
@@ -74,6 +121,8 @@ async function main(): Promise<void> {
       flush: async () => {
         await oauth?.store.flush();
         await cache.flushIndexes();
+        usage?.stop();
+        await usage?.recorder.close();
       },
     });
   } else {
@@ -83,7 +132,9 @@ async function main(): Promise<void> {
     // Desktop's shared Cowork/Code pool allows well under a second before it tears the
     // server down (#18). Tool calls await the build, so none of them sees a half-built
     // context; only the handshake stops waiting on it.
-    const { server, context } = createDeferredServer(config);
+    const { server, context } = createDeferredServer(config, () =>
+      buildContext(config, { telemetry: { usage: usage?.recorder } }),
+    );
     // Held for the shutdown flush, and only once the build has succeeded: a session that
     // ends before then has nothing of its own to write, and must not start a build on its
     // way out.
@@ -91,11 +142,17 @@ async function main(): Promise<void> {
     await startStdio(server, {
       logger,
       flush: async () => {
+        usage?.stop();
+        await usage?.recorder.close();
         if (!built) return;
         // save() can refuse (an index whose store never opened); close() is what
         // checkpoints the write-ahead log, so it runs either way.
-        await built.search.save().catch((e) => logger.debug(`Index save on shutdown: ${message(e)}`));
-        await built.search.close().catch((e) => logger.debug(`Index close on shutdown: ${message(e)}`));
+        await built.search
+          .save()
+          .catch((e) => logger.debug(`Index save on shutdown: ${message(e)}`));
+        await built.search
+          .close()
+          .catch((e) => logger.debug(`Index close on shutdown: ${message(e)}`));
       },
     });
     logger.info('Zoteus MCP server started on stdio.');

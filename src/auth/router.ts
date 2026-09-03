@@ -1,9 +1,12 @@
 import express, { type Express } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { join } from 'node:path';
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js';
+import {
+  mcpAuthRouter,
+  getOAuthProtectedResourceMetadataUrl,
+} from '@modelcontextprotocol/sdk/server/auth/router.js';
 import type { ZoteusConfig } from '../config.js';
-import { ZoteusOAuthProvider } from './provider.js';
+import { ZoteusOAuthProvider, type AuthEvent } from './provider.js';
 import { MemoryStore, FileStore, type OAuthStore } from './store.js';
 
 export interface BuiltOAuth {
@@ -20,7 +23,7 @@ export interface BuiltOAuth {
 /** Build the OAuth subsystem from config, or undefined when OAuth is disabled. */
 export async function buildOAuth(
   config: ZoteusConfig,
-  hooks: { onEvent?: (e: 'token_issued' | 'auth_failed') => void } = {},
+  hooks: { onEvent?: (e: AuthEvent) => void } = {},
 ): Promise<BuiltOAuth | undefined> {
   if (!config.oauth.enabled) return undefined;
   if (!config.oauth.publicUrl) {
@@ -35,7 +38,10 @@ export async function buildOAuth(
   let store: OAuthStore;
   if (config.oauth.store === 'file') {
     if (!config.oauth.tokenSecret) throw new Error('store=file requires ZOTEUS_OAUTH_TOKEN_SECRET');
-    store = await FileStore.open(join(config.dataDir, 'oauth-store.json'), config.oauth.tokenSecret);
+    store = await FileStore.open(
+      join(config.dataDir, 'oauth-store.json'),
+      config.oauth.tokenSecret,
+    );
   } else {
     store = new MemoryStore();
   }
@@ -78,7 +84,10 @@ export async function buildOAuth(
     // Behind a TLS proxy/tunnel the server sets `trust proxy`; silence express-rate-limit's
     // X-Forwarded-For / trust-proxy advisories so they don't spam logs on every request.
     validate: { trustProxy: false, xForwardedForHeader: false },
-    message: { error: 'too_many_requests', error_description: 'Too many consent attempts. Try again later.' },
+    message: {
+      error: 'too_many_requests',
+      error_description: 'Too many consent attempts. Try again later.',
+    },
   });
 
   return {
@@ -103,7 +112,8 @@ export async function buildOAuth(
       if (config.oauth.mode === 'zotero') {
         app.get('/oauth/zotero/callback', consentLimiter, (req, res) => {
           const oauthToken = typeof req.query.oauth_token === 'string' ? req.query.oauth_token : '';
-          const verifier = typeof req.query.oauth_verifier === 'string' ? req.query.oauth_verifier : '';
+          const verifier =
+            typeof req.query.oauth_verifier === 'string' ? req.query.oauth_verifier : '';
           void provider.completeZoteroCallback(oauthToken, verifier, res);
         });
       }

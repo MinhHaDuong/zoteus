@@ -1,6 +1,9 @@
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Response } from 'express';
-import type { OAuthServerProvider, AuthorizationParams } from '@modelcontextprotocol/sdk/server/auth/provider.js';
+import type {
+  OAuthServerProvider,
+  AuthorizationParams,
+} from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handlers/authorize.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
@@ -9,11 +12,24 @@ import type {
   OAuthTokens,
   OAuthTokenRevocationRequest,
 } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import {
+  InvalidGrantError,
+  InvalidTokenError,
+} from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { renderConsentPage } from './consent.js';
 import { MemoryStore, type OAuthStore, type StoredAccess, type StoredRefresh } from './store.js';
 import { requestToken, accessToken, buildAuthorizeUrl } from './zotero-oauth.js';
 import { isClientIdMetadataUrl, fetchClientMetadata, InMemoryCimdCache } from '../lib/cimd.js';
+
+/**
+ * A named step in the authentication flow, for counters and the usage log.
+ *
+ * A string union open at the edges: the two names below are what this server emits, and an
+ * overlay that adds steps of its own (a licence gate, an SSO hop) emits its own names
+ * through the same hook rather than forking this type. Keeping it open is what stops the
+ * private overlay from having to modify a file it merges from here on every sync.
+ */
+export type AuthEvent = 'token_issued' | 'auth_failed' | (string & {});
 
 export interface ZoteroBridgeOptions {
   clientKey: string;
@@ -43,7 +59,7 @@ export interface ZoteusOAuthProviderOptions {
   refreshTokenTtlSec: number;
   store?: OAuthStore;
   zotero?: ZoteroBridgeOptions;
-  onEvent?: (event: 'token_issued' | 'auth_failed') => void;
+  onEvent?: (event: AuthEvent) => void;
   cimd?: CimdOptions;
 }
 
@@ -114,8 +130,10 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
 
   constructor(private readonly opts: ZoteusOAuthProviderOptions) {
     this.store = opts.store ?? new MemoryStore();
-    if (opts.mode === 'passcode' && !opts.passcode) throw new Error('passcode mode requires a passcode');
-    if (opts.mode === 'zotero' && !opts.zotero) throw new Error('zotero mode requires zotero bridge options');
+    if (opts.mode === 'passcode' && !opts.passcode)
+      throw new Error('passcode mode requires a passcode');
+    if (opts.mode === 'zotero' && !opts.zotero)
+      throw new Error('zotero mode requires zotero bridge options');
     if (opts.cimd?.enabled) this.cimdCache = new InMemoryCimdCache(opts.cimd.cacheTtlSec * 1000);
   }
 
@@ -156,7 +174,11 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     },
   };
 
-  async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
+  async authorize(
+    client: OAuthClientInformationFull,
+    params: AuthorizationParams,
+    res: Response,
+  ): Promise<void> {
     this.sweep();
     if (this.opts.mode === 'zotero') return this.authorizeViaZotero(client, params, res);
     const authId = randomUUID();
@@ -175,7 +197,11 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
   }
 
   /** zotero mode: start Zotero OAuth 1.0a and 302 the browser to zotero.org's authorize page. */
-  private async authorizeViaZotero(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
+  private async authorizeViaZotero(
+    client: OAuthClientInformationFull,
+    params: AuthorizationParams,
+    res: Response,
+  ): Promise<void> {
     const z = this.opts.zotero!;
     const { oauthToken, oauthTokenSecret } = await requestToken(
       { clientKey: z.clientKey, clientSecret: z.clientSecret, callbackUrl: z.callbackUrl },
@@ -207,7 +233,14 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     const pc = this.pending.get(authId);
     if (!pc || pc.expiresAt < Date.now()) {
       this.pending.delete(authId);
-      this.sendConsent(res, 400, authId, 'this client', '', 'Session expired — please reconnect from the client.');
+      this.sendConsent(
+        res,
+        400,
+        authId,
+        'this client',
+        '',
+        'Session expired — please reconnect from the client.',
+      );
       return;
     }
     if (!timingSafeEqualStr(passcode, this.opts.passcode ?? '')) {
@@ -215,10 +248,24 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
       this.opts.onEvent?.('auth_failed');
       if (pc.attempts >= MAX_CONSENT_ATTEMPTS) {
         this.pending.delete(authId);
-        this.sendConsent(res, 429, authId, pc.clientName, hostOf(pc.redirectUri), 'Too many attempts — please reconnect from the client.');
+        this.sendConsent(
+          res,
+          429,
+          authId,
+          pc.clientName,
+          hostOf(pc.redirectUri),
+          'Too many attempts — please reconnect from the client.',
+        );
         return;
       }
-      this.sendConsent(res, 401, authId, pc.clientName, hostOf(pc.redirectUri), 'Incorrect passcode. Please try again.');
+      this.sendConsent(
+        res,
+        401,
+        authId,
+        pc.clientName,
+        hostOf(pc.redirectUri),
+        'Incorrect passcode. Please try again.',
+      );
       return;
     }
     this.pending.delete(authId);
@@ -235,7 +282,14 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     const pc = this.pending.get(oauthToken);
     if (!pc || pc.expiresAt < Date.now() || !pc.zoteroReqTokenSecret) {
       this.pending.delete(oauthToken);
-      this.sendConsent(res, 400, oauthToken, 'this client', '', 'Session expired — please reconnect from the client.');
+      this.sendConsent(
+        res,
+        400,
+        oauthToken,
+        'this client',
+        '',
+        'Session expired — please reconnect from the client.',
+      );
       return;
     }
     this.pending.delete(oauthToken);
@@ -253,7 +307,14 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
         { baseUrl: z.baseUrl, fetchImpl: z.fetchImpl },
       );
     } catch {
-      this.sendConsent(res, 502, oauthToken, pc.clientName, hostOf(pc.redirectUri), 'Could not complete Zotero sign-in. Please try again.');
+      this.sendConsent(
+        res,
+        502,
+        oauthToken,
+        pc.clientName,
+        hostOf(pc.redirectUri),
+        'Could not complete Zotero sign-in. Please try again.',
+      );
       return;
     }
     const code = this.mintCode(pc, identity);
@@ -282,7 +343,10 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     res.redirect(302, target.href);
   }
 
-  async challengeForAuthorizationCode(client: OAuthClientInformationFull, authorizationCode: string): Promise<string> {
+  async challengeForAuthorizationCode(
+    client: OAuthClientInformationFull,
+    authorizationCode: string,
+  ): Promise<string> {
     const c = this.codes.get(authorizationCode);
     if (!c || c.clientId !== client.client_id || c.expiresAt < Date.now()) {
       throw new InvalidGrantError('Invalid or expired authorization code');
@@ -340,17 +404,29 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
     };
   }
 
-  async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
+  async revokeToken(
+    _client: OAuthClientInformationFull,
+    request: OAuthTokenRevocationRequest,
+  ): Promise<void> {
     this.store.deleteAccess(request.token);
     this.store.deleteRefresh(request.token);
     void this.store.flush();
   }
 
-  private issueTokens(clientId: string, scopes: string[], resource?: string, identity?: ZoteroIdentity): OAuthTokens {
+  private issueTokens(
+    clientId: string,
+    scopes: string[],
+    resource?: string,
+    identity?: ZoteroIdentity,
+  ): OAuthTokens {
     const accessToken = newToken();
     const refreshToken = newToken();
     const idFields = identity
-      ? { zoteroKey: identity.zoteroKey, zoteroUserId: identity.zoteroUserId, username: identity.username }
+      ? {
+          zoteroKey: identity.zoteroKey,
+          zoteroUserId: identity.zoteroUserId,
+          username: identity.username,
+        }
       : {};
     const accessRec: StoredAccess = {
       clientId,
@@ -389,7 +465,9 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
   ): void {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
-    res.status(status).send(renderConsentPage({ authId, clientName, redirectHost: hostOf(redirectUri), error }));
+    res
+      .status(status)
+      .send(renderConsentPage({ authId, clientName, redirectHost: hostOf(redirectUri), error }));
   }
 
   /** Drop expired pending consents and codes; sweep expired tokens in the store. */
@@ -414,7 +492,11 @@ export class ZoteusOAuthProvider implements OAuthServerProvider {
 
 function identityOf(rec: StoredAccess | StoredRefresh): ZoteroIdentity | undefined {
   if (rec.zoteroKey && rec.zoteroUserId !== undefined) {
-    return { zoteroKey: rec.zoteroKey, zoteroUserId: rec.zoteroUserId, username: rec.username ?? String(rec.zoteroUserId) };
+    return {
+      zoteroKey: rec.zoteroKey,
+      zoteroUserId: rec.zoteroUserId,
+      username: rec.username ?? String(rec.zoteroUserId),
+    };
   }
   return undefined;
 }

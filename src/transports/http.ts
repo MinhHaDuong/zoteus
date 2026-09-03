@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
@@ -11,6 +11,8 @@ import type { Logger } from '../lib/logger.js';
 import { requestLogger } from '../lib/request-logger.js';
 import { liveness, type Readiness } from '../lib/health.js';
 import type { Metrics } from '../lib/metrics.js';
+import type { UsageRecorder } from '../lib/usage/event.js';
+import type { DailyRow } from '../lib/usage/rollup.js';
 import type { BuiltOAuth } from '../auth/router.js';
 
 /**
@@ -32,14 +34,38 @@ export interface HttpOptions {
   /** Permit binding a non-loopback host without OAuth (escape hatch; default false). */
   allowInsecureBind?: boolean;
   metrics?: Metrics;
+  /** Persistent usage log; when absent, requests and tool calls are only logged. */
+  usage?: UsageRecorder;
+  /** Read side of the same log, which is what `/usage.json` serves. */
+  usageRollups?: (fromDay?: string) => DailyRow[];
+  /**
+   * Bearer token required by `/metrics` and `/usage.json`. Unset leaves both open, which
+   * is the historical behaviour and is only safe behind a proxy that blocks them.
+   */
+  metricsToken?: string;
   readiness?: () => Promise<Readiness>;
   version?: string;
   rateLimit?: { windowMs: number; max: number };
   /** Receives a drain handle for graceful shutdown (factory + single modes). */
-  registerLifecycle?: (h: { drainSessions: (timeoutMs: number) => Promise<void>; activeSessions: () => number }) => void;
+  registerLifecycle?: (h: {
+    drainSessions: (timeoutMs: number) => Promise<void>;
+    activeSessions: () => number;
+  }) => void;
 }
 
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/**
+ * Constant-time comparison of two secrets of any length.
+ *
+ * Hashed first because `timingSafeEqual` throws on a length mismatch, and throwing is
+ * itself the leak: it would tell an attacker the token's length in one request.
+ */
+function secretEquals(a: string, b: string): boolean {
+  const ha = createHash('sha256').update(a).digest();
+  const hb = createHash('sha256').update(b).digest();
+  return timingSafeEqual(ha, hb);
+}
 
 /** True if a parsed JSON-RPC body is (or contains) an MCP `initialize` request. */
 function isInitialize(body: unknown): boolean {
@@ -94,7 +120,8 @@ export async function startHttp(
   if (typeof serverOrFactory !== 'function') {
     const transport = makeTransport();
     await serverOrFactory.connect(transport);
-    route = (req, res) => transport.handleRequest(req, res, req.method === 'POST' ? req.body : undefined);
+    route = (req, res) =>
+      transport.handleRequest(req, res, req.method === 'POST' ? req.body : undefined);
     opts.registerLifecycle?.({
       activeSessions: () => 1,
       drainSessions: async () => {
@@ -128,7 +155,10 @@ export async function startHttp(
         // manually reconnected the connector.
         res.status(404).json({
           jsonrpc: '2.0',
-          error: { code: -32001, message: 'Session not found: reinitialize to start a new session.' },
+          error: {
+            code: -32001,
+            message: 'Session not found: reinitialize to start a new session.',
+          },
           id: null,
         });
         return;
@@ -160,12 +190,20 @@ export async function startHttp(
   // forwarded client IP instead of throwing on the X-Forwarded-For header. Set trust
   // proxy first so the request logger / rate limiter see the real client IP.
   if (opts.oauth) app.set('trust proxy', 1);
-  if (opts.logger) app.use(requestLogger(opts.logger, opts.metrics));
+  if (opts.logger)
+    app.use(
+      requestLogger(opts.logger, { metrics: opts.metrics, usage: opts.usage, mcpPath: path }),
+    );
 
   if (opts.oauth) opts.oauth.mount(app);
 
   const guards = opts.oauth
-    ? [requireBearerAuth({ verifier: opts.oauth.provider, resourceMetadataUrl: opts.oauth.resourceMetadataUrl })]
+    ? [
+        requireBearerAuth({
+          verifier: opts.oauth.provider,
+          resourceMetadataUrl: opts.oauth.resourceMetadataUrl,
+        }),
+      ]
     : [];
 
   const wrap = (req: express.Request, res: express.Response): void => {
@@ -184,7 +222,36 @@ export async function startHttp(
     const r = await opts.readiness();
     res.status(r.ok ? 200 : 503).json(r);
   });
-  if (opts.metrics) app.get('/metrics', (_req, res) => res.type('text/plain').send(opts.metrics!.render()));
+  // Ops endpoints that say something about traffic, rather than merely that the process is
+  // alive, sit behind a token when one is configured. `/metrics` shipped open and stayed
+  // open on a public deployment, where it published exactly how much the service is used
+  // to anyone who asked for it.
+  const opsGuard = (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ): void => {
+    if (!opts.metricsToken) return next();
+    const header = req.headers.authorization ?? '';
+    const presented = header.startsWith('Bearer ') ? header.slice(7) : '';
+    if (!secretEquals(presented, opts.metricsToken)) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    next();
+  };
+  if (opts.metrics) {
+    app.get('/metrics', opsGuard, (_req, res) =>
+      res.type('text/plain').send(opts.metrics!.render()),
+    );
+  }
+  if (opts.usageRollups) {
+    app.get('/usage.json', opsGuard, (req, res) => {
+      const days = Math.min(3650, Math.max(1, Number(req.query.days) || 30));
+      const from = new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+      res.json({ from, days, rows: opts.usageRollups!(from) });
+    });
+  }
 
   const limiter =
     opts.rateLimit && opts.rateLimit.max > 0
@@ -195,7 +262,11 @@ export async function startHttp(
             standardHeaders: true,
             legacyHeaders: false,
             validate: { trustProxy: false, xForwardedForHeader: false },
-            message: { jsonrpc: '2.0', error: { code: -32000, message: 'Too many requests' }, id: null },
+            message: {
+              jsonrpc: '2.0',
+              error: { code: -32000, message: 'Too many requests' },
+              id: null,
+            },
           }),
         ]
       : [];

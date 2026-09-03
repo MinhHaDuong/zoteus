@@ -75,9 +75,13 @@ describe('loadConfig', () => {
     // Unset is not "4": the default depends on which Zotero API is serving the build, and
     // only an explicit value overrides that choice (#39).
     expect(loadConfig({} as unknown as NodeJS.ProcessEnv).indexFulltextConcurrency).toBeUndefined();
-    const bad = loadConfig({ ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: '0' } as unknown as NodeJS.ProcessEnv);
+    const bad = loadConfig({
+      ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: '0',
+    } as unknown as NodeJS.ProcessEnv);
     expect(bad.indexFulltextConcurrency).toBeUndefined();
-    expect(bad.warnings).toEqual(['ZOTEUS_INDEX_FULLTEXT_CONCURRENCY="0" is not usable, ignoring it']);
+    expect(bad.warnings).toEqual([
+      'ZOTEUS_INDEX_FULLTEXT_CONCURRENCY="0" is not usable, ignoring it',
+    ]);
   });
 
   it('falls back on an invalid enum value, and says which', () => {
@@ -272,15 +276,18 @@ describe('loadConfig', () => {
       expect(cfg.dataDir.includes('${')).toBe(false);
       expect(cfg.dataDir.trim()).not.toBe('');
     }
-    expect(loadConfig({ ZOTEUS_DATA_DIR: '/tmp/zoteus-data' } as unknown as NodeJS.ProcessEnv).dataDir).toBe(
-      '/tmp/zoteus-data',
-    );
+    expect(
+      loadConfig({ ZOTEUS_DATA_DIR: '/tmp/zoteus-data' } as unknown as NodeJS.ProcessEnv).dataDir,
+    ).toBe('/tmp/zoteus-data');
   });
 
   it('refuses a scope it would otherwise have to guess', () => {
     // Falling back here would silently point reads, and writes, at a different library.
     expect(() =>
-      loadConfig({ ZOTERO_LIBRARY_TYPE: 'Group', ZOTERO_LIBRARY_ID: '123' } as unknown as NodeJS.ProcessEnv),
+      loadConfig({
+        ZOTERO_LIBRARY_TYPE: 'Group',
+        ZOTERO_LIBRARY_ID: '123',
+      } as unknown as NodeJS.ProcessEnv),
     ).toThrow(/ZOTERO_LIBRARY_TYPE="Group" is not usable/);
     expect(() =>
       loadConfig({ ZOTERO_LIBRARY_ID: 'g123456' } as unknown as NodeJS.ProcessEnv),
@@ -306,9 +313,9 @@ describe('loadConfig', () => {
       loadConfig({ ...base, ZOTEUS_OAUTH_STORE: 'File' } as unknown as NodeJS.ProcessEnv),
     ).toThrow(/ZOTEUS_OAUTH_STORE="File" is not usable/);
     // Both are knobs again when OAuth is off, because then they choose nothing.
-    expect(loadConfig({ ZOTEUS_OAUTH_MODE: 'Zotero' } as unknown as NodeJS.ProcessEnv).oauth.mode).toBe(
-      'passcode',
-    );
+    expect(
+      loadConfig({ ZOTEUS_OAUTH_MODE: 'Zotero' } as unknown as NodeJS.ProcessEnv).oauth.mode,
+    ).toBe('passcode');
   });
 
   it('refuses an allowlist that is a reference nothing expanded', () => {
@@ -322,8 +329,10 @@ describe('loadConfig', () => {
     ).toThrow(/ZOTEUS_CIMD_ALLOWED_HOSTS.*never expanded/);
     // Blank is how "no restriction" is spelled on purpose, and stays legal.
     expect(
-      loadConfig({ ZOTEUS_CIMD_ENABLED: 'true', ZOTEUS_CIMD_ALLOWED_HOSTS: '' } as unknown as NodeJS.ProcessEnv)
-        .cimd.allowedHosts,
+      loadConfig({
+        ZOTEUS_CIMD_ENABLED: 'true',
+        ZOTEUS_CIMD_ALLOWED_HOSTS: '',
+      } as unknown as NodeJS.ProcessEnv).cimd.allowedHosts,
     ).toEqual([]);
   });
 
@@ -364,7 +373,10 @@ describe('oauth config', () => {
 
   it('throws when oauth enabled without public url or passcode', () => {
     expect(() =>
-      loadConfig({ ZOTERO_API_KEY: 'k', ZOTEUS_OAUTH_ENABLED: 'true' } as unknown as NodeJS.ProcessEnv),
+      loadConfig({
+        ZOTERO_API_KEY: 'k',
+        ZOTEUS_OAUTH_ENABLED: 'true',
+      } as unknown as NodeJS.ProcessEnv),
     ).toThrow(/ZOTEUS_PUBLIC_URL/);
     expect(() =>
       loadConfig({
@@ -377,17 +389,26 @@ describe('oauth config', () => {
 
   it('rejects a short (weak) passcode', () => {
     expect(() =>
-      loadConfig({ ...enabledEnv, ZOTEUS_OAUTH_PASSCODE: 'hunter2' } as unknown as NodeJS.ProcessEnv),
+      loadConfig({
+        ...enabledEnv,
+        ZOTEUS_OAUTH_PASSCODE: 'hunter2',
+      } as unknown as NodeJS.ProcessEnv),
     ).toThrow(/at least 12/);
   });
 
   it('strips trailing slash from public url', () => {
-    const c = loadConfig({ ...enabledEnv, ZOTEUS_PUBLIC_URL: 'https://zoteus.example.com/' } as unknown as NodeJS.ProcessEnv);
+    const c = loadConfig({
+      ...enabledEnv,
+      ZOTEUS_PUBLIC_URL: 'https://zoteus.example.com/',
+    } as unknown as NodeJS.ProcessEnv);
     expect(c.oauth.publicUrl).toBe('https://zoteus.example.com');
   });
 
   it('parses ZOTEUS_ALLOWED_HOSTS into a trimmed list', () => {
-    const c = loadConfig({ ...enabledEnv, ZOTEUS_ALLOWED_HOSTS: 'a.example.com, b.example.com:8443 ' } as unknown as NodeJS.ProcessEnv);
+    const c = loadConfig({
+      ...enabledEnv,
+      ZOTEUS_ALLOWED_HOSTS: 'a.example.com, b.example.com:8443 ',
+    } as unknown as NodeJS.ProcessEnv);
     expect(c.oauth.allowedHosts).toEqual(['a.example.com', 'b.example.com:8443']);
   });
 });
@@ -417,6 +438,38 @@ describe('M13 ops config', () => {
     expect(c.mcpRateLimit).toEqual({ windowMs: 30_000, max: 0 });
     expect(c.readyzCheckZotero).toBe(false);
     expect(c.allowInsecureHttp).toBe(true);
+  });
+  it('leaves the usage log off, unidentified and untokened by default', () => {
+    const c = loadConfig({ ...base });
+    expect(c.usage).toEqual({ enabled: false, retentionDays: 30, identify: 'user' });
+    expect(c.metricsToken).toBeUndefined();
+  });
+  it('parses the usage knobs, and falls back on an unusable one instead of failing', () => {
+    const c = loadConfig({
+      ...base,
+      ZOTEUS_USAGE_LOG: 'true',
+      ZOTEUS_USAGE_RETENTION_DAYS: '7',
+      ZOTEUS_USAGE_IDENTIFY: 'hash',
+      ZOTEUS_METRICS_TOKEN: 'tok',
+    });
+    expect(c.usage).toEqual({ enabled: true, retentionDays: 7, identify: 'hash' });
+    expect(c.metricsToken).toBe('tok');
+
+    const bad = loadConfig({
+      ...base,
+      ZOTEUS_USAGE_RETENTION_DAYS: '-3',
+      ZOTEUS_USAGE_IDENTIFY: 'everything',
+    });
+    expect(bad.usage.retentionDays).toBe(30);
+    expect(bad.usage.identify).toBe('user');
+    expect(bad.warnings.join(' ')).toContain('ZOTEUS_USAGE_RETENTION_DAYS');
+    expect(bad.warnings.join(' ')).toContain('ZOTEUS_USAGE_IDENTIFY');
+
+    // Blank is unset, not a value: a desktop settings pane that writes empty strings must
+    // not turn the log on or change how a caller is identified.
+    const blank = loadConfig({ ...base, ZOTEUS_USAGE_LOG: '', ZOTEUS_USAGE_IDENTIFY: '' });
+    expect(blank.usage.enabled).toBe(false);
+    expect(blank.usage.identify).toBe('user');
   });
 });
 

@@ -113,10 +113,46 @@ Client ID Metadata Document support — resolve a URL `client_id` to a registere
 | Variable | Default | Purpose |
 |---|---|---|
 | `ZOTEUS_LOG_FORMAT` | `text` | `text` (human-readable) or `json` (structured, for log aggregators). Never logs tokens, keys, or the passcode. |
-| `ZOTEUS_METRICS_ENABLED` | `false` | Expose `/metrics` in Prometheus text format (no auth). Enable only behind a proxy/WAF in production. |
+| `ZOTEUS_METRICS_ENABLED` | `false` | Expose `/metrics` in Prometheus text format: labelled request and per-tool counters plus a latency histogram. Unauthenticated unless `ZOTEUS_METRICS_TOKEN` is set. |
+| `ZOTEUS_METRICS_TOKEN` | — | Bearer token required by `/metrics` and `/usage.json`. Unset leaves both open, which is only safe behind a proxy that blocks them. |
+| `ZOTEUS_USAGE_LOG` | `false` | Keep a usage log in `<data dir>/usage.sqlite`: one row per tool call and request (tool name, outcome, duration, caller). Nothing is ever transmitted, and argument values are never recorded, only their names, types and sizes. See [Usage log](#usage-log). |
+| `ZOTEUS_USAGE_RETENTION_DAYS` | `30` | Days of raw events kept. Daily rollups survive pruning and are kept indefinitely. |
+| `ZOTEUS_USAGE_IDENTIFY` | `user` | Whether a caller is recorded as their Zotero user id (`user`), a salted hash of it (`hash`), or not at all (`none`). |
 | `ZOTEUS_READYZ_CHECK_ZOTERO` | `true` | Whether `/readyz` pings the Zotero API (HEAD) to report upstream reachability. |
 | `ZOTEUS_MCP_RATE_LIMIT_WINDOW_SEC` | `60` | Sliding window length (seconds) for the per-IP rate limiter on `/mcp`. |
 | `ZOTEUS_MCP_RATE_LIMIT_MAX` | `120` | Max requests per IP per window on `/mcp`. Set to `0` to disable. |
+
+## Usage log
+
+Off unless you turn it on, and it never leaves the machine that writes it: there is no
+endpoint, no upload, and no third party. It exists so that an operator running a shared
+instance can answer which tools are used, by whom, how fast and how often they fail.
+
+```bash
+ZOTEUS_USAGE_LOG=true node dist/index.js --http
+npx tsx scripts/usage-report.ts --days 30
+```
+
+What a row contains: timestamp, tool name (or normalised route), Zotero user id, OAuth
+client and session id, ok/failed, a classified error kind, duration, and an argument
+*shape* such as `{"q":"string(32)","limit":"number","top":true}`.
+
+What it never contains: search strings, item titles, note or attachment text, argument
+values of any kind, Zotero API keys or tokens. Booleans are the one value kept, because
+`fulltext:true` is worth knowing and cannot carry content. Error *messages* are not
+recorded either, only a class such as `zotero_4xx`, since a message can quote library
+content.
+
+Raw events are pruned after `ZOTEUS_USAGE_RETENTION_DAYS`; the daily per-tool, per-user
+rollup they are folded into is about a kilobyte a day and is kept. Reading:
+
+- `scripts/usage-report.ts` prints a table from the file, or from a running server with
+  `--remote https://host --token "$ZOTEUS_METRICS_TOKEN"` (`--json` for the raw rollups).
+- `GET /usage.json?days=30` serves the same rollups, behind `ZOTEUS_METRICS_TOKEN`.
+- `GET /metrics` exposes live counters: `zoteus_tool_calls_total{tool,outcome}`,
+  `zoteus_tool_duration_ms` (histogram), `zoteus_http_requests_total{route,status_class}`
+  and `zoteus_http_scanner_requests_total`. These are process counters and reset on
+  restart; the SQLite rollups are the history.
 
 ## Optional dependencies
 

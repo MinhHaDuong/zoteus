@@ -7,6 +7,34 @@ All notable changes to Zoteus are documented here. The format is based on
 ## [Unreleased]
 
 ### Added
+- **An opt-in usage log, so an operator can see how their own server is used
+  (`ZOTEUS_USAGE_LOG`).** Until now a running Zoteus said almost nothing about itself: the
+  only trace a tool call left was a line in the catch block when it failed, and `/metrics`
+  offered four unlabelled counters that reset on every restart. One of them,
+  `tool_calls_total`, did not even count tool calls: it counted `POST /mcp`, so an
+  `initialize`, a `tools/list` and a batch of five calls were all worth one.
+
+  Set the knob and every tool call and request is recorded in `<data dir>/usage.sqlite`:
+  tool name, outcome, duration, Zotero user, client and session. Raw events are pruned
+  after `ZOTEUS_USAGE_RETENTION_DAYS` (30); the daily per-tool, per-user rollup they fold
+  into is about a kilobyte a day and is kept. `scripts/usage-report.ts` prints it, from the
+  file or from a running server over `GET /usage.json`.
+
+  It is **off by default and nothing is ever transmitted**: there is no upload, no third
+  party, and no endpoint that serves it without a token. Argument *values* are never
+  recorded, only their names, types and sizes, so a search string cannot be reconstructed
+  from the log; error *messages* are not recorded either, only a class such as
+  `zotero_4xx`, because a message can quote library content. `ZOTEUS_USAGE_IDENTIFY`
+  chooses between the Zotero user id, a salted hash of it, and no caller identity at all.
+- **`ZOTEUS_METRICS_TOKEN`**, a bearer token for `/metrics` and `/usage.json`. `/metrics`
+  has always been unauthenticated, which on a reachable deployment publishes exactly how
+  much the service is used to anyone who asks. Unset keeps the old behaviour, and the
+  server now warns at startup when metrics are enabled on an OAuth deployment without one.
+- **Per-tool counters and a latency histogram.** `zoteus_tool_calls_total{tool,outcome}`,
+  `zoteus_tool_duration_ms` (buckets at 5/25/100/500/2000/10000 ms),
+  `zoteus_http_requests_total{route,status_class}` and `# TYPE` headers. Latency was
+  measured before and thrown away: `ms` was logged and never aggregated.
+
 - **The local model's weight precision is selectable, and it is part of the vector identity
   (#43).** `Xenova/multilingual-e5-small` is the answer for a multilingual library, but at
   full precision it is 465 MB on disk, which is the difference between comfortable and
@@ -42,6 +70,23 @@ All notable changes to Zoteus are documented here. The format is based on
   URL. `ZOTEUS_EMBEDDING_DTYPE` is on-device only; setting it under an API provider logs that
   it is ignored, because that provider's precision is decided on its own hardware. There is a
   matching field in the desktop extension's settings pane.
+
+### Changed
+- **JSON logs carry real fields.** `ZOTEUS_LOG_FORMAT=json` used to stringify the
+  structured object into `msg`, so a line read
+  `{"level":"info","msg":"http {\"status\":500,...}"}` and `jq 'select(.status >= 500)'`
+  matched nothing. A trailing object is now spread into the record as top-level keys.
+- **A logged `Error` says what it was.** `redactArgs` walked an Error's enumerable own
+  properties, of which there are none, so every error passed as an object reached the log
+  as `{}`. It is now rendered as `name: message`.
+- **`zoteus_tool_calls_total` now counts tool calls.** What it counted before (`POST /mcp`)
+  is still there under its right name, `zoteus_mcp_requests_total`. A dashboard reading the
+  old name needs updating.
+- **404s on paths this server does not have are counted as scans, not errors.** A public
+  instance takes a steady trickle of bots probing `/credentials.json`, `/key.json` and
+  friends; they were the bulk of the 4xx, which made the error rate a measure of the
+  internet's weather. They now increment `zoteus_http_scanner_requests_total`, log at
+  `debug`, and are kept out of the usage log.
 
 ### Fixed
 - **The local pipeline pools each model the way it was trained, instead of mean-pooling

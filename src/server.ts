@@ -2,6 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import type { ZoteusConfig } from './config.js';
 import { createLogger, type Logger } from './lib/logger.js';
+import type { Metrics } from './lib/metrics.js';
+import type { UsageRecorder } from './lib/usage/event.js';
 import { RateLimitedFetcher } from './api/http.js';
 import { WebApiClient } from './api/web-client.js';
 import { LocalApiClient } from './api/local-client.js';
@@ -18,7 +20,12 @@ import { createSearchIndex } from './features/search/factory.js';
 import type { SearchIndex } from './features/search/backend.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
 import { ScholarGraph } from './features/scholar/graph.js';
-import { registerAllTools, type ToolContext, type ToolContextSource, type ToolDefinition } from './registry/registry.js';
+import {
+  registerAllTools,
+  type ToolContext,
+  type ToolContextSource,
+  type ToolDefinition,
+} from './registry/registry.js';
 import { registerResources } from './resources/index.js';
 import { registerPrompts } from './prompts/index.js';
 import { tools } from './tools/index.js';
@@ -34,6 +41,18 @@ export interface ContextOverrides {
   apiKey?: string;
   /** Per-user Zotero userID; scopes the search index file and is the cache key. */
   zoteroUserId?: number;
+  /**
+   * Process-wide observability handles, shared by every context rather than built per
+   * user: one metrics registry so `/metrics` totals the whole server, and one usage
+   * recorder so there is a single SQLite writer.
+   */
+  telemetry?: Telemetry;
+}
+
+/** The observability handles a context passes on to its tool calls. */
+export interface Telemetry {
+  metrics?: Metrics;
+  usage?: UsageRecorder;
 }
 
 /**
@@ -51,14 +70,21 @@ function selectActiveTools(config: ZoteusConfig): ToolDefinition[] {
  * schema, search index, etc. With no overrides this is the operator/shared context
  * (identical to M10). With a per-user apiKey it is that tenant's context.
  */
-export async function buildContext(config: ZoteusConfig, overrides: ContextOverrides = {}): Promise<ToolContext> {
+export async function buildContext(
+  config: ZoteusConfig,
+  overrides: ContextOverrides = {},
+): Promise<ToolContext> {
   const logger = createLogger(config.logLevel, config.logFormat);
+  const { metrics, usage } = overrides.telemetry ?? {};
   const apiKey = overrides.apiKey ?? config.apiKey;
   const perUser = overrides.apiKey !== undefined;
   const fetcher = new RateLimitedFetcher({ maxConcurrency: 4, logger });
   const web = new WebApiClient({ apiKey, fetcher, contactEmail: config.contactEmail, logger });
   // Per-user (hosted) contexts never touch the operator's desktop local API.
-  const local = !perUser && config.local !== 'off' ? new LocalApiClient({ port: config.localPort, fetcher }) : undefined;
+  const local =
+    !perUser && config.local !== 'off'
+      ? new LocalApiClient({ port: config.localPort, fetcher })
+      : undefined;
 
   const capabilities = await probeCapabilities(config, { web, local, logger });
   // The startup probe is the first answer, not the only one: Zotero may be launched after
@@ -101,7 +127,9 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   const embedding = createEmbeddingProvider(config, logger);
   const searchIndexPath = join(
     config.dataDir,
-    overrides.zoteroUserId !== undefined ? `search-index-${overrides.zoteroUserId}.json` : 'search-index.json',
+    overrides.zoteroUserId !== undefined
+      ? `search-index-${overrides.zoteroUserId}.json`
+      : 'search-index.json',
   );
   // Hoisted rather than passed inline, because a repair has to be able to build the same
   // index again later and the embedder triple is not reachable from the context (#21).
@@ -149,7 +177,13 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
           'The search index cannot be reopened while a build is running. Stop it first with zotero_index action:"stop".',
         );
       }
-      await ctx.search.close().catch((e) => logger.debug(`Releasing the old search index: ${e instanceof Error ? e.message : String(e)}`));
+      await ctx.search
+        .close()
+        .catch((e) =>
+          logger.debug(
+            `Releasing the old search index: ${e instanceof Error ? e.message : String(e)}`,
+          ),
+        );
       const fresh = await createSearchIndex(searchIndexOpts);
       ctx.search = fresh;
       logger.info(`Search index reopened (${fresh.storage}, ${searchIndexPath}).`);
@@ -173,6 +207,9 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
     scholar,
     fetcher,
     logger,
+    zoteroUserId: overrides.zoteroUserId,
+    metrics,
+    usage,
     searchIndexPath,
     localStatus,
     reopenSearchIndex,
@@ -215,7 +252,11 @@ function newMcpServer(): McpServer {
 }
 
 /** Wire a server's tools, resources and prompts to a context (built, or still building). */
-function registerAll(server: McpServer, config: ZoteusConfig, source: ToolContextSource): McpServer {
+function registerAll(
+  server: McpServer,
+  config: ZoteusConfig,
+  source: ToolContextSource,
+): McpServer {
   registerAllTools(server, selectActiveTools(config), source);
   registerResources(server, source);
   registerPrompts(server);
@@ -281,8 +322,11 @@ export function toolSelectionNotice(config: ZoteusConfig): string | undefined {
 }
 
 /** Operator/shared server (stdio + the no-auth HTTP path). Preserves the M10 signature. */
-export async function buildServer(config: ZoteusConfig): Promise<BuiltServer> {
-  const ctx = await buildContext(config);
+export async function buildServer(
+  config: ZoteusConfig,
+  telemetry?: Telemetry,
+): Promise<BuiltServer> {
+  const ctx = await buildContext(config, { telemetry });
   const notice = toolSelectionNotice(config);
   if (notice) ctx.logger.info(notice);
   return { server: createServer(ctx), ctx, createServer: () => createServer(ctx) };
@@ -302,10 +346,13 @@ export class ContextCache {
     private readonly config: ZoteusConfig,
     private readonly operatorCtx: ToolContext,
     private readonly maxEntries = 50,
+    private readonly telemetry?: Telemetry,
   ) {}
 
   async resolve(authInfo?: AuthInfo): Promise<ToolContext> {
-    const extra = authInfo?.extra as { zoteroKey?: string; zoteroUserId?: number; username?: string } | undefined;
+    const extra = authInfo?.extra as
+      | { zoteroKey?: string; zoteroUserId?: number; username?: string }
+      | undefined;
     const zoteroKey = extra?.zoteroKey;
     const zoteroUserId = extra?.zoteroUserId;
     if (!zoteroKey || zoteroUserId === undefined) return this.operatorCtx;
@@ -315,7 +362,11 @@ export class ContextCache {
       hit.lastUsed = ++this.order;
       return hit.ctx;
     }
-    const ctx = await buildContext(this.config, { apiKey: zoteroKey, zoteroUserId });
+    const ctx = await buildContext(this.config, {
+      apiKey: zoteroKey,
+      zoteroUserId,
+      telemetry: this.telemetry,
+    });
     this.entries.set(zoteroUserId, { ctx, lastUsed: ++this.order });
     this.evictIfNeeded();
     return ctx;
@@ -328,18 +379,24 @@ export class ContextCache {
    */
   async flushIndexes(): Promise<void> {
     const ctxs = [this.operatorCtx, ...[...this.entries.values()].map((e) => e.ctx)];
-    await Promise.allSettled(ctxs.map(async (c) => {
-      // Two independent attempts. `save()` refuses on a store that could not be read, and
-      // close() is what checkpoints the write-ahead log and releases the file handle — so
-      // chaining them would let one faulted index leak a handle and an uncheckpointed WAL
-      // on every shutdown, silently, since allSettled swallows the rejection.
-      await c.search.save().catch((e) => {
-        c.logger.debug(`Flushing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`);
-      });
-      await c.search.close().catch((e) => {
-        c.logger.debug(`Closing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`);
-      });
-    }));
+    await Promise.allSettled(
+      ctxs.map(async (c) => {
+        // Two independent attempts. `save()` refuses on a store that could not be read, and
+        // close() is what checkpoints the write-ahead log and releases the file handle — so
+        // chaining them would let one faulted index leak a handle and an uncheckpointed WAL
+        // on every shutdown, silently, since allSettled swallows the rejection.
+        await c.search.save().catch((e) => {
+          c.logger.debug(
+            `Flushing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        });
+        await c.search.close().catch((e) => {
+          c.logger.debug(
+            `Closing the search index on shutdown: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        });
+      }),
+    );
   }
 
   private evictIfNeeded(): void {

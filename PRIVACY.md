@@ -23,6 +23,7 @@ Zoteus only contacts external services as needed to do what you ask of it:
 
 - **Zotero API key**: stored by your MCP client (for example Claude Desktop stores extension settings as sensitive configuration). Zoteus itself never writes your cloud API key to disk and never logs it.
 - **Local data directory**: Zoteus keeps a semantic-search index (which contains text and embeddings derived from your library), a locally granted Zotero desktop-API key, caches, and the update-check timestamp in its data directory on your machine.
+- **Usage log (off unless you turn it on)**: setting `ZOTEUS_USAGE_LOG=true` makes Zoteus keep a local record of which tools were called, when, whether they succeeded, how long they took, and (on a multi-user server) which Zotero user made the call. It records no argument values, no search strings and no library content, it is never sent anywhere, and it does not exist unless you enable it. It is there for operators running a shared instance who need to see how their own server is used.
 
 ## Third-party sharing
 

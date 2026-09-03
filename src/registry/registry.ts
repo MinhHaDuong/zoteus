@@ -10,6 +10,8 @@ import type { LocalApiClient } from '../api/local-client.js';
 import type { LocalWriteClient } from '../api/local-writes.js';
 import type { ConnectorWriteClient } from '../api/connector-writes.js';
 import type { Logger } from '../lib/logger.js';
+import type { Metrics } from '../lib/metrics.js';
+import { classifyError, describeShape, type UsageRecorder } from '../lib/usage/event.js';
 import type { StyleResolver } from '../features/citation/styles.js';
 import type { TranslationServerClient } from '../features/citation/translation-server.js';
 import type { SearchIndex } from '../features/search/backend.js';
@@ -36,6 +38,16 @@ export interface ToolContext {
   /** Shared rate-limited fetcher (used by built-in import resolution). */
   fetcher: RateLimitedFetcher;
   logger: Logger;
+  /**
+   * Zotero user id this context belongs to, in multi-tenant mode. Present so that a tool
+   * call can be attributed without re-deriving it from the index path, and absent for the
+   * operator context, stdio, and any no-auth deployment.
+   */
+  zoteroUserId?: number;
+  /** Live process counters; absent outside the HTTP transport. */
+  metrics?: Metrics;
+  /** Durable usage log; absent unless the operator turned it on. */
+  usage?: UsageRecorder;
   /**
    * Absolute path to this context's legacy JSON search index (per-user in multi-tenant
    * mode). The SQLite backend keeps its database beside it, under the same name; both are
@@ -140,6 +152,61 @@ export function requireCloudLibrary(
   return { type: 'user', id: cloud.userID };
 }
 
+/**
+ * What the MCP SDK hands a tool handler besides its arguments.
+ *
+ * Declared structurally rather than imported so this module does not depend on the SDK's
+ * internal `RequestHandlerExtra` shape; the fields used here (who is calling, and on which
+ * session) are the stable part of it.
+ */
+interface ToolCallExtra {
+  sessionId?: string;
+  authInfo?: { clientId?: string; extra?: unknown };
+}
+
+/**
+ * Record one finished tool call: a counter, a latency observation, a durable event, and —
+ * new here — a log line for the calls that SUCCEED.
+ *
+ * Until this existed the only trace a tool call left was the error line in the catch
+ * above, so the logs could say what had gone wrong and never what the server was for.
+ *
+ * `describeShape` is the only thing that touches `args`, and it keeps key names, types and
+ * lengths, never values: a query string must not be reconstructible from this log.
+ */
+function observe(
+  ctx: ToolContext | undefined,
+  def: ToolDefinition,
+  args: unknown,
+  extra: ToolCallExtra | undefined,
+  started: number,
+  errorKind?: string,
+): void {
+  if (!ctx) return;
+  const ms = Date.now() - started;
+  const outcome = errorKind ? 'error' : 'ok';
+  ctx.metrics?.inc('tool_calls_total', 1, { tool: def.name, outcome });
+  ctx.metrics?.observe('tool_duration_ms', ms, { tool: def.name });
+  ctx.logger.info(`tool ${def.name}`, { tool: def.name, outcome, ms, errorKind });
+  ctx.usage?.record({
+    ts: Date.now(),
+    kind: 'tool',
+    name: def.name,
+    // The context is bound to a user at session initialize; `extra.authInfo` is the same
+    // identity per request, and is the fallback for a shared context that still carries a
+    // per-request token.
+    userId:
+      ctx.zoteroUserId ??
+      (extra?.authInfo?.extra as { zoteroUserId?: number } | undefined)?.zoteroUserId,
+    clientId: extra?.authInfo?.clientId,
+    sessionId: extra?.sessionId,
+    ok: !errorKind,
+    errorKind,
+    ms,
+    shape: describeShape(args),
+  });
+}
+
 export function registerAllTools(
   server: McpServer,
   defs: ToolDefinition[],
@@ -155,10 +222,11 @@ export function registerAllTools(
         outputSchema: def.outputSchema,
         annotations: { title: def.title, openWorldHint: true, ...def.annotations },
       },
-      async (args: unknown) => {
+      async (args: unknown, extra?: ToolCallExtra) => {
         // Resolved inside the handler, not at registration: with a deferred context this
         // is where the call waits for the build (and where a failed build is retried).
         let ctx: ToolContext | undefined;
+        const started = Date.now();
         try {
           ctx = await resolveContext(source);
           // Every tool gets a current answer about the desktop app, because the startup
@@ -167,7 +235,11 @@ export function registerAllTools(
           // comparison while the cached answer is fresh, and at most one bounded loopback
           // connect per TTL window otherwise, shared across concurrent calls.
           await ctx.localStatus?.ensure();
-          return await def.handler(args, ctx);
+          const result = await def.handler(args, ctx);
+          // A tool may report failure by returning rather than throwing, and those are
+          // failures for anyone reading the numbers later.
+          observe(ctx, def, args, extra, started, result?.isError ? 'tool_error' : undefined);
+          return result;
         } catch (err) {
           const message =
             err instanceof ZoteroApiError
@@ -176,13 +248,18 @@ export function registerAllTools(
                 ? err.message
                 : String(err);
           ctx?.logger.error(`Tool ${def.name} failed:`, message);
+          // No ctx means the context build itself failed, so there is nowhere to record
+          // this: the recorder lives on the context. That call is not invisible — the
+          // request-level event and the line above both carry it — and the alternative,
+          // a second process-wide handle threaded past the build, would exist only for
+          // the case where the server is already failing every call.
+          observe(ctx, def, args, extra, started, classifyError(err));
           return { content: [{ type: 'text' as const, text: message }], isError: true };
         }
       },
     );
   }
 }
-
 
 /**
  * True when a local-API write failure means the running Zotero simply does not have
@@ -199,7 +276,6 @@ export function isLocalWritesUnavailable(err: unknown): boolean {
     /404|no endpoint|not implemented|not supported|does not support|unreachable/i.test(msg)
   );
 }
-
 
 /**
  * A current answer to "is the desktop app reachable", for the write paths that must not

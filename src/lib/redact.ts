@@ -1,9 +1,15 @@
 // Mask secret-bearing object keys before anything reaches the logs.
-const SECRET_KEY = /(pass(code|word)?|secret|token|api[-_]?key|authorization|bearer|cookie|credential|client[-_]?(key|secret)|zoterokey|license|polar)/i;
+const SECRET_KEY =
+  /(pass(code|word)?|secret|token|api[-_]?key|authorization|bearer|cookie|credential|client[-_]?(key|secret)|zoterokey|license|polar)/i;
 const MASK = '[REDACTED]';
 
 function redact(value: unknown, seen: WeakSet<object>): unknown {
   if (value === null || typeof value !== 'object') return value;
+  // An Error's `name`/`message`/`stack` are non-enumerable, so the object walk below sees
+  // an empty object and every logged error used to reach the log as `{}` — the one thing
+  // it was written to say, thrown away. Rendered here instead, and as a string, so it
+  // passes through the rest of this function untouched.
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
   if (seen.has(value as object)) return '[Circular]';
   seen.add(value as object);
   if (Array.isArray(value)) return value.map((v) => redact(v, seen));

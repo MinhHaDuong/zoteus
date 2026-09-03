@@ -250,15 +250,42 @@ structured logger strips all secret-named fields before writing.
 docker compose logs --follow zoteus | jq .
 ```
 
-Each request line includes `method`, `path`, `status`, `latencyMs`, and (where
-available) `clientId` / `sessionId`. Health and metrics paths are excluded from
-request logs to keep them quiet.
+Each request line includes `method`, `path`, `status`, `ms`, and (where available)
+`clientId` / `sessionId` / `userId`, as **top-level keys** — so `jq 'select(.status >= 500)'`
+works. Tool calls log a line of their own with `tool`, `outcome` and `ms`. Health and
+metrics paths are excluded from request logs to keep them quiet, and a 404 on a path this
+server does not have (bots probing `/credentials.json` and friends) is logged at `debug`
+and counted separately, so it does not inflate the error rate.
+
+```bash
+# what got called today
+docker compose logs --since 24h zoteus | jq -r 'select(.tool) | .tool' | sort | uniq -c | sort -rn
+```
+
+Container logs are unbounded under Docker's default `json-file` driver. Cap them:
+
+```yaml
+logging:
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+```
+
+**Usage log (`ZOTEUS_USAGE_LOG=true`):** a durable per-call log in
+`<data dir>/usage.sqlite` that survives restarts, with daily rollups kept indefinitely and
+raw events pruned after `ZOTEUS_USAGE_RETENTION_DAYS`. Nothing is transmitted anywhere, and
+no argument value is recorded. Read it with `scripts/usage-report.ts`, or over
+`GET /usage.json` behind `ZOTEUS_METRICS_TOKEN`. Full description and the exact field list:
+[configuration.md](configuration.md#usage-log). Before turning it on for other people's
+traffic, say so in whatever privacy policy your instance publishes.
 
 **Metrics counter endpoint:**
 
 `ZOTEUS_METRICS_ENABLED=true` (set in `docker-compose.yml`) exposes `/metrics` in
-Prometheus text format — no auth required, so keep it behind your proxy/WAF in
-production or restrict with a Caddy `@internal` matcher:
+Prometheus text format: `zoteus_tool_calls_total{tool,outcome}`, the
+`zoteus_tool_duration_ms` histogram, `zoteus_http_requests_total{route,status_class}` and
+`zoteus_http_scanner_requests_total`. Set `ZOTEUS_METRICS_TOKEN` to require a bearer token
+(it also guards `/usage.json`), and keep it behind your proxy/WAF as well — belt and
+braces, since the endpoint publishes how much your service is used:
 
 ```caddyfile
 @metrics path /metrics
