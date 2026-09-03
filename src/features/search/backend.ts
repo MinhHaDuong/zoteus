@@ -570,10 +570,7 @@ export interface SearchIndex {
   /** Embed arbitrary texts with the configured provider (empty array if none). */
   embed(texts: string[], role?: 'query' | 'passage'): Promise<number[][]>;
   build(libraryItems: any[], opts?: BuildOptions): Promise<SearchIndexStatus>;
-  buildIncremental(
-    fetchPage: PageFetcher,
-    opts?: IncrementalBuildOptions,
-  ): Promise<IndexBuildStatus>;
+  buildIncremental(fetchPage: PageFetcher, opts?: IncrementalBuildOptions): Promise<IndexBuildStatus>;
   /**
    * Refuse to index `library` over the rows of a different one. Throws, naming both,
    * when the store is non-empty and stamped with another library; silent otherwise

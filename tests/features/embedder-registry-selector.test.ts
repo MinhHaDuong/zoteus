@@ -24,8 +24,11 @@ beforeAll(() => {
 afterAll(() => rmSync(runtimeRoot, { recursive: true, force: true }));
 
 describe('curated local embedder selector', () => {
-  it('contains measured CPU candidates except the evidence-rejected cell', () => {
-    expect(Object.keys(EMBEDDER_ENTRIES)).toHaveLength(18);
+  it('exposes exactly the incumbent and the measured E5 q8 alternative', () => {
+    expect(Object.keys(EMBEDDER_ENTRIES)).toEqual([
+      'minilm-l6-v2',
+      'multilingual-e5-small-q8',
+    ]);
     expect(EMBEDDER_ENTRIES['minilm-l6-v2']).toEqual(INCUMBENT_LOCAL_ENTRY);
     expect(EMBEDDER_ENTRIES['multilingual-e5-small-q8']).toMatchObject({
       model: 'Xenova/multilingual-e5-small',
@@ -38,20 +41,6 @@ describe('curated local embedder selector', () => {
       windowTokens: 512,
       dimension: 384,
     });
-    for (const model of [
-      'granite-97m-multilingual-r2',
-      'granite-311m-multilingual-r2',
-      'arctic-embed-m-v2',
-      'gte-multilingual-base',
-      'multilingual-e5-small',
-      'multilingual-e5-base',
-    ]) {
-      for (const dtype of ['fp32', 'q8', 'uint8']) {
-        if (model === 'granite-97m-multilingual-r2' && dtype === 'q8') continue;
-        expect(EMBEDDER_ENTRIES[`${model}-${dtype}`], `${model}-${dtype}`).toBeDefined();
-      }
-    }
-    expect(EMBEDDER_ENTRIES['granite-97m-multilingual-r2-q8']).toBeUndefined();
   });
 
   it('selects MiniLM when unset and rejects unknown ids', () => {

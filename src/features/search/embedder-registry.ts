@@ -318,7 +318,7 @@ function pinnedModelFile(candidate: FamilyProvenance, path: string, field?: stri
 /** Field-specific immutable evidence for one measured family and graph dtype. */
 function measuredSources(
   candidate: FamilyProvenance,
-  dtype: (typeof MEASURED_DTYPES)[number],
+  dtype: 'q8',
 ): Readonly<Record<FingerprintedEntryField, string>> {
   const graphFile = GRAPH_BY_DTYPE[dtype];
   const graph = pinnedModelFile(candidate, graphFile);
@@ -345,88 +345,32 @@ function measuredSources(
   });
 }
 
-const FAMILY_PROVENANCE: readonly FamilyProvenance[] = [
-  {
-    id: 'granite-97m-multilingual-r2',
-    model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
-    revision: '536a9f241cb3f02a9c5995a1e708c784bd274859',
-    pooling: 'cls',
-    normalize: true,
-    template: { query: '', passage: '' },
-    windowTokens: 32768,
-    dimension: 384,
-  },
-  {
-    id: 'granite-311m-multilingual-r2',
-    model: 'onnx-community/granite-embedding-311m-multilingual-r2-ONNX',
-    revision: '8f039f21d4181327268271bea4b11ddcc7eef88d',
-    pooling: 'cls',
-    normalize: true,
-    template: { query: '', passage: '' },
-    windowTokens: 32768,
-    dimension: 768,
-  },
-  {
-    id: 'arctic-embed-m-v2',
-    model: 'Snowflake/snowflake-arctic-embed-m-v2.0',
-    revision: '95c2741480856aa9666782eb4afe11959938017f',
-    pooling: 'cls',
-    normalize: true,
-    template: { query: 'query: ', passage: '' },
-    windowTokens: 32768,
-    dimension: 768,
-  },
-  {
-    id: 'gte-multilingual-base',
-    model: 'onnx-community/gte-multilingual-base',
-    revision: '2edbf5e672aab465f9ed4c154a8b61791c082c69',
-    pooling: 'cls',
-    normalize: true,
-    template: { query: '', passage: '' },
-    windowTokens: 32768,
-    dimension: 768,
-  },
-  {
-    id: 'multilingual-e5-small',
-    model: 'Xenova/multilingual-e5-small',
-    revision: '761b726dd34fb83930e26aab4e9ac3899aa1fa78',
-    pooling: 'mean',
-    normalize: true,
-    template: { query: 'query: ', passage: 'passage: ' },
-    windowTokens: 512,
-    dimension: 384,
-  },
-  {
-    id: 'multilingual-e5-base',
-    model: 'Xenova/multilingual-e5-base',
-    revision: '1ec9243030a27d1a115d5c340572074c125b58b2',
-    pooling: 'mean',
-    normalize: true,
-    template: { query: 'query: ', passage: 'passage: ' },
-    windowTokens: 512,
-    dimension: 768,
-  },
-];
+const E5_SMALL_PROVENANCE: FamilyProvenance = {
+  id: 'multilingual-e5-small',
+  model: 'Xenova/multilingual-e5-small',
+  revision: '761b726dd34fb83930e26aab4e9ac3899aa1fa78',
+  pooling: 'mean',
+  normalize: true,
+  template: { query: 'query: ', passage: 'passage: ' },
+  windowTokens: 512,
+  dimension: 384,
+};
 
-const MEASURED_DTYPES = ['fp32', 'q8', 'uint8'] as const;
-const measuredEntries = FAMILY_PROVENANCE.flatMap((candidate) =>
-  MEASURED_DTYPES.map((dtype) =>
-    parseEmbedderEntry({
-      ...candidate,
-      id: `${candidate.id}-${dtype}`,
-      dtype,
-      graphFile: GRAPH_BY_DTYPE[dtype],
-      sources: measuredSources(candidate, dtype),
-    }),
-  ),
-).filter((entry) => entry.id !== 'granite-97m-multilingual-r2-q8');
+/** The sole alternative proposed for upstream: measured multilingual E5 small q8. */
+export const E5_SMALL_Q8_ENTRY: EmbedderEntry = parseEmbedderEntry({
+  ...E5_SMALL_PROVENANCE,
+  id: 'multilingual-e5-small-q8',
+  dtype: 'q8',
+  graphFile: GRAPH_BY_DTYPE.q8,
+  sources: measuredSources(E5_SMALL_PROVENANCE, 'q8'),
+});
 
-/** Unchanged default plus measured CPU candidates, excluding evidence-rejected cells. */
+/** Unchanged MiniLM default plus one measured multilingual alternative. */
 export const EMBEDDER_ENTRIES: Readonly<Record<string, EmbedderEntry>> = Object.freeze(
-  Object.fromEntries([
-    [INCUMBENT_LOCAL_ENTRY.id, INCUMBENT_LOCAL_ENTRY],
-    ...measuredEntries.map((entry) => [entry.id, entry] as const),
-  ]),
+  {
+    [INCUMBENT_LOCAL_ENTRY.id]: INCUMBENT_LOCAL_ENTRY,
+    [E5_SMALL_Q8_ENTRY.id]: E5_SMALL_Q8_ENTRY,
+  },
 );
 
 export class UnknownLocalEmbedderEntryError extends Error {

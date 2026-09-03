@@ -11,11 +11,7 @@ import {
   DEFAULT_PRECISE_MAX_BYTES,
   type OutlineEntry,
 } from '../features/fulltext/pdf-pages.js';
-import {
-  extractEpubText,
-  looksLikeZip,
-  DEFAULT_EPUB_MAX_BYTES,
-} from '../features/fulltext/epub.js';
+import { extractEpubText, looksLikeZip, DEFAULT_EPUB_MAX_BYTES } from '../features/fulltext/epub.js';
 import { loadAttachmentBytes, type AttachmentByteSource } from '../features/attachments/bytes.js';
 
 function err(text: string): ToolHandlerResult {
@@ -70,14 +66,9 @@ async function resolveAttachment(
     };
   }
   const children = await ctx.router.getItemChildren(itemKey, { library });
-  const atts = (children.data ?? []).filter(
-    (c: any) => (c.data?.itemType ?? c.itemType) === 'attachment',
-  );
-  const chosen = atts
-    .slice()
-    .sort((a: any, b: any) => scoreForText(b.data ?? b) - scoreForText(a.data ?? a))[0];
-  if (!chosen)
-    return { error: `Item ${itemKey} has no attachment with full text. Attach a PDF in Zotero.` };
+  const atts = (children.data ?? []).filter((c: any) => (c.data?.itemType ?? c.itemType) === 'attachment');
+  const chosen = atts.slice().sort((a: any, b: any) => scoreForText(b.data ?? b) - scoreForText(a.data ?? a))[0];
+  if (!chosen) return { error: `Item ${itemKey} has no attachment with full text. Attach a PDF in Zotero.` };
   const cd = chosen.data ?? chosen;
   return {
     attachmentKey: chosen.key ?? cd.key,
@@ -139,26 +130,15 @@ async function fetchAttachmentBytes(
   ctx: ToolContext,
   resolved: Resolved,
   library: LibraryRef | undefined,
-): Promise<{
-  bytes?: Uint8Array;
-  source?: AttachmentByteSource;
-  tooLarge?: boolean;
-  reasons: string[];
-}> {
-  if (resolved.size && resolved.size > DEFAULT_PRECISE_MAX_BYTES)
-    return { tooLarge: true, reasons: [] };
+): Promise<{ bytes?: Uint8Array; source?: AttachmentByteSource; tooLarge?: boolean; reasons: string[] }> {
+  if (resolved.size && resolved.size > DEFAULT_PRECISE_MAX_BYTES) return { tooLarge: true, reasons: [] };
   const loaded = await loadAttachmentBytes(ctx, {
     key: resolved.attachmentKey,
     library,
     filename: resolved.filename,
     maxBytes: DEFAULT_PRECISE_MAX_BYTES,
   });
-  return {
-    bytes: loaded.bytes,
-    source: loaded.source,
-    tooLarge: loaded.tooLarge,
-    reasons: loaded.reasons,
-  };
+  return { bytes: loaded.bytes, source: loaded.source, tooLarge: loaded.tooLarge, reasons: loaded.reasons };
 }
 
 /** How the bytes were reached, in words, for the notice the caller reads. */
@@ -172,20 +152,15 @@ const getFulltext: ToolDefinition = {
   name: 'zotero_get_fulltext',
   title: 'Get attachment full text / passages / outline (read-only)',
   description:
-    'Retrieve an item\'s PDF or EPUB text for grounding. Pass a parent `item_key` (its best PDF/EPUB attachment is resolved automatically) or an attachment key. With `query`, returns the top relevant passages with locators (char offsets, nearest section, and a page); with `page_range` (e.g. "3-7"), returns just those pages, re-extracted from the PDF so the span is exact; with `outline:true`, returns the PDF\'s table of contents with page numbers (the cheapest way to decide which pages to read next); with none of them, returns a truncated head. Text comes from Zotero\'s full-text index when available; when the attachment is NOT indexed yet, the file itself is read and parsed on the fly (`fallback`, on by default; set `fallback:false` to disable), so a PDF added minutes ago still returns text (marked fulltextSource:"pdf" or "epub", with fileSource saying where the bytes came from). The file is read from the running Zotero desktop app, else straight out of the local Zotero storage folder, else downloaded from Zotero cloud storage. Page numbers are exact whenever the PDF was parsed, and otherwise an estimate (pageApprox) unless `precise_pages:true`. Read-only; the indexed text is served by the running Zotero desktop app when there is one, otherwise by the cloud Web API. Use this to cite a claim with a page after finding an item via zotero_search_items / zotero_semantic_search.',
+    "Retrieve an item's PDF or EPUB text for grounding. Pass a parent `item_key` (its best PDF/EPUB attachment is resolved automatically) or an attachment key. With `query`, returns the top relevant passages with locators (char offsets, nearest section, and a page); with `page_range` (e.g. \"3-7\"), returns just those pages, re-extracted from the PDF so the span is exact; with `outline:true`, returns the PDF's table of contents with page numbers (the cheapest way to decide which pages to read next); with none of them, returns a truncated head. Text comes from Zotero's full-text index when available; when the attachment is NOT indexed yet, the file itself is read and parsed on the fly (`fallback`, on by default; set `fallback:false` to disable), so a PDF added minutes ago still returns text (marked fulltextSource:\"pdf\" or \"epub\", with fileSource saying where the bytes came from). The file is read from the running Zotero desktop app, else straight out of the local Zotero storage folder, else downloaded from Zotero cloud storage. Page numbers are exact whenever the PDF was parsed, and otherwise an estimate (pageApprox) unless `precise_pages:true`. Read-only; the indexed text is served by the running Zotero desktop app when there is one, otherwise by the cloud Web API. Use this to cite a claim with a page after finding an item via zotero_search_items / zotero_semantic_search.",
   inputSchema: {
     item_key: z.string().describe('Parent item key or attachment key.'),
     query: z.string().optional().describe('Return top passages relevant to this query.'),
-    page_range: z
-      .string()
-      .optional()
-      .describe('Page span like "3-7" (1-based, inclusive). PDFs only.'),
+    page_range: z.string().optional().describe('Page span like "3-7" (1-based, inclusive). PDFs only.'),
     outline: z
       .boolean()
       .optional()
-      .describe(
-        "Return the PDF's table of contents (heading, page, nesting level) instead of text.",
-      ),
+      .describe("Return the PDF's table of contents (heading, page, nesting level) instead of text."),
     max_passages: z.number().int().min(1).max(20).optional().describe('Max passages (default 5).'),
     max_chars: z
       .number()
@@ -199,9 +174,7 @@ const getFulltext: ToolDefinition = {
     precise_pages: z
       .boolean()
       .optional()
-      .describe(
-        'Re-extract the PDF for exact page numbers (already the default with `page_range`).',
-      ),
+      .describe('Re-extract the PDF for exact page numbers (already the default with `page_range`).'),
     fallback: z
       .boolean()
       .optional()
@@ -296,8 +269,7 @@ const getFulltext: ToolDefinition = {
 
     if (indexed) {
       content = ft.content;
-      totalChars =
-        typeof ft.totalChars === 'number' && ft.totalChars > 0 ? ft.totalChars : content.length;
+      totalChars = typeof ft.totalChars === 'number' && ft.totalChars > 0 ? ft.totalChars : content.length;
       totalPages = typeof ft.totalPages === 'number' ? ft.totalPages : undefined;
     } else if (args.fallback === false) {
       return err(
@@ -330,8 +302,7 @@ const getFulltext: ToolDefinition = {
         fulltextSource = 'pdf';
       } else {
         // Not a readable PDF: an EPUB is a zip of XHTML, which Zoteus unpacks itself.
-        const epub =
-          kind === 'pdf' ? null : extractEpubText(file.bytes, { maxBytes: DEFAULT_EPUB_MAX_BYTES });
+        const epub = kind === 'pdf' ? null : extractEpubText(file.bytes, { maxBytes: DEFAULT_EPUB_MAX_BYTES });
         if (!epub) {
           return err(
             `${noText}, and direct extraction yielded nothing (a scanned or corrupt file, an unsupported format, ` +
@@ -424,14 +395,7 @@ const getFulltext: ToolDefinition = {
         sourceNotice +
         degradeNotice;
       return ok(
-        {
-          ...base,
-          mode: 'passages',
-          pageSource,
-          passages,
-          truncated,
-          notice: (sourceNotice + degradeNotice).trim() || undefined,
-        },
+        { ...base, mode: 'passages', pageSource, passages, truncated, notice: (sourceNotice + degradeNotice).trim() || undefined },
         summary,
       );
     }
@@ -448,8 +412,7 @@ const getFulltext: ToolDefinition = {
         // An EPUB has no pages at all: it reflows, which is why Zotero cites it by
         // location rather than page. Saying so beats returning a made-up span.
         slice = content;
-        pagelessNotice =
-          ' An EPUB has no fixed pages, so `page_range` does not apply; the document head is returned instead.';
+        pagelessNotice = ' An EPUB has no fixed pages, so `page_range` does not apply; the document head is returned instead.';
       } else if (totalPages) {
         const s = Math.floor(((r.from - 1) / totalPages) * totalChars);
         const e = Math.ceil((r.to / totalPages) * totalChars);
@@ -460,9 +423,7 @@ const getFulltext: ToolDefinition = {
       const truncated = slice.length > maxChars;
       const text = truncated ? slice.slice(0, maxChars) : slice;
       const emptyNotice =
-        !text && totalPages
-          ? ` Pages ${args.page_range} appear to be beyond the document (~${totalPages} pages).`
-          : '';
+        !text && totalPages ? ` Pages ${args.page_range} appear to be beyond the document (~${totalPages} pages).` : '';
       return ok(
         {
           ...base,
@@ -495,15 +456,7 @@ const getFulltext: ToolDefinition = {
         ? 'from the Zotero full-text index'
         : `extracted from the ${fulltextSource === 'epub' ? 'EPUB' : 'PDF'} directly`;
     return ok(
-      {
-        ...base,
-        mode: 'document',
-        pageSource,
-        text,
-        truncated,
-        omittedChars: truncated ? content.length - maxChars : 0,
-        notice,
-      },
+      { ...base, mode: 'document', pageSource, text, truncated, omittedChars: truncated ? content.length - maxChars : 0, notice },
       `Full text of ${args.item_key}: ${content.length} chars${truncated ? `, returned first ${maxChars}` : ''} ` +
         `(${provenance}).`,
     );

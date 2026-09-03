@@ -71,11 +71,11 @@ describe('authoritative embedder records', () => {
     expect(entryFingerprint(INCUMBENT_LOCAL_ENTRY)).toBe(LEGACY_INCUMBENT_FINGERPRINT);
   });
 
-  it('gives every measured entry immutable, pinned, field-specific provenance', () => {
+  it('gives the E5 alternative immutable, pinned, field-specific provenance', () => {
     const measured = Object.values(EMBEDDER_ENTRIES).filter(
       (entry) => entry !== INCUMBENT_LOCAL_ENTRY,
     );
-    expect(measured).toHaveLength(17);
+    expect(measured).toHaveLength(1);
     expect(EMBEDDER_STUDY_REVISION).toBe('aa9d82f0692208ce1e8b72e57094bd2d533900ea');
 
     for (const entry of measured) {
