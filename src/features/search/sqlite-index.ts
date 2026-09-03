@@ -617,6 +617,29 @@ export class SqliteSearchIndex extends SearchIndexBase {
     if ((this.meta('salvageEmbedderId') || undefined) !== this.embedderId) return;
     this.salvage = VectorSalvage.openIfUsable(from, this.opts.logger);
     if (!this.salvage) this.storeSalvagePointer(undefined, undefined);
+    // A stamped index re-arming a pointer to another library's file can be answered here,
+    // before a single passage is looked up. The pointer itself is kept, on the same
+    // reasoning as the embedder above: it is not a wrong pointer, this is just not the
+    // library that wrote those vectors.
+    this.dropForeignSalvage();
+  }
+
+  /**
+   * Disarm a salvage whose vectors belong to a different library than the one being
+   * indexed, and say once why (#44).
+   *
+   * Not decidable where the salvage is armed: `sideline()` runs at open, before any build
+   * has said which library it is crawling, so the file is opened first and judged as soon
+   * as there is something to judge it against. Refusing costs the re-embed the rebuild
+   * would have paid anyway, and everything else about the sideline is unchanged: the
+   * moved-aside file is still there, still complete, still named in the notice.
+   */
+  private dropForeignSalvage(): void {
+    const refusal = this.salvage?.refusalFor(this.library);
+    if (!refusal) return;
+    this.opts.logger?.info(refusal);
+    this.salvage?.close();
+    this.salvage = undefined;
   }
 
   /**
@@ -640,6 +663,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * file holds one for this exact id and this exact text. See VectorSalvage.
    */
   protected adoptVector(rec: ChunkRecord): boolean {
+    if (!this.salvage) return false;
+    // The library check lands here rather than at the arming site because this is the
+    // first moment it can: by the time a passage is offered, the build has stamped the
+    // library it is crawling. One mismatch disarms the salvage, so this costs a null
+    // check per passage thereafter.
+    this.dropForeignSalvage();
     if (!this.salvage) return false;
     const blob = this.salvage.vectorFor(rec.id, rec.text);
     if (!blob) return false;
