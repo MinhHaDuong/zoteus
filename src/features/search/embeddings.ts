@@ -18,6 +18,13 @@ export interface EmbeddingProvider {
   readonly name: string;
   /** Model producing the vectors; part of the index's embedder identity. */
   readonly model?: string;
+  /**
+   * Weight precision the model runs at, for a provider where that is ours to choose (the
+   * local one). Also part of the identity: a quantized graph answers the same question with
+   * different numbers, so its vectors are not the fp32 ones. Unset for an API provider,
+   * whose precision is the provider's business and never ours.
+   */
+  readonly dtype?: EmbeddingDtype;
   embed(texts: string[], kind?: EmbedKind): Promise<number[][]>;
 }
 
@@ -38,6 +45,45 @@ export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
  * index would silently invalidate everyone's vectors.
  */
 export const DEFAULT_LOCAL_MODEL = 'Xenova/all-MiniLM-L6-v2';
+
+/**
+ * Weight precisions a transformers.js repo can publish, in the package's own vocabulary:
+ * each name maps to a file suffix on the ONNX graph (`fp32` is the bare `model.onnx`, `q8`
+ * is `model_quantized.onnx`, and so on), so naming one here reaches exactly the variant the
+ * repo uploaded under that name.
+ *
+ * `auto` is deliberately not among them. It resolves against the runtime's device rather
+ * than against anything the user chose (fp32 on CPU, q8 on wasm), and a setting that means a
+ * different precision on a different machine cannot be an honest part of a vector identity.
+ */
+export const EMBEDDING_DTYPES = [
+  'fp32',
+  'fp16',
+  'q8',
+  'int8',
+  'uint8',
+  'q4',
+  'q4f16',
+  'q2',
+  'q2f16',
+  'q1',
+  'q1f16',
+  'bnb4',
+] as const;
+
+export type EmbeddingDtype = (typeof EMBEDDING_DTYPES)[number];
+
+/**
+ * Full precision, which is what `@huggingface/transformers` 4.2.0 already downloads on CPU
+ * and therefore what every index built before this knob existed holds.
+ *
+ * It is passed to the pipeline *explicitly* rather than left unset. Unset means "the
+ * package's default for this device", a value that lives in the package and could move in a
+ * release; pinning it keeps `local:<model>` meaning one precision for as long as the index
+ * that stamped it exists.
+ */
+export const DEFAULT_LOCAL_DTYPE: EmbeddingDtype = 'fp32';
+
 
 /**
  * The E5 family (and the instruct models built on it) is trained with these markers on its
@@ -72,8 +118,14 @@ export function inputPrefixes(model: string, mode: PrefixMode = 'auto'): Readonl
  * usually, a dimension), so an index persists this and refuses to rank its stored vectors
  * against queries embedded by a different one. See SearchIndex.loadFromJSON.
  */
-export function embedderIdentity(p: { name: string; model?: string }): string {
-  return p.model ? `${p.name}:${p.model}` : p.name;
+export function embedderIdentity(p: { name: string; model?: string; dtype?: EmbeddingDtype }): string {
+  const base = p.model ? `${p.name}:${p.model}` : p.name;
+  // Full precision stays unsuffixed, and that is a compatibility decision rather than a
+  // cosmetic one: `local:Xenova/all-MiniLM-L6-v2` is the identity stamped into every local
+  // index ever built, all of them at fp32. Spelling it `...@fp32` now would declare every
+  // one of those stale and charge a full re-embed for a setting nobody touched. Any other
+  // precision is a different vector space and says so (#43).
+  return p.dtype && p.dtype !== DEFAULT_LOCAL_DTYPE ? `${base}@${p.dtype}` : base;
 }
 
 /**
@@ -304,6 +356,32 @@ export function missingTransformersHint(config?: Pick<ZoteusConfig, 'dist' | 'tr
   );
 }
 
+/**
+ * Why a pipeline failed to construct, with the precision named when the precision is the
+ * likely reason.
+ *
+ * A dtype is not a knob on the model, it is a *file*: `q8` asks the repo for
+ * `onnx/model_quantized.onnx`, and a repo that never uploaded that file answers with a
+ * fetch failure naming a path, not with "this model has no q8". The two repos serving the
+ * same model differ here (#43): the community mirrors under `Xenova/` publish the whole
+ * suffixed set, while a model's own repo often publishes the plain fp32 graph alone. So the
+ * user who set one variable gets told which variable to unset, and which repo does carry
+ * what they asked for.
+ */
+export function dtypeLoadHint(model: string, dtype: EmbeddingDtype, cause: unknown): string {
+  const why = cause instanceof Error ? cause.message : String(cause);
+  if (dtype === DEFAULT_LOCAL_DTYPE) {
+    return `Could not load the local embedding model "${model}" (${why}).`;
+  }
+  return (
+    `Could not load the local embedding model "${model}" at ZOTEUS_EMBEDDING_DTYPE=${dtype} (${why}). ` +
+    `A dtype names a file the repository has to publish, not a conversion Zoteus performs, so a ` +
+    `repository that uploaded only full-precision weights fails here and would load with ` +
+    `ZOTEUS_EMBEDDING_DTYPE unset. The Xenova mirrors publish the quantized variants: ` +
+    `Xenova/multilingual-e5-small and Xenova/all-MiniLM-L6-v2 both serve ${dtype}.`
+  );
+}
+
 /** Local on-device embeddings via @huggingface/transformers (optional, lazy). */
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly name = 'local';
@@ -325,8 +403,15 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       batchDelayMs?: number;
       /** Input-prefix policy for this model (see inputPrefixes); unset means auto. */
       prefixes?: PrefixMode;
+      /** Weight precision to load (see DEFAULT_LOCAL_DTYPE); unset means full precision. */
+      dtype?: EmbeddingDtype;
     } = {},
   ) {}
+
+  /** The precision this provider loads at, and the one its identity is stamped with. */
+  get dtype(): EmbeddingDtype {
+    return this.opts.dtype ?? DEFAULT_LOCAL_DTYPE;
+  }
 
   /**
    * What this model wants in front of a query and in front of a passage, or null. Computed
@@ -378,7 +463,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     // is supposed to be the whole uninstall, and the weights are its largest artifact.
     const env = transformers.env ?? transformers.default?.env;
     if (env && this.opts.modelCacheDir) env.cacheDir = this.opts.modelCacheDir;
-    this.extractor = await pipeline('feature-extraction', this.model);
+    try {
+      this.extractor = await pipeline('feature-extraction', this.model, { dtype: this.dtype });
+    } catch (e) {
+      throw new Error(dtypeLoadHint(this.model, this.dtype, e));
+    }
     return this.extractor;
   }
 
@@ -607,6 +696,9 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
           batchSize: localEmbedBatchSize(config.embedBatchSize),
           batchDelayMs: config.embedBatchDelayMs,
           prefixes: config.embeddingPrefixes,
+          // The precision the weights are downloaded and run at. It reaches the identity,
+          // so switching it costs one rebuild rather than quietly mixing two vector spaces.
+          dtype: config.embeddingDtype,
         }),
         configured: 'local',
       };

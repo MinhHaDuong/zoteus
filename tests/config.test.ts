@@ -12,6 +12,7 @@ describe('loadConfig', () => {
     expect(cfg.embeddings).toBe('local');
     // Unset: each provider keeps its own model, batch size and (absent) inter-batch pause.
     expect(cfg.embeddingModel).toBeUndefined();
+    expect(cfg.embeddingDtype).toBe('fp32');
     expect(cfg.embedBatchSize).toBeUndefined();
     expect(cfg.embedBatchDelayMs).toBe(0);
     // Full-text indexing is opt-in: it multiplies build time and index size.
@@ -188,6 +189,7 @@ describe('loadConfig', () => {
       ZOTEUS_LOCAL: 'auto',
       ZOTEUS_EMBEDDINGS: 'local',
       ZOTEUS_EMBEDDING_MODEL: '${user_config.embedding_model}',
+      ZOTEUS_EMBEDDING_DTYPE: '${user_config.embedding_dtype}',
       ZOTEUS_EMBED_BATCH_SIZE: '${user_config.embed_batch_size}',
       ZOTEUS_EMBED_BATCH_DELAY_MS: '${user_config.embed_batch_delay_ms}',
       ZOTEUS_TRANSFORMERS_PATH: '${user_config.transformers_path}',

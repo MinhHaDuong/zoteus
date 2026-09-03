@@ -4,6 +4,45 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **The local model's weight precision is selectable, and it is part of the vector identity
+  (#43).** `Xenova/multilingual-e5-small` is the answer for a multilingual library, but at
+  full precision it is 465 MB on disk, which is the difference between comfortable and
+  marginal on a Chromebook where ChromeOS, a browser and the Linux container share a few
+  gigabytes. `ZOTEUS_EMBEDDING_DTYPE=q8` loads the quantized graph instead: **129 MB**,
+  measured, of which 113 MB is the ONNX file and 16 MB the sentencepiece tokenizer that is
+  the same at either precision. `Xenova/all-MiniLM-L6-v2` goes from 87 MB to 23 MB the same
+  way. `fp16`, `int8`, `uint8`, `q4`, `q4f16`, `q2`, `q2f16`, `q1`, `q1f16` and `bnb4` are
+  accepted too, because a repository can publish any of them.
+
+  Above `fp32` the precision joins the persisted embedder identity, which was the stated
+  precondition for offering this at all: `local:Xenova/multilingual-e5-small@q8` is a
+  different vector space from `local:Xenova/multilingual-e5-small` and can never be mistaken
+  for it, so switching precision drops the old vectors with a notice and costs one
+  `zotero_index action:"build"`, exactly as switching model does. `fp32` stays *unsuffixed*
+  on purpose: it is what every local index ever built holds, and spelling it `@fp32` now
+  would declare all of them stale over a setting nobody touched. Unset also passes `fp32` to
+  the pipeline explicitly rather than leaving the choice to the package, so `local:<model>`
+  keeps meaning one precision even if a future transformers.js changes its own default.
+
+  Measured on the same German/English probe as the model change above: `q8` ranks the German
+  answer first for all four questions, as fp32 does, and its English twin 2.5th on average
+  against fp32's 2.0th. MiniLM ranks that twin 9.5th, so the precision costs a fraction of
+  what the model buys. This agrees with the six-model benchmark in #43, where the E5 family
+  was the only one whose negative controls stayed clean at every quantization level (and
+  where `granite-97m`, by contrast, collapsed on several lanes at 8-bit).
+
+  A dtype is a *file* the repository has to publish, not a conversion Zoteus performs: `q8`
+  asks for `onnx/model_quantized.onnx`, and the `Xenova/` mirrors carry the full suffixed set
+  while a model's own repository frequently carries the fp32 graph alone. Asking
+  `intfloat/multilingual-e5-small` for `q8` therefore fails, and it now fails with a message
+  naming the setting, the file and the mirror that does serve it, rather than a bare 404 on a
+  URL. `ZOTEUS_EMBEDDING_DTYPE` is on-device only; setting it under an API provider logs that
+  it is ignored, because that provider's precision is decided on its own hardware. There is a
+  matching field in the desktop extension's settings pane.
+
 ## [1.13.0] - 2026-09-03
 
 ### Added
