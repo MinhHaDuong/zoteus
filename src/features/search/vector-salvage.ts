@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
 import type { DatabaseSync as Database, StatementSync } from 'node:sqlite';
+import { describeLibraryToken } from './backend.js';
 import type { Logger } from '../../lib/logger.js';
 
 /**
@@ -20,10 +21,12 @@ const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof
  * model, and a table-layout change touches neither — so the vectors in the moved-aside
  * file are still the right vectors for whatever the rebuild re-reads.
  *
- * This hands them back under three conditions, all of which must hold together:
+ * This hands them back under four conditions, all of which must hold together:
  *
  *  - the moved-aside index was written by the SAME embedder (its `embedderId`, which
  *    names provider and model, is what the caller compares before opening this at all);
+ *  - it holds the same LIBRARY the rebuild is indexing, where it says which one it held
+ *    (`refusalFor`, and see the note there on files that do not say);
  *  - the rebuilt passage has the same id, i.e. it is the same chunk of the same item;
  *  - and the same TEXT, byte for byte, so an item whose abstract was edited in the
  *    meantime is re-embedded rather than given the vector of what it used to say.
@@ -37,11 +40,24 @@ export class VectorSalvage {
   private reusedCount = 0;
   private readonly logger: Logger | undefined;
   readonly path: string;
+  /**
+   * The library the sidelined index was built for (`canonicalLibraryToken`), or undefined
+   * when the file carries no stamp. Read once, at open: the file is never written to and
+   * its stamp cannot change under us.
+   */
+  readonly library: string | undefined;
 
-  private constructor(path: string, db: Database, lookup: StatementSync, logger?: Logger) {
+  private constructor(
+    path: string,
+    db: Database,
+    lookup: StatementSync,
+    library: string | undefined,
+    logger?: Logger,
+  ) {
     this.path = path;
     this.db = db;
     this.lookup = lookup;
+    this.library = library;
     this.logger = logger;
   }
 
@@ -68,7 +84,7 @@ export class VectorSalvage {
       // Both halves of the identity in one point lookup: `id` is UNIQUE, so this is an
       // index seek, and the text comparison rejects a passage whose words have moved on.
       const lookup = db.prepare('SELECT vector FROM passages WHERE id = ? AND text = ? AND vector IS NOT NULL');
-      return new VectorSalvage(path, db, lookup, logger);
+      return new VectorSalvage(path, db, lookup, libraryStamp(db), logger);
     } catch (e) {
       db?.close();
       logger?.debug(`Vectors could not be salvaged from ${path}: ${e instanceof Error ? e.message : String(e)}`);
@@ -93,6 +109,31 @@ export class VectorSalvage {
     }
   }
 
+  /**
+   * Why these vectors must not serve a build of `library`, or undefined when they may.
+   *
+   * A passage id is an item key and a chunk number, and an item key is unique within a
+   * library, not across libraries (#44). So the id-plus-text match above is an identity
+   * only once both sides are known to be the same library's, and nothing else in the
+   * salvage path establishes that: the file is opened inside `sideline()`, at open, long
+   * before a build says which library it is crawling, and the fresh index that replaces it
+   * is deliberately unstamped. Two gates, and only this one knows about libraries.
+   *
+   * Both unknowns are permissive, and for the same reason `assertLibrary` exempts them: an
+   * unstamped file (written before the stamp existed, or by a build that never reached its
+   * first row) says nothing about whose rows it holds, and a caller with no library of its
+   * own has asserted nothing to contradict. Refusing on an unknown would strand every
+   * pre-stamp index behind a full re-embed to protect against a collision nobody can show.
+   */
+  refusalFor(library: string | undefined): string | undefined {
+    if (!library || !this.library || this.library === library) return undefined;
+    return (
+      `Vectors were not reused from ${this.path}: it was built for ${describeLibraryToken(this.library)} and ` +
+      `this build indexes ${describeLibraryToken(library)}. Item keys repeat across libraries, so a passage id ` +
+      'that matches there is not the same passage here. These passages are embedded instead.'
+    );
+  }
+
   /** Vectors handed back so far, i.e. passages this rebuild did not have to embed. */
   get reused(): number {
     return this.reusedCount;
@@ -106,5 +147,22 @@ export class VectorSalvage {
       // Closing a read-only handle cannot lose anything, so a failure here is not news.
     }
     this.db = undefined;
+  }
+}
+
+/**
+ * The library stamp of a sidelined database, or undefined when it does not carry one.
+ *
+ * As defensive as the column probe above and for the same reason: `meta` is this build's
+ * table, and the file was written by a build whose schema this one does not know, so the
+ * table may be shaped differently or absent entirely. An empty value is the same as no
+ * value: that is what an index with no library writes.
+ */
+function libraryStamp(db: Database): string | undefined {
+  try {
+    const row = db.prepare("SELECT value FROM meta WHERE key = 'library'").get() as { value?: string } | undefined;
+    return row?.value || undefined;
+  } catch {
+    return undefined;
   }
 }

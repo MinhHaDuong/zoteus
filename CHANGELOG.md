@@ -4,6 +4,33 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The vector salvage no longer reuses vectors another library wrote (#44).** The salvage
+  a schema sideline arms (#34) matches a rebuilt passage against the moved-aside index on
+  passage id plus byte-identical text, and a passage id is an item key and a chunk number.
+  Item keys are unique within a library rather than across libraries, so that match is an
+  identity only once both sides are known to be the same library's rows, and nothing in the
+  salvage path established that. It is armed inside `sideline()` at file open, before any
+  build has said which library it is crawling, and the fresh index that replaces the
+  moved-aside file is deliberately unstamped, which is exactly the state `assertLibrary`
+  exempts: two gates on one file, and only one of them knew about libraries. Reaching a
+  wrong vector took a conjunction (a schema-triggered sideline of one library's file, a
+  build for a *different* library against the fresh file that replaced it, the same
+  embedder, an item-key collision across the two libraries, and byte-identical passage
+  text), which is remote enough that nobody has hit it, and it was untested rather than
+  known-safe. The sidelined file's own library stamp now travels with it as a vector
+  source, and the first passage a build offers the salvage is judged against it: a mismatch
+  disarms the salvage for the rest of that build, says so once on the `INFO` channel naming
+  both libraries, and those passages are embedded instead, which is the cost the rebuild
+  would have paid anyway. Nothing else about the sideline changes: the moved-aside file is
+  still kept, still complete, still named in the notice. A sidelined file carrying **no**
+  stamp keeps salvaging, deliberately, on the same reasoning `assertLibrary` uses for a
+  pre-stamp index: it says nothing about whose rows it holds, and refusing on that unknown
+  would charge every index written before the stamp existed a full re-embed to guard
+  against a collision nobody can demonstrate.
+
 ## [1.12.0] - 2026-08-31
 
 ### Fixed
