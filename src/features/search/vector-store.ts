@@ -23,6 +23,11 @@ export class VectorStore {
     return this.entries[0]?.vector.length;
   }
 
+  /** Whether this id already carries a vector, without materializing it. */
+  has(id: string): boolean {
+    return this.at.has(id);
+  }
+
   add(id: string, vector: number[]): void {
     const i = this.at.get(id);
     if (i !== undefined) {

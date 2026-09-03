@@ -80,6 +80,14 @@ export const UNREADABLE_STORE = 'the search index cannot be read';
  */
 const PAGE_GROUP = 100;
 
+/**
+ * Passages a resumed build pulls out of the store per vector-backfill round. Bounded so a
+ * build that has to embed 30,000 orphaned passages never holds 30,000 passage texts at
+ * once; large enough that the round trip to the store is amortized over several embedding
+ * batches at the default batch size of 32.
+ */
+const VECTOR_BACKFILL_GROUP = 500;
+
 function itemText(d: any): string {
   const creators = (d.creators ?? []).map((c: any) => c.lastName ?? c.name).filter(Boolean).join(' ');
   const tags = (d.tags ?? []).map((t: any) => t.tag).filter(Boolean).join(' ');
@@ -417,6 +425,21 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected adoptVector(_rec: ChunkRecord): boolean {
     return false;
   }
+  /**
+   * Up to `limit` committed passages that carry no vector, so a resumed build can buy the
+   * embeddings an interrupted one never got to.
+   *
+   * A page rather than the whole set, and deliberately: after a provider failure partway
+   * through a full-text build there can be tens of thousands of these, and materializing
+   * them all would hold every passage's text in memory at once. The caller loops until the
+   * store answers with none.
+   *
+   * `pendingPassages` on the checkpoint does not cover this. That names the handful an
+   * interruption caught between `putPassage` and the embedding call; this is the far larger
+   * set an embedder that DIED mid-build left behind, which until #48 nothing ever came back
+   * for, because the failed build cleared its own checkpoint and the next one started over.
+   */
+  protected abstract passagesMissingVectors(limit: number): ChunkRecord[];
   /** Discard every stored vector, keeping the passages. */
   protected abstract clearVectors(): void;
   /**
@@ -596,6 +619,14 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.resumedFrom !== undefined) s.resumedFrom = this.resumedFrom;
     if (this.localApiDegradedAt !== undefined) {
       s.localApiDegradedAt = new Date(this.localApiDegradedAt).toISOString();
+    }
+    // Only with a provider in hand: with ZOTEUS_EMBEDDINGS=off, or a key that is unset,
+    // every passage lacks a vector by design and reporting a shortfall would be a fiction.
+    // Withheld too when the vectors were dropped as another model's, since that has its own
+    // notice naming its own remedy and two would be one too many.
+    if (this.embedderId && !this.vectorsStale) {
+      const missing = base.documents - base.vectors;
+      if (missing > 0) s.passagesWithoutVectors = missing;
     }
     if (this.fault) {
       s.state = 'error';
@@ -821,6 +852,8 @@ export abstract class SearchIndexBase implements SearchIndex {
      * not by passages, so finding the resume point never walks the index.
      */
     let known: Set<string> | undefined;
+    /** Passages this run embedded on behalf of the interrupted one (see backfillVectors). */
+    let backfilled = 0;
     if (resume) {
       // The store is kept exactly as it is, so what it holds keeps answering queries
       // throughout, and the counters it was committed with come back with it.
@@ -913,7 +946,14 @@ export abstract class SearchIndexBase implements SearchIndex {
         ? 'The library had moved on since, so the crawl walked the whole library again to be sure of covering it, ' +
           'but nothing already indexed was re-chunked or re-embedded.'
         : `The crawl picked up at item ${resume!.crawlOffset}, so nothing already indexed was re-fetched or re-embedded.`;
-      const resumed = `This build RESUMED an interrupted one: ${this.resumedFrom} items were already indexed. ${how}`;
+      // Said outright because it is the expensive part and the part that used to be
+      // repeated: an embedder that failed mid-build leaves passages committed without
+      // vectors, and buying only those is the whole difference between a resume and a
+      // rebuild on a library whose full-text pass costs tens of dollars (#48).
+      const filled = backfilled
+        ? ` ${backfilled} passage(s) the interrupted build committed without vectors were embedded here, and only those.`
+        : '';
+      const resumed = `This build RESUMED an interrupted one: ${this.resumedFrom} items were already indexed. ${how}${filled}`;
       this.updateNotice = opts.note ? `${opts.note} ${resumed}` : resumed;
     };
     if (resume) noteResumed();
@@ -976,6 +1016,46 @@ export abstract class SearchIndexBase implements SearchIndex {
     };
     const embedPending = (force: boolean): Promise<void> =>
       this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, force);
+
+    /**
+     * Embed the committed passages that carry no vector, a page at a time.
+     *
+     * A page rather than one list, because after a provider failure partway through a
+     * full-text build there can be tens of thousands, and holding every passage's text in
+     * memory at once would trade one failure mode for another. The loop ends when the store
+     * answers with none, when the embedder dies again (`hasEmbedder` goes false and there
+     * is nothing more to be bought), or when a round fails to reduce the shortfall, which
+     * is the guard against asking forever for rows nothing can fill.
+     */
+    const backfillVectors = async (): Promise<number> => {
+      if (!this.hasEmbedder) return 0;
+      const shortfall = (): number => {
+        const c = this.counts();
+        return c.documents - c.vectors;
+      };
+      let remaining = shortfall();
+      let embedded = 0;
+      while (remaining > 0 && this.hasEmbedder && !token.cancelled) {
+        const batch = this.passagesMissingVectors(VECTOR_BACKFILL_GROUP);
+        if (!batch.length) break;
+        if (!embedded) {
+          this.opts.logger?.info(
+            `index build: embedding ${remaining} passage(s) an interrupted build committed without vectors.`,
+          );
+        }
+        for (const rec of batch) pending.push(rec);
+        await embedPending(true);
+        const left = shortfall();
+        if (left >= remaining) break;
+        embedded += remaining - left;
+        remaining = left;
+        itemsSinceLog += batch.length;
+        itemsSincePersist += batch.length;
+        maybeLog();
+        await maybePersist();
+      }
+      return embedded;
+    };
 
     try {
       // The passages the interrupted run had written but not yet embedded, re-queued
@@ -1127,6 +1207,14 @@ export abstract class SearchIndexBase implements SearchIndex {
         }
       }
 
+      // The last thing a resumed build does, and the half of #48 the checkpoint alone does
+      // not fix. An embedder that died mid-build left thousands of passages committed,
+      // keyword-searchable and vector-less; the crawl above steps over their items by key
+      // and the full-text pass steps over them with `hasFulltext`, precisely because they
+      // ARE indexed. Only this comes back for them, and only for the embedding: no page is
+      // re-fetched, no PDF is re-read, no passage is re-chunked.
+      if (resume && !token.cancelled) backfilled = await backfillVectors();
+
       this.builtFromVersion = this.itemsFetched;
       // A cancelled crawl covers an unknown prefix of the library, so it gets no stamp: an
       // update against one would treat every item it never reached as unchanged forever.
@@ -1140,7 +1228,14 @@ export abstract class SearchIndexBase implements SearchIndex {
       // nothing — the items whose attachments were never crawled are unchanged in Zotero,
       // so they appear in no delta, ever. Their body text would be missing permanently and
       // nothing would say so, because `fulltextEnabled` is true and `fulltextReason` unset.
-      if (!token.cancelled && crawlVersion && !fulltextPassFailed) {
+      //
+      // An embedder that failed is withheld from the stamp on the same grounds. The index
+      // is complete on text and incomplete on vectors, and a stamp would let the next
+      // action:"update" run a `?since=V` delta that finds nothing to do: the passages
+      // missing vectors belong to items Zotero has not touched, so they appear in no delta,
+      // ever, and the index would sit half-embedded for good. Without the stamp the update
+      // falls back to a build, and that build resumes and finishes the embedding (#48).
+      if (!token.cancelled && crawlVersion && !fulltextPassFailed && !this.embedderError) {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.versionBackend;
       }
@@ -1152,7 +1247,13 @@ export abstract class SearchIndexBase implements SearchIndex {
       }
       // A finished build has nothing left to resume; a stopped one is the whole point of
       // keeping this, and its checkpoint has to reach disk in the same write as its rows.
-      if (token.cancelled) noteCheckpoint();
+      //
+      // A build the embedder died in counts as unfinished, and dropping its checkpoint is
+      // exactly how #48 turned six transient 429s into six full rebuilds: the pass carried
+      // on writing passages BM25-only, reached the end, reported `done`, and cleared the
+      // one record that would have let the next build pick up the un-embedded remainder.
+      // It kept everything except the ability to continue.
+      if (token.cancelled || this.embedderError) noteCheckpoint();
       else this.checkpoint = undefined;
       // Before the persist, so the codes derived from these vectors are committed by the
       // same transaction that makes the vectors durable. A cancelled build gets them too:
@@ -2064,6 +2165,16 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   protected putVector(id: string, vector: number[]): void {
     this.vectors.add(id, vector);
+  }
+
+  protected passagesMissingVectors(limit: number): ChunkRecord[] {
+    const out: ChunkRecord[] = [];
+    for (const [id, rec] of this.chunks) {
+      if (this.vectors.has(id)) continue;
+      out.push(rec);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   protected clearVectors(): void {

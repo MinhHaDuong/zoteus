@@ -333,6 +333,18 @@ export interface IndexBuildStatus extends SearchIndexStatus {
    * desktop hosts discard, so the slowdown had no visible cause at all.
    */
   localApiDegradedAt?: string;
+  /**
+   * Passages held for keyword search that carry no vector, when an embedder is configured
+   * and something should have given them one. Present only when it is non-zero.
+   *
+   * The measure of a half-embedded index, and the number that used to have nowhere to be
+   * reported: an embedder that failed partway through a build left tens of thousands of
+   * these, and status said only "embedder=none", which reads as an index with no vectors
+   * at all rather than one with most of them (#48). It is also what tells a caller the
+   * remedy is `action:"build"` (which resumes and buys exactly these) rather than
+   * `action:"refresh"` (which would pay for every vector again).
+   */
+  passagesWithoutVectors?: number;
 }
 
 /** One page of library items plus the library-wide total (for progress). */

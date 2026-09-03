@@ -103,6 +103,29 @@ export function staleVectorsNotice(s: IndexBuildStatus): string {
 }
 
 /**
+ * Sentence appended when the index holds passages nothing has embedded yet.
+ *
+ * The half of #48 that no existing notice covered. When an embedder failed partway through
+ * a full-text build, status reported `embedder=none` and nothing else, which reads as an
+ * index with no vectors when in fact it had 53,000 of the 87,000 it wanted; and the obvious
+ * next move, `action:"refresh"`, is the one that throws all 53,000 away and buys them
+ * again. So this says the number, and names the action that finishes the job instead.
+ *
+ * Suppressed while a build is running: a healthy build always has a batch or two queued,
+ * and reporting that as a shortfall would put a warning on every progress poll.
+ */
+export function unembeddedNotice(s: IndexBuildStatus): string {
+  if (!s.passagesWithoutVectors || s.state === 'building') return '';
+  return (
+    ` ${s.passagesWithoutVectors} indexed passage(s) carry no vector yet, so semantic ranking cannot see them` +
+    ' (keyword search can). Run zotero_index action:"build" again: it RESUMES, embedding exactly those and' +
+    ' re-fetching nothing. Do NOT use action:"refresh", which starts the whole crawl over and pays for every' +
+    ' vector a second time. If an API rate limit is what stopped it, pace the next run with' +
+    ' ZOTEUS_EMBED_BATCH_SIZE and ZOTEUS_EMBED_BATCH_DELAY_MS.'
+  );
+}
+
+/**
  * Sentence appended when the build limit stopped the crawl short of the library. Same
  * reasoning as `embedderNotice` and `fulltextNotice`: without it a capped build reports
  * complete coverage, so a search that finds nothing in the unindexed remainder is
@@ -186,6 +209,7 @@ export function statusSummary(s: IndexBuildStatus): string {
   const notice =
     embedderNotice(s) +
     staleVectorsNotice(s) +
+    unembeddedNotice(s) +
     fulltextNotice(s) +
     ownWordsNotice(s) +
     truncationNotice(s) +
