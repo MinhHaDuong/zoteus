@@ -60,7 +60,7 @@ export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
  * charged its owner a full re-embed (hours, and real API spend) for a cache the server
  * can rebuild from what is already on disk.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /**
  * How the keyword index tokenizes, in one place because the migration rung has to declare
@@ -201,6 +201,22 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       deriveAccentVariants(db);
     },
   },
+  {
+    to: 3,
+    what: 'stores each item’s year and type, so a search can be scoped by them',
+    up(db) {
+      // Two columns and two indexes, and not one stored row is invalidated: this is the
+      // routine bump the ladder was built for. The alternative — bumping without a rung —
+      // would charge every library in the field a full re-embed for a column.
+      db.exec('ALTER TABLE items ADD COLUMN year INTEGER');
+      db.exec('ALTER TABLE items ADD COLUMN item_type TEXT');
+      db.exec('CREATE INDEX IF NOT EXISTS items_year ON items(year)');
+      db.exec('CREATE INDEX IF NOT EXISTS items_item_type ON items(item_type)');
+      // Both columns land NULL, and deliberately: the values are Zotero's, not the
+      // database's, so there is nothing here to derive them from. The next crawl fills
+      // them in — see `putItem`, which had to learn to UPDATE for that to be true.
+    },
+  },
 ];
 
 /**
@@ -295,6 +311,7 @@ interface PassageRow {
 /** Statements prepared once at open(): every write in a build goes through them. */
 interface Statements {
   insertItem: StatementSync;
+  backfillItemFacets: StatementSync;
   insertPassage: StatementSync;
   insertFts: StatementSync;
   variantsFor: StatementSync;
@@ -926,7 +943,19 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private createSchema(): void {
     this.handle.exec(`
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-      CREATE TABLE IF NOT EXISTS items (item_key TEXT PRIMARY KEY, title TEXT NOT NULL);
+      -- year and item_type are the scope facets: stored attributes rather than a rowid
+      -- set handed in per query, because an indexed predicate answers where the blob is
+      -- 43x slower and, by removing work, costs nothing against an unfiltered baseline.
+      -- Both are nullable — an item whose date Zotero cannot parse has no year, and an
+      -- index migrated from version 2 has none until its next crawl.
+      CREATE TABLE IF NOT EXISTS items (
+        item_key TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        year INTEGER,
+        item_type TEXT
+      );
+      CREATE INDEX IF NOT EXISTS items_year ON items(year);
+      CREATE INDEX IF NOT EXISTS items_item_type ON items(item_type);
       CREATE TABLE IF NOT EXISTS passages (
         pid INTEGER PRIMARY KEY,
         id TEXT NOT NULL UNIQUE,
@@ -978,7 +1007,15 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // Rescore statements are prepared on demand against this handle, so none may outlive it.
     this.rescoreStmts.clear();
     this.stmts = {
-      insertItem: db.prepare('INSERT OR IGNORE INTO items(item_key, title) VALUES (?, ?)'),
+      insertItem: db.prepare('INSERT OR IGNORE INTO items(item_key, title, year, item_type) VALUES (?, ?, ?, ?)'),
+      // The other half of `putItem`. `INSERT OR IGNORE` alone leaves an existing row
+      // exactly as it was, which is what a migrated index cannot afford: its facet columns
+      // are NULL and nothing but a write will fill them. COALESCE is what keeps the write
+      // safe — a caller with no facet in hand preserves what is stored rather than
+      // blanking it, so the backfill does not undo itself on the next touch.
+      backfillItemFacets: db.prepare(
+        'UPDATE items SET year = COALESCE(?, year), item_type = COALESCE(?, item_type) WHERE item_key = ?',
+      ),
       insertPassage: db.prepare(
         'INSERT INTO passages(id, item_key, title, text, source) VALUES (?, ?, ?, ?, ?)',
       ),
@@ -1232,10 +1269,21 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.ownWordsKeys = new Set();
   }
 
-  protected putItem(itemKey: string, title: string): void {
+  protected putItem(itemKey: string, title: string, year?: number | null, itemType?: string | null): void {
     this.begin();
-    const res = this.stmts.insertItem.run(itemKey, title);
-    if (Number(res.changes) > 0) this.c.items++;
+    const res = this.stmts.insertItem.run(itemKey, title, year ?? null, itemType ?? null);
+    if (Number(res.changes) > 0) {
+      this.c.items++;
+      return;
+    }
+    // The row was already there, so the insert did nothing — correct for a title that has
+    // not moved, and wrong for a facet column a migration left NULL. Without this line a
+    // pre-migration item stays unscopable for as long as it is never edited, which for a
+    // settled library is forever. Skipped when there is nothing to write, so the common
+    // incremental touch still costs one statement.
+    if (year != null || itemType != null) {
+      this.stmts.backfillItemFacets.run(year ?? null, itemType ?? null, itemKey);
+    }
   }
 
   protected putPassage(rec: ChunkRecord): void {

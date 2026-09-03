@@ -412,8 +412,14 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected abstract counts(): IndexCounts;
   /** Drop every passage and vector. */
   protected abstract clearStore(): void;
-  /** Register an indexed item. Called for every item, including ones with no text at all. */
-  protected abstract putItem(itemKey: string, title: string): void;
+  /**
+   * Register an indexed item. Called for every item, including ones with no text at all.
+   *
+   * `year` and `itemType` are the scope facets, and both are optional because a caller may
+   * genuinely not have them — an unparsable date, or an older call site not yet carrying
+   * them. Omitting one preserves whatever is stored rather than blanking it.
+   */
+  protected abstract putItem(itemKey: string, title: string, year?: number | null, itemType?: string | null): void;
   /** Store one passage (also updating item and full-text bookkeeping). */
   protected abstract putPassage(rec: ChunkRecord): void;
   /**
