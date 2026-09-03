@@ -637,8 +637,9 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   protected dropStaleVectors(cause: string): void {
     this.vectorsStale =
-      `${cause} They were discarded (vectors from different models are not comparable). Keyword search is ` +
-      'unaffected: run zotero_index action:"build" to re-embed the library with the current model.';
+      `${cause} They were discarded (vectors from different embedders are not comparable, even ` +
+      'where the model is the same). Keyword search is unaffected: run zotero_index ' +
+      'action:"build" to re-embed the library with the current one.';
     this.clearVectors();
     this.vectorEmbedderId = undefined;
     this.opts.logger?.warn(this.vectorsStale);

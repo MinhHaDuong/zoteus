@@ -749,10 +749,52 @@ identity below. `ZOTEUS_EMBEDDING_PREFIXES` overrides the detection in both dire
 never prefixes, `e5` always does (for a mirrored checkpoint whose name does not say what it
 is), `auto` is the default.
 
+**Pooling is decided by the model, from a table.** A model folds its per-token outputs into one
+vector either by averaging them (`mean`) or by taking the first, `[CLS]`, token (`cls`), and it
+is trained for one of the two. The other reads its outputs wrong without ever failing: the
+graph still returns a unit vector of the right width, it just retrieves worse. Measured on a
+257-passage, 68-query cross-lingual set with pooling as the only variable at fp32, mean pooling
+costs `granite-embedding-97m-multilingual-r2` 27.5% of its MRR and 34.6% of its hit@1,
+`gte-multilingual-base` 12.7% and 10.3%, `arctic-embed-m-v2` 10.3% and 14.7% (the harness and
+the corpus manifest are in the [#43](https://github.com/oscardvs/zoteus/issues/43) thread).
+Those are fp32 figures. At `q8` the gap narrows sharply on `granite-embedding-97m`, where the
+mean and CLS readings of a passage come out around cosine 0.999 of each other rather than the
+0.53 MiniLM shows at either precision, so on that model the correction buys much less than the
+numbers above once the weights are quantized. Why is not established; it is not a general
+property of `q8`. Unlike the E5
+prefixes, nothing in the model id says which pooling a model wants, and the value cannot be
+read at load time either: it is published in `1_Pooling/config.json` on the model's source
+repository, which the ONNX mirrors the pipeline loads (`Xenova/*`, `onnx-community/*`) do not
+republish. So Zoteus carries a curated table (`MODEL_POOLING` in `embeddings.ts`, each row naming
+the repository its value was read from): `mean` for MiniLM, the E5 family and the
+paraphrase-multilingual models, `cls` for the granite, gte, arctic-embed, bge and mxbai models, and
+`mean` for any model the table does not list, which is exactly what every model got before the
+table existed. The table is a record of what each model was trained with, not a list of models
+this project recommends: naming one there says its pooling was read, nothing more.
+
+`ZOTEUS_EMBEDDING_POOLING=mean` or `=cls` overrides the table for every model, for a mirrored
+or renamed checkpoint whose id the table cannot speak for; `auto` is the default. A pooling
+that is not the default joins the embedder identity, the way a precision above `fp32` does:
+`local:onnx-community/gte-multilingual-base#cls`. So setting it is not free. It makes a
+different vector space, the stored vectors stop matching the identity, and they are dropped
+with a notice the next time the server opens the index. Leave it unset unless you have read
+that file for your model.
+
+Every model the table pools the default way, the default model included, keeps the identity it
+always had, so an index built with one of those is untouched. An index built with one of the
+`cls` models under 1.13.0 is the exception, and the only one: it holds mean-pooled vectors, its
+identity does not carry the `#cls` this server now embeds with, and it is dropped with that same
+notice. One `zotero_index action:"build"` re-embeds it. If you would rather defer that,
+`ZOTEUS_EMBEDDING_POOLING=mean` reproduces the identity the index already carries and it keeps
+working, at the retrieval quality it was built with.
+
 **Changing the model means rebuilding**, exactly as it does for an API provider: the identity
 stored beside the vectors becomes `local:Xenova/multilingual-e5-small`, the old vectors are
 dropped with a notice, and one `zotero_index action:"build"` re-embeds the library. See
-[Changing the model means rebuilding the index](#tuning-api-embeddings) below.
+[Changing the model means rebuilding the index](#tuning-api-embeddings) below. An index built
+with one of the `cls` models before this release holds mean-pooled vectors, and it is dropped
+with the same notice for the same reason: its identity does not carry the `#cls` this server
+now embeds with. One `zotero_index action:"build"` re-embeds it.
 
 The weights are downloaded once into `<ZOTEUS_DATA_DIR>/models/<org>/<model>`, so deleting the
 data directory still removes them along with the index.
