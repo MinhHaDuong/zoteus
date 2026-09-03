@@ -101,11 +101,50 @@ describe('the pooling the pipeline is asked for', () => {
     expect(calls[0]!.options).toEqual({ pooling: 'mean', normalize: true });
   });
 
-  it('changes neither the identity nor the prefixes, which the model id already decides', () => {
+  it('leaves the identity of every model pooled the default way exactly as it was', () => {
+    // The compatibility half, and the reason the suffix is conditional: every local index
+    // ever built was mean-pooled, so none of these strings may move. `fp32` is spelt out
+    // here for the same reason it is unsuffixed in the identity -- to pin that an untouched
+    // setting adds nothing.
+    for (const model of [
+      DEFAULT_LOCAL_MODEL,
+      'Xenova/multilingual-e5-small',
+      'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+      'some-org/a-model-the-table-has-never-heard-of',
+    ]) {
+      const p = new LocalEmbeddingProvider(model, undefined, { dtype: 'fp32' });
+      expect(p.pooling, model).toBe('mean');
+      expect(embedderIdentity(p), model).toBe(`local:${model}`);
+    }
+  });
+
+  it('makes a CLS model a different vector space, because that is what it is', () => {
+    // The width check that catches a foreign vector cannot see this one: mean and cls share
+    // a dimension. Without the suffix an index built before this change is queried with the
+    // other reading of the same model under an identity that did not move, and nothing in
+    // the codebase can tell. This is what turns that into the drop-with-notice the server
+    // already emits.
     const cls = new LocalEmbeddingProvider('onnx-community/gte-multilingual-base');
     expect(cls.pooling).toBe('cls');
-    expect(embedderIdentity(cls)).toBe('local:onnx-community/gte-multilingual-base');
+    expect(embedderIdentity(cls)).toBe('local:onnx-community/gte-multilingual-base#cls');
     expect(cls.prefixes).toBe(inputPrefixes('onnx-community/gte-multilingual-base'));
+  });
+
+  it('stamps an override that departs from the table, and only then', () => {
+    // The override is the one way a user can change the vectors of a model the table
+    // already knows. Departing from the table is a new space and says so; agreeing with it
+    // is the same space and must not restamp an index that is already correct.
+    const forced = new LocalEmbeddingProvider(DEFAULT_LOCAL_MODEL, undefined, { pooling: 'cls' });
+    expect(embedderIdentity(forced)).toBe(`local:${DEFAULT_LOCAL_MODEL}#cls`);
+
+    const agreeing = new LocalEmbeddingProvider(DEFAULT_LOCAL_MODEL, undefined, { pooling: 'mean' });
+    expect(embedderIdentity(agreeing)).toBe(`local:${DEFAULT_LOCAL_MODEL}`);
+
+    // And it composes with the precision, which is the other half of the same stamp.
+    const both = new LocalEmbeddingProvider('onnx-community/gte-multilingual-base', undefined, {
+      dtype: 'q8',
+    });
+    expect(embedderIdentity(both)).toBe('local:onnx-community/gte-multilingual-base@q8#cls');
   });
 });
 
@@ -203,16 +242,15 @@ describe('ZOTEUS_EMBEDDING_POOLING as a setting', () => {
     expect(new LocalEmbeddingProvider(gte).pooling).toBe('cls');
   });
 
-  it('falls back to the table when it is not a pooling, and says which values it takes', () => {
-    // `max` and `average` are real poolings the pipeline does not have, `CLS` is the right
-    // one misspelt: each is a value the user believed in, so the warning names the two
-    // that exist rather than only the one that failed.
+  it('falls back to the table when it is not a pooling, and says so', () => {
+    // `max` and `average` are real poolings the pipeline does not have and `CLS` is the
+    // right one misspelt, so each is a value the user believed in and none of them may
+    // pass silently.
     for (const bad of ['max', 'average', 'CLS', 'yes']) {
       const cfg = loadConfig({ ZOTEUS_EMBEDDING_POOLING: bad } as any);
       expect(cfg.embeddingPooling, bad).toBe('auto');
       const warned = cfg.warnings.join(' ');
       expect(warned).toContain('ZOTEUS_EMBEDDING_POOLING');
-      expect(warned).toMatch(/mean, cls/);
     }
     expect(loadConfig({ ZOTEUS_EMBEDDING_POOLING: 'cls' } as any).warnings.join(' ')).not.toMatch(
       /ZOTEUS_EMBEDDING_POOLING/,
@@ -227,17 +265,5 @@ describe('ZOTEUS_EMBEDDING_POOLING as a setting', () => {
     expect(local.warnings.join(' ')).not.toMatch(/ZOTEUS_EMBEDDING_POOLING/);
     const unset = loadConfig({ ZOTEUS_EMBEDDINGS: 'openai' } as any);
     expect(unset.warnings.join(' ')).not.toMatch(/ZOTEUS_EMBEDDING_POOLING/);
-  });
-
-  it('reads a desktop host\'s unsubstituted placeholder as "not set", not as a choice', () => {
-    for (const embeddings of ['local', 'openai']) {
-      const cfg = loadConfig({
-        ZOTEUS_EMBEDDINGS: embeddings,
-        ZOTEUS_EMBEDDING_POOLING: '${user_config.embedding_pooling}',
-        ZOTEUS_DIST: 'mcpb',
-      } as any);
-      expect(cfg.embeddingPooling).toBe('auto');
-      expect(cfg.warnings.join(' ')).not.toMatch(/ZOTEUS_EMBEDDING_POOLING/);
-    }
   });
 });

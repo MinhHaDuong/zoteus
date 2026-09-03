@@ -383,19 +383,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   ) {
     warnings.push(
       `ZOTEUS_EMBEDDING_POOLING applies to on-device embeddings only and is ignored under ` +
-        `ZOTEUS_EMBEDDINGS=${parsed.ZOTEUS_EMBEDDINGS}; an API provider pools on its own side`,
+        `ZOTEUS_EMBEDDINGS=${parsed.ZOTEUS_EMBEDDINGS}; pooling is an argument to the local pipeline`,
     );
   }
-  // The generic rejection names the value it saw and the fallback; a pooling that is not
-  // one of the two the pipeline takes deserves the two named, because the likely typo
-  // (`max`, `average`, `CLS`) is a real pooling the pipeline does not have.
-  if (rejected.has('ZOTEUS_EMBEDDING_POOLING')) {
-    warnings.push(
-      `ZOTEUS_EMBEDDING_POOLING takes auto (the per-model table, the default) or one of ` +
-        `${POOLING_MODES.join(', ')}; the table decides for this run`,
-    );
-  }
-
   const allowedHosts = (parsed.ZOTEUS_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((s) => s.trim())

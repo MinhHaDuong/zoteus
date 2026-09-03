@@ -135,8 +135,9 @@ export type PoolingSetting = 'auto' | PoolingMode;
 /**
  * What every local vector ever built was pooled with, and what a model absent from
  * {@link MODEL_POOLING} still is. Right for the default MiniLM and for the E5 family, which
- * is to say for every model this project has recommended; wrong for roughly half the
- * multilingual field, and unlike the E5 prefixes nothing in a model id says which half.
+ * is to say for every model this project has recommended; wrong for about half of the
+ * multilingual models whose `1_Pooling/config.json` I read, and unlike the E5 prefixes
+ * nothing in a model id says which half.
  */
 export const DEFAULT_POOLING: PoolingMode = 'mean';
 
@@ -154,12 +155,13 @@ export const DEFAULT_POOLING: PoolingMode = 'mean';
  *
  * Every value was read from that file on the repository named beside it, on 2026-09-03,
  * and says so: a pooling copied from a sibling model is how this goes wrong in the first
- * place. `cls` is the half that matters. Measured on a 257-passage, 68-query
+ * place. `cls` is the half a cross-lingual library pays for. Measured on a 257-passage, 68-query
  * cross-lingual set with pooling as the only variable, at fp32, mean pooling costs
  * `granite-embedding-97m-multilingual-r2` 27.5% of its MRR and 34.6% of its hit@1,
- * `gte-multilingual-base` 12.7% and 10.3%, `arctic-embed-m-v2` 10.3% and 14.7%. The `mean`
- * rows are here so a reader can tell "known to be mean" from "unlisted, so mean by default",
- * which the code cannot otherwise distinguish.
+ * `gte-multilingual-base` and `arctic-embed-m-v2` between a tenth and an eighth of theirs,
+ * on a cross-lingual set; docs/semantic-search.md carries the numbers and where they came
+ * from. The `mean` rows are here so a reader can tell "known to be mean" from "unlisted, so
+ * mean by default", which the code cannot otherwise distinguish.
  */
 export const MODEL_POOLING: Readonly<Record<string, PoolingMode>> = {
   // sentence-transformers/all-MiniLM-L6-v2: pooling_mode_mean_tokens true, every other
@@ -220,14 +222,29 @@ export function poolingFor(model: string, mode: PoolingSetting = 'auto'): Poolin
  * usually, a dimension), so an index persists this and refuses to rank its stored vectors
  * against queries embedded by a different one. See SearchIndex.loadFromJSON.
  */
-export function embedderIdentity(p: { name: string; model?: string; dtype?: EmbeddingDtype }): string {
+export function embedderIdentity(p: {
+  name: string;
+  model?: string;
+  dtype?: EmbeddingDtype;
+  pooling?: PoolingMode;
+}): string {
   const base = p.model ? `${p.name}:${p.model}` : p.name;
   // Full precision stays unsuffixed, and that is a compatibility decision rather than a
   // cosmetic one: `local:Xenova/all-MiniLM-L6-v2` is the identity stamped into every local
   // index ever built, all of them at fp32. Spelling it `...@fp32` now would declare every
   // one of those stale and charge a full re-embed for a setting nobody touched. Any other
   // precision is a different vector space and says so (#43).
-  return p.dtype && p.dtype !== DEFAULT_LOCAL_DTYPE ? `${base}@${p.dtype}` : base;
+  const dtyped = p.dtype && p.dtype !== DEFAULT_LOCAL_DTYPE ? `${base}@${p.dtype}` : base;
+  // The pooling earns the same treatment for the same reason, and it needs it more. Two
+  // poolings of one model are as different a vector space as two models are -- cosine
+  // between the mean and CLS readings of the same text runs around 0.5 on MiniLM, which is
+  // barely better aligned than unrelated sentences -- and unlike a dtype they share a
+  // dimension, so the width check that catches a foreign vector cannot see this one. Every
+  // index ever built was pooled the default way, so the default stays unsuffixed and none
+  // of them is disturbed; a model the table moves to `cls`, or an override that departs
+  // from the table, is a different space and now says so instead of being left to a
+  // release note the reader has to act on.
+  return p.pooling && p.pooling !== DEFAULT_POOLING ? `${dtyped}#${p.pooling}` : dtyped;
 }
 
 /**
@@ -601,8 +618,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       const input = prefix ? batch.map((t) => prefix + t) : batch;
       // The pooling is the model's, not this call site's: the literal `mean` that stood
       // here was right for MiniLM and E5 and silently wrong for every CLS-pooled model
-      // ZOTEUS_EMBEDDING_MODEL can name. Normalization stays unconditional, because the
-      // cosine ranking downstream assumes unit vectors whatever the model.
+      // ZOTEUS_EMBEDDING_MODEL can name. Normalization stays unconditional, and can: the
+      // ranking is a true cosine (vector-store.ts divides by both norms) and the SQLite
+      // path takes mean-centred sign bits, so scaling a vector by a positive number moves
+      // neither. A model that publishes no Normalize module is therefore not mis-served
+      // here the way a CLS model was.
       const tensor = await extractor(input, { pooling: this.pooling, normalize: true });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
