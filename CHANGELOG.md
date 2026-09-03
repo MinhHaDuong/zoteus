@@ -6,6 +6,52 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **The local embedding model is now yours to choose, and multilingual libraries have a
+  model that works (#43).** `ZOTEUS_EMBEDDINGS=local` always loaded
+  `Xenova/all-MiniLM-L6-v2`, a constructor default no setting could reach, and that model
+  was trained on English sentence pairs. On a mixed-language library it ranks by *language*
+  before topic: measured here over a 12-passage German/English corpus and four German
+  questions, MiniLM put the German passage that answers the question first every time, and
+  its English twin 9.5th of 12, below every unrelated German passage. A German question
+  therefore never surfaced the English paper on its subject.
+
+  `ZOTEUS_EMBEDDING_MODEL` now names the model of whichever provider is active, `local`
+  included, instead of only the API ones. That knob already meant "the model of the active
+  provider", it already lives in the desktop settings pane and the manifest, and the index
+  already refuses to rank vectors from one model against queries from another, so a
+  separate `ZOTEUS_LOCAL_EMBEDDING_MODEL` (as the issue proposed) would have been a second
+  spelling of a setting that exists, with its own field, its own docs and its own way of
+  disagreeing with the first. Unset still means `Xenova/all-MiniLM-L6-v2`, so nothing moves
+  under an existing install. Setting it to `Xenova/multilingual-e5-small` moved that English
+  twin from 9.5th to 2.5th, at the same 384 dimensions and so at exactly the same index
+  size. A variable named `ZOTEUS_LOCAL_EMBEDDING_MODEL` is not silently ignored either: the
+  server logs that it is not a setting and names the one that is.
+
+- **E5 models get the prefixes they were trained with, without anyone having to know
+  that.** The E5 family embeds asymmetrically: a question is `query: ` plus the question, a
+  document is `passage: ` plus the document. Leave the markers off and nothing fails, the
+  retrieval is just quietly worse, which is the kind of loss nobody ever traces back to a
+  missing string. Zoteus now applies them for you when the model id carries `e5` as a
+  segment (`Xenova/multilingual-e5-small`, `intfloat/e5-base-v2`, not `sentence-t5-base`),
+  which meant teaching the embedder API which side of a search a text is: `embed()` takes a
+  `query`/`passage` kind, the index build passes `passage`, a semantic query passes `query`,
+  and the passage re-ranker inside `zotero_get_fulltext` now embeds its question and its
+  candidates separately rather than in one batch. The prefix reaches the model and nothing
+  else: it is not stored with the passage and not part of the embedder identity, so
+  `local:Xenova/multilingual-e5-small` still identifies the vector space by model alone.
+  `ZOTEUS_EMBEDDING_PREFIXES` overrides the detection in both directions (`off`, `e5`,
+  default `auto`) for a mirrored checkpoint whose name does not say what it is.
+
+### Changed
+- **The documented download size for local model weights was low by a factor of three.**
+  "~25 MB" described a quantized build; `@huggingface/transformers` 4.2.0 fetches the
+  full-precision ONNX weights, which measure 90 MB for the default MiniLM and 470 MB for
+  `Xenova/multilingual-e5-small` (the issue's 118 MB figure is the quantized variant).
+  `docs/semantic-search.md` now gives the measured numbers, and says why Zoteus does not
+  pick a quantized variant for you: a dtype does not appear in the embedder identity, so an
+  index silently rebuilt at another precision could not be told apart from one that was not.
+
 ### Fixed
 - **The vector salvage no longer reuses vectors another library wrote (#44).** The salvage
   a schema sideline arms (#34) matches a rebuilt passage against the moved-aside index on

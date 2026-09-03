@@ -3,6 +3,7 @@ import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { normalizeForSearch, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
+import type { EmbedKind } from './embeddings.js';
 import {
   DEFAULT_EMBED_BATCH_SIZE,
   DEFAULT_FULLTEXT_CONCURRENCY_CLOUD,
@@ -617,10 +618,13 @@ export abstract class SearchIndexBase implements SearchIndex {
     return true;
   }
 
-  /** Embed arbitrary texts with the configured provider (empty array if none). */
-  async embed(texts: string[]): Promise<number[][]> {
+  /**
+   * Embed arbitrary texts with the configured provider (empty array if none). `kind` says
+   * which side of a search they are, which is what an asymmetric model needs to be told.
+   */
+  async embed(texts: string[], kind: EmbedKind = 'passage'): Promise<number[][]> {
     if (!this.opts.embedder) return [];
-    return this.opts.embedder.embed(texts);
+    return this.opts.embedder.embed(texts, kind);
   }
 
   status(): SearchIndexStatus {
@@ -715,7 +719,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
     if (this.opts.embedder && records.length) {
       try {
-        const vecs = await this.opts.embedder.embed(records.map((r) => r.text));
+        const vecs = await this.opts.embedder.embed(records.map((r) => r.text), 'passage');
         records.forEach((r, i) => {
           if (vecs[i]) this.putVector(r.id, vecs[i]!);
         });
@@ -1742,7 +1746,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       if (token.cancelled) return;
       const batch = pending.splice(0, Math.min(batchSize, pending.length));
       try {
-        const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text));
+        const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text), 'passage');
         batch.forEach((r, i) => {
           if (vecs[i]) this.putVector(r.id, vecs[i]!);
         });
@@ -1862,7 +1866,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     let vector: RankedId[] = [];
     if (mode !== 'keyword' && this.opts.embedder && this.counts().vectors) {
       try {
-        const [qv] = await this.opts.embedder.embed([q]);
+        const [qv] = await this.opts.embedder.embed([q], 'query');
         const dim = this.vectorDimension();
         // Index files written before the embedder identity was persisted carry no
         // provenance, so a model switch under one shows up only here, as a query of a

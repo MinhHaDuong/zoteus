@@ -14,8 +14,10 @@ export interface ZoteusConfig {
   localPort: number;
   translationServerUrl: string;
   embeddings: 'local' | 'openai' | 'gemini' | 'off';
-  /** Model for the active API embedder (unset = that provider's own default). */
+  /** Model for the active embedder, local included (unset = that provider's own default). */
   embeddingModel?: string;
+  /** Whether embedding inputs carry E5's `query: `/`passage: ` markers (see embeddings.ts). */
+  embeddingPrefixes: 'auto' | 'off' | 'e5';
   /** Passages per embedding call (unset = DEFAULT_EMBED_BATCH_SIZE where one is batched). */
   embedBatchSize?: number;
   /** Pause between embedding batches in ms; 0 only yields to the event loop. */
@@ -175,6 +177,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_TRANSLATION_SERVER_URL: z.string().url().default('http://127.0.0.1:1969'),
         ZOTEUS_EMBEDDINGS: z.enum(['local', 'openai', 'gemini', 'off']).default('local'),
         ZOTEUS_EMBEDDING_MODEL: z.string().min(1).optional(),
+        ZOTEUS_EMBEDDING_PREFIXES: z.enum(['auto', 'off', 'e5']).default('auto'),
         ZOTEUS_EMBED_BATCH_SIZE: z.coerce.number().int().positive().optional(),
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
         ZOTEUS_TRANSFORMERS_PATH: z.string().min(1).optional(),
@@ -312,6 +315,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     refuse('ZOTEUS_CIMD_ALLOWED_HOSTS', 'it looks like a reference that was never expanded, and an empty host list means no restriction at all');
   }
 
+  // #43 asked for a separate ZOTEUS_LOCAL_EMBEDDING_MODEL, and the answer was the knob that
+  // already exists. Saying so is the point: a variable nothing reads is otherwise a setting
+  // that appears to work and changes nothing.
+  if (env.ZOTEUS_LOCAL_EMBEDDING_MODEL !== undefined && !isUnset(env.ZOTEUS_LOCAL_EMBEDDING_MODEL)) {
+    warnings.push(
+      'ZOTEUS_LOCAL_EMBEDDING_MODEL is not a Zoteus setting and is ignored; ZOTEUS_EMBEDDING_MODEL ' +
+        'names the model of whichever ZOTEUS_EMBEDDINGS provider is active, local included',
+    );
+  }
+
   const allowedHosts = (parsed.ZOTEUS_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -327,6 +340,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     translationServerUrl: parsed.ZOTEUS_TRANSLATION_SERVER_URL,
     embeddings: parsed.ZOTEUS_EMBEDDINGS,
     embeddingModel: parsed.ZOTEUS_EMBEDDING_MODEL?.trim() || undefined,
+    embeddingPrefixes: parsed.ZOTEUS_EMBEDDING_PREFIXES,
     embedBatchSize: parsed.ZOTEUS_EMBED_BATCH_SIZE,
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
     transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,

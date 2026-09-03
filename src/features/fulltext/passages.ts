@@ -1,5 +1,6 @@
 import { BM25Index } from '../search/bm25.js';
 import { chunkWithOffsets } from '../search/chunker.js';
+import type { EmbedKind } from '../search/embeddings.js';
 
 export interface Passage {
   text: string;
@@ -60,7 +61,7 @@ export interface RankOptions {
   totalChars?: number;
   totalPages?: number;
   /** Optional vector reranker (e.g. ctx.search.embed). Bounded to BM25 candidates. */
-  embed?: (texts: string[]) => Promise<number[][]>;
+  embed?: (texts: string[], kind?: EmbedKind) => Promise<number[][]>;
 }
 
 /**
@@ -82,7 +83,11 @@ export async function rankPassages(opts: RankOptions): Promise<Passage[]> {
   if (opts.embed && bm25Hits.length > 1) {
     try {
       const candTexts = bm25Hits.map((h) => chunks[Number(h.id)]!.text);
-      const [qv, ...cvs] = await opts.embed([opts.query, ...candTexts]);
+      // Two calls, not one: an asymmetric model (E5 and friends) marks a query and a passage
+      // differently, so the two sides cannot ride in the same batch. Sequential, because the
+      // first call is what loads the on-device model.
+      const [qv] = await opts.embed([opts.query], 'query');
+      const cvs = await opts.embed(candTexts, 'passage');
       if (qv && qv.length) {
         const vecOrder = cvs
           .map((v, i) => ({ idx: Number(bm25Hits[i]!.id), score: cosine(qv, v ?? []) }))

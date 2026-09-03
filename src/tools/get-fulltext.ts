@@ -370,7 +370,7 @@ const getFulltext: ToolDefinition = {
         maxPassages,
         totalChars,
         totalPages,
-        embed: ctx.search.hasEmbedder ? (texts) => ctx.search.embed(texts) : undefined,
+        embed: ctx.search.hasEmbedder ? (texts, kind) => ctx.search.embed(texts, kind) : undefined,
       });
       let used = 0;
       let truncated = false;

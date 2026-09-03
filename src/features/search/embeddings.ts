@@ -5,11 +5,19 @@ import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
 
+/**
+ * Which side of a search a text belongs to. Symmetric models ignore it; the E5 family does
+ * not (see {@link inputPrefixes}), and a provider that needs the distinction cannot recover
+ * it from the text itself. `passage` is the default because indexing is what every existing
+ * caller does.
+ */
+export type EmbedKind = 'query' | 'passage';
+
 export interface EmbeddingProvider {
   readonly name: string;
   /** Model producing the vectors; part of the index's embedder identity. */
   readonly model?: string;
-  embed(texts: string[]): Promise<number[][]>;
+  embed(texts: string[], kind?: EmbedKind): Promise<number[][]>;
 }
 
 /** npm package that provides the on-device model runtime (optional, not bundled; see below). */
@@ -20,6 +28,43 @@ export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
   openai: 'text-embedding-3-small',
   gemini: 'text-embedding-004',
 };
+
+/**
+ * The on-device default: small, fast, and English-centric. ZOTEUS_EMBEDDING_MODEL names any
+ * other transformers.js feature-extraction model instead (#43), which is how a German or
+ * otherwise multilingual library gets an embedder trained for it, e.g.
+ * `Xenova/multilingual-e5-small`. It stays the default because changing it under an existing
+ * index would silently invalidate everyone's vectors.
+ */
+export const DEFAULT_LOCAL_MODEL = 'Xenova/all-MiniLM-L6-v2';
+
+/**
+ * The E5 family (and the instruct models built on it) is trained with these markers on its
+ * inputs, and asymmetrically: a question is a `query: `, a document is a `passage: `.
+ * Dropping them does not fail, it just retrieves worse, which is the kind of loss nobody
+ * ever attributes to a missing string.
+ */
+export const E5_PREFIXES: Readonly<Record<EmbedKind, string>> = { query: 'query: ', passage: 'passage: ' };
+
+/** How input prefixes are chosen: from the model id, never, or E5's regardless of the id. */
+export type PrefixMode = 'auto' | 'off' | 'e5';
+
+/**
+ * `e5` as a segment of the model id, not as two letters inside a word: `Xenova/multilingual-e5-small`
+ * and `intfloat/e5-base-v2` are E5 models, `sentence-t5-base` is not.
+ */
+const E5_MODEL = /(?:^|[/\-_.])e5(?:[/\-_.]|$)/i;
+
+/**
+ * The prefixes to put in front of each side's texts, or null for a model that wants none.
+ * Auto-detection is the deliverable; `mode` is the escape hatch for a mirrored or renamed
+ * checkpoint the id cannot speak for.
+ */
+export function inputPrefixes(model: string, mode: PrefixMode = 'auto'): Readonly<Record<EmbedKind, string>> | null {
+  if (mode === 'off') return null;
+  if (mode === 'e5') return E5_PREFIXES;
+  return E5_MODEL.test(model) ? E5_PREFIXES : null;
+}
 
 /**
  * Identity of the vectors a provider produces. Two models never share a vector space (nor,
@@ -183,7 +228,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   static readonly BATCH_SIZE = DEFAULT_EMBED_BATCH_SIZE;
   private extractor: any;
   constructor(
-    readonly model = 'Xenova/all-MiniLM-L6-v2',
+    readonly model: string = DEFAULT_LOCAL_MODEL,
     /** Injectable extractor factory (tests); defaults to the transformers.js pipeline. */
     private readonly loadExtractor?: () => Promise<any>,
     private readonly opts: {
@@ -195,8 +240,19 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       batchSize?: number;
       /** Pause between batches in ms (see batchPause). */
       batchDelayMs?: number;
+      /** Input-prefix policy for this model (see inputPrefixes); unset means auto. */
+      prefixes?: PrefixMode;
     } = {},
   ) {}
+
+  /**
+   * What this model wants in front of a query and in front of a passage, or null. Computed
+   * from the model id, so it never reaches the embedder identity or the stored text: the
+   * prefix is an argument to the model, not a property of the vectors it returns.
+   */
+  get prefixes(): Readonly<Record<EmbedKind, string>> | null {
+    return inputPrefixes(this.model, this.opts.prefixes ?? 'auto');
+  }
 
   private async ensure(): Promise<any> {
     if (this.extractor) return this.extractor;
@@ -248,14 +304,16 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
    * per text), yielding to the event loop between batches so long builds stay
    * responsive and interruptible. Returns exactly one vector per input text.
    */
-  async embed(texts: string[]): Promise<number[][]> {
+  async embed(texts: string[], kind: EmbedKind = 'passage'): Promise<number[][]> {
     if (texts.length === 0) return [];
     const extractor = await this.ensure();
     const size = Math.max(1, this.opts.batchSize ?? LocalEmbeddingProvider.BATCH_SIZE);
+    const prefix = this.prefixes?.[kind] ?? '';
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += size) {
       const batch = texts.slice(i, i + size);
-      const tensor = await extractor(batch, { pooling: 'mean', normalize: true });
+      const input = prefix ? batch.map((t) => prefix + t) : batch;
+      const tensor = await extractor(input, { pooling: 'mean', normalize: true });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
       const dim = dims && dims.length > 1 ? dims[dims.length - 1]! : data.length / batch.length;
@@ -353,8 +411,8 @@ export interface EmbedderSelection {
  * embed is known at startup, before a build silently produces an index with 0 vectors.
  */
 export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): EmbedderSelection {
-  // ZOTEUS_EMBEDDING_MODEL names the model of whichever API provider is active; the batch
-  // and delay dials apply to every provider that batches.
+  // ZOTEUS_EMBEDDING_MODEL names the model of whichever provider is active, local included
+  // (#43); the batch and delay dials apply to every provider that batches.
   const api: ApiEmbeddingOptions = {
     model: config.embeddingModel,
     batchSize: config.embedBatchSize,
@@ -391,12 +449,15 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         return { provider: null, configured: 'local', unavailable: missingTransformersHint(config) };
       }
       return {
-        provider: new LocalEmbeddingProvider(undefined, undefined, {
+        // The same knob as every other provider's: ZOTEUS_EMBEDDING_MODEL names the model of
+        // whichever one is active, and unset means this provider's own default (#43).
+        provider: new LocalEmbeddingProvider(config.embeddingModel || DEFAULT_LOCAL_MODEL, undefined, {
           transformersPath: config.transformersPath,
           dist: config.dist,
           modelCacheDir: join(config.dataDir, 'models'),
           batchSize: config.embedBatchSize,
           batchDelayMs: config.embedBatchDelayMs,
+          prefixes: config.embeddingPrefixes,
         }),
         configured: 'local',
       };
