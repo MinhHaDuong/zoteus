@@ -130,8 +130,16 @@ function itemText(d: any): string {
  */
 function itemFacets(item: any): { year: number | null; itemType: string | null } {
   const d = item?.data ?? item ?? {};
-  const dated = String(item?.meta?.parsedDate ?? d.date ?? '');
-  const m = /\b(\d{4})\b/.exec(dated);
+  // Truthiness rather than `??`: an empty `meta.parsedDate` is the API saying it could not
+  // parse the date, not a value, and nullish coalescing would let that empty string
+  // suppress the raw field that still holds the year.
+  const dated = String(item?.meta?.parsedDate || d.date || '');
+  // A four-digit run inside 1500-2199, not any four digits: a free-text date field
+  // routinely carries a page number or a volume beside the date, and the first run wins.
+  // The floor costs a genuinely pre-1500 item its year, which is the direction this
+  // function already prefers everywhere else — no year beats a wrong one, because a wrong
+  // one puts the item in a scope it does not belong to.
+  const m = /\b(1[5-9][0-9]{2}|2[01][0-9]{2})\b/.exec(dated);
   const year = m ? Number(m[1]) : null;
   return { year, itemType: typeof d.itemType === 'string' && d.itemType ? d.itemType : null };
 }

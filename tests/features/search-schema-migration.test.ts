@@ -586,12 +586,20 @@ describe('the rung that adds the scope facets carries the index across', () => {
         { key: 'DATED111', meta: { parsedDate: '2016-03-04' }, data: { itemType: 'book', title: 'Deep learning' } },
         { key: 'RAWDATE1', data: { itemType: 'journalArticle', title: 'Attention', date: 'June 2017' } },
         { key: 'NODATE11', data: { itemType: 'thesis', title: 'Unfinished', date: 'n.d.' } },
+        // The API answering "I could not parse this" is an empty string, not an absent
+        // field, and it must not suppress the raw date that still holds the year.
+        { key: 'EMPTYMET', meta: { parsedDate: '' }, data: { itemType: 'report', title: 'Assessment', date: '2011-05' } },
+        // A page range in the date field is not a date. Without the range check the first
+        // four-digit run wins and this item is filed under the year 1240.
+        { key: 'PAGERUN1', data: { itemType: 'bookSection', title: 'Chapter', date: 'pp. 1240, 2019' } },
       ]);
       await index.save();
       const rows = readAll(path, 'SELECT item_key AS k, year AS y, item_type AS t FROM items ORDER BY item_key');
       expect(rows).toEqual([
         { k: 'DATED111', y: 2016, t: 'book' },
+        { k: 'EMPTYMET', y: 2011, t: 'report' },
         { k: 'NODATE11', y: null, t: 'thesis' },
+        { k: 'PAGERUN1', y: 2019, t: 'bookSection' },
         { k: 'RAWDATE1', y: 2017, t: 'journalArticle' },
       ]);
     } finally {
