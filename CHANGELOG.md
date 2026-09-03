@@ -19,8 +19,9 @@ All notable changes to Zoteus are documented here. The format is based on
   extra is indexed, so ranking is untouched for queries that need no expansion.
   Expansion is optional (`ZOTEUS_ACCENT_EXPANSION`, default `true`): it compensates the
   recall that keeping diacritics removed for unaccented queries, and disabling it opts
-  into strict as-typed exactness, at query time only — no rebuild either way. Search semantics change accordingly: `thé` no longer answers as
-  `the`, and `soren` still does not answer to `søren` (`ø` is a letter, not an accent).
+  into strict as-typed exactness, at query time only — no rebuild either way. Search
+  semantics change accordingly: `thé` no longer answers as `the`, and `soren` still does
+  not answer to `søren` (`ø` is a letter, not an accent).
   **Existing SQLite indexes are migrated in place** on first open (schema 1 → 2: the
   keyword table is re-tokenized; no vectors are re-computed and nothing re-reads Zotero).
   A migrated index cannot be opened by an older build — downgrading sidelines it and
@@ -41,12 +42,6 @@ All notable changes to Zoteus are documented here. The format is based on
   answer than a slow one.
 
 ### Fixed
-- **A migration that failed for a transient reason discarded an intact index.** Any
-  error inside the schema-upgrade ladder — a full disk as much as a corrupt page — used
-  to be treated as a foreign schema: the database was moved aside and a fresh empty one
-  silently took its place. A non-corruption failure now leaves the file untouched at its
-  old version and search refuses with the reason; the upgrade is retried on the next
-  open. Only corruption still sidelines the file.
 - **A query made mostly of common words returned a confident wrong answer instead of an
   honest one.** `tokenize()` dropped 29 English function words from every query, and
   `to be or not to be` is all of them except `not` — so the search that ran was a
@@ -56,7 +51,22 @@ All notable changes to Zoteus are documented here. The format is based on
   list moved off the document side: `tokenize()` is also the in-memory backend's document
   tokenizer, so the list was deleting those terms from the index, and a term that is not
   indexed cannot be searched for even deliberately. Both backends now index every term and
-  only queries prune; ordinary queries are unaffected.
+  only queries prune; ordinary queries are unaffected. The list a query is pruned by is
+  measured from the library in this same release, so what survives that rule is now a
+  property of the corpus rather than of English (see above).
+- **A migration that failed for a transient reason discarded an intact index.** Any
+  error inside the schema-upgrade ladder — a full disk as much as a corrupt page — used
+  to be treated as a foreign schema: the database was moved aside and a fresh empty one
+  silently took its place. A non-corruption failure now leaves the file untouched at its
+  old version and search refuses with the reason; the upgrade is retried on the next
+  open. Only corruption still sidelines the file. That refusal also declines the rebuild
+  that would undo it: `zotero_index action:"build"` repairs an unreadable index by
+  deleting it, so a refusal whose remedy is a restart names no file to delete, and the
+  call a user makes after reading it cannot discard the intact database. Deriving the
+  query-expansion map is guarded on the same rule, being derived state like the binary
+  vector codes: a vocabulary scan that fails for a transient reason leaves the map as it
+  was and costs unaccented queries their expansion, where it used to stop the server from
+  starting at all.
 
 ## [1.12.0] - 2026-08-31
 

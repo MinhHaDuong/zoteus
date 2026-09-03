@@ -546,6 +546,15 @@ abandoned on their account. And an index built by an earlier version prunes noth
 until its next build or update, at which point it adopts a list of its own; nothing is
 stranded and no rebuild is forced.
 
+**Where this sits relative to accent expansion.** Both run between tokenizing the query
+and building the MATCH string, and the order is: prune first, then expand the survivors.
+The droplist judges the terms you typed, because they are the question, and expansion then
+serves whatever the prune ruled worth running (including the raw set, when nothing
+survived). A term the prune dropped is never expanded, so it costs no vocabulary lookup
+and no accented posting list. A variant is not re-pruned, because it is another spelling
+of a surviving term rather than a query term of its own, and the dominance gate above
+already requires it to outweigh the spelling you typed.
+
 **Where the files are.** `<ZOTEUS_DATA_DIR>/search-index.sqlite` beside the older
 `search-index.json` (and `search-index-<userId>.*` per tenant in multi-tenant mode). SQLite
 also writes `-wal` and `-shm` sidecar files while the database is open; a clean shutdown
