@@ -11,7 +11,9 @@ describe('BbtClient', () => {
   });
 
   it('exportItems posts a JSON-RPC item.export and returns the string result', async () => {
-    const fetchImpl = vi.fn(async () =>
+    // Typed args: without them vi.fn infers a zero-length tuple for mock.calls and the
+    // `const [url, init] = ...calls[0]!` below does not compile.
+    const fetchImpl = vi.fn(async (..._args: any[]) =>
       new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '@article{key, title={X}}' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },

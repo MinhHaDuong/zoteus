@@ -68,7 +68,7 @@ async function authorizeUser(base: string, reqTokenForThisUser: string): Promise
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ redirect_uris: ['http://localhost:45999/cb'], token_endpoint_auth_method: 'none', client_name: 'Test' }),
   });
-  const client = await reg.json();
+  const client = (await reg.json()) as { client_id: string };
   const { code_verifier, code_challenge } = await pkceChallenge();
 
   // /authorize → provider calls /oauth/request (mock returns reqTokenForThisUser) → 302 to zotero.org
@@ -108,7 +108,7 @@ async function authorizeUser(base: string, reqTokenForThisUser: string): Promise
       redirect_uri: 'http://localhost:45999/cb',
     }),
   });
-  const tokens = await tokRes.json();
+  const tokens = (await tokRes.json()) as { access_token: string };
   expect(tokens.access_token).toBeTruthy();
   return tokens.access_token as string;
 }

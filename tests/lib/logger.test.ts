@@ -2,7 +2,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createLogger } from '../../src/lib/logger.js';
 
-function capture(): { lines: string[]; outSpy: ReturnType<typeof vi.spyOn>; restore: () => void } {
+// Return type inferred: vi.spyOn's MockInstance is keyed to the spied signature and does not
+// widen to the bare `ReturnType<typeof vi.spyOn>` this used to claim.
+function capture() {
   const lines: string[] = [];
   const spy = vi.spyOn(process.stderr, 'write').mockImplementation((c: string | Uint8Array) => {
     lines.push(String(c));

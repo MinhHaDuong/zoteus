@@ -42,7 +42,7 @@ const localWriteResult = {
 
 describe('zotero_import save target (DOI without translation-server)', () => {
   it('saves via the desktop local API when a stored grant key exists', async () => {
-    const writeItems = vi.fn(async () => localWriteResult);
+    const writeItems = vi.fn(async (..._args: any[]) => localWriteResult);
     const ctx = makeCtx({
       capabilities: { cloud: null, localApi: true },
       localWrites: { hasStoredKey: () => true, writeItems },
@@ -138,7 +138,7 @@ describe('zotero_import save target (DOI without translation-server)', () => {
         ? { successful: [{ index: 0, key: 'ATTACHKEY', version: 8 }], unchanged: [], failed: [], newLibraryVersion: 8 }
         : localWriteResult,
     );
-    const uploadFile = vi.fn(async () => {});
+    const uploadFile = vi.fn(async (..._args: any[]) => {});
     const ctx = makeCtx({
       capabilities: { cloud: null, localApi: true },
       localWrites: { hasStoredKey: () => true, writeItems, uploadFile },

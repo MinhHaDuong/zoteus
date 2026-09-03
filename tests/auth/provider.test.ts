@@ -227,7 +227,7 @@ describe('provider onEvent', () => {
       onEvent,
     });
     // exercise via refresh exchange (issues tokens). Register a client + refresh record first:
-    const client = p.clientsStore.registerClient!({ redirect_uris: ['http://localhost/cb'] } as never);
+    const client = await p.clientsStore.registerClient!({ redirect_uris: ['http://localhost/cb'] } as never);
     // Seed a refresh token through the store-backed path:
     // (Use the public exchangeRefreshToken with a token we set directly.)
     // Set up a refresh token in the store:
@@ -331,7 +331,8 @@ describe('ZoteusOAuthProvider — zotero (multi-tenant) mode', () => {
 
 describe('provider CIMD client resolution', () => {
   const url = 'https://claude.ai/.well-known/oauth-client';
-  function jsonResponse(body: unknown): Response {
+  // No return annotation: `Response` in this file is express's, imported at the top.
+  function jsonResponse(body: unknown) {
     return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
   }
 

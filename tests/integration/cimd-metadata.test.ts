@@ -28,7 +28,7 @@ describe('CIMD AS metadata', () => {
     const port = (server.address() as { port: number }).port;
     const res = await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`);
     expect(res.status).toBe(200);
-    const meta = await res.json();
+    const meta = (await res.json()) as Record<string, unknown>;
     expect(meta.client_id_metadata_document_supported).toBe(true);
     expect(meta.registration_endpoint).toBeTruthy(); // DCR still advertised
   });
@@ -46,7 +46,9 @@ describe('CIMD AS metadata', () => {
     oauth!.mount(app);
     server = app.listen(0);
     const port = (server.address() as { port: number }).port;
-    const meta = await (await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`)).json();
+    const meta = (await (
+      await fetch(`http://127.0.0.1:${port}/.well-known/oauth-authorization-server`)
+    ).json()) as Record<string, unknown>;
     expect(meta.client_id_metadata_document_supported).toBeUndefined();
   });
 });

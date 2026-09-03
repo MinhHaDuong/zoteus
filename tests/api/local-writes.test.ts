@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalWriteClient } from '../../src/api/local-writes.js';
-import { RateLimitedFetcher } from '../../src/api/http.js';
+import { RateLimitedFetcher, type FetchLike } from '../../src/api/http.js';
 
 const SERVER_ID = 'zotero-instance-1';
 
@@ -12,7 +12,9 @@ function makeClient(
   fetchImpl: (url: string, init: RequestInit) => Promise<Response>,
   opts: { key?: string; keyStorePath?: string } = {},
 ) {
-  const fetcher = new RateLimitedFetcher({ fetchImpl, maxConcurrency: 2 });
+  // FetchLike's `init` is optional and the fixtures' is not, which under strictFunctionTypes
+  // is a real variance mismatch and never a real one at run time: the fetcher always passes it.
+  const fetcher = new RateLimitedFetcher({ fetchImpl: fetchImpl as FetchLike, maxConcurrency: 2 });
   return new LocalWriteClient({
     port: 23119,
     fetcher,

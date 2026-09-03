@@ -28,11 +28,11 @@ describe('ops endpoints', () => {
 
     const h = await fetch(`${base}/healthz`);
     expect(h.status).toBe(200);
-    expect((await h.json()).version).toBe('0.12.0');
+    expect(((await h.json()) as { version: string }).version).toBe('0.12.0');
 
     const r = await fetch(`${base}/readyz`);
     expect(r.status).toBe(200);
-    expect((await r.json()).ok).toBe(true);
+    expect(((await r.json()) as { ok: boolean }).ok).toBe(true);
 
     const m = await fetch(`${base}/metrics`);
     expect(m.status).toBe(200);
