@@ -25,6 +25,13 @@ import { createHash } from 'node:crypto';
 
 export const EMBEDDER_REGISTRY_VERSION = 1;
 
+/**
+ * Compatibility version serialized into vector fingerprints. This is deliberately
+ * independent of {@link EMBEDDER_REGISTRY_VERSION}: changing how registry records are
+ * represented must not invalidate vectors when their vector-affecting fields are unchanged.
+ */
+export const EMBEDDER_FINGERPRINT_VERSION = 1;
+
 /** Pooling strategies @huggingface/transformers exposes for feature extraction. */
 export type EmbedderPooling = 'mean' | 'cls' | 'last_token';
 
@@ -100,7 +107,9 @@ const GRAPH_BY_DTYPE: Readonly<Record<EmbedderDtype, string>> = {
 /** Stable identity of every choice that can move or reinterpret a vector. */
 export function entryFingerprint(entry: EmbedderEntry): string {
   const vectorShape = {
-    version: EMBEDDER_REGISTRY_VERSION,
+    // Keep the serialized field name and value stable: incumbent indexes already carry
+    // the digest of this exact payload.
+    version: EMBEDDER_FINGERPRINT_VERSION,
     model: entry.model,
     revision: entry.revision,
     dtype: entry.dtype,
@@ -334,14 +343,19 @@ export const EMBEDDER_ENTRIES: Readonly<Record<string, EmbedderEntry>> = Object.
   ]),
 );
 
+export class UnknownLocalEmbedderEntryError extends Error {
+  constructor(readonly entryId: string) {
+    super(
+      `Unknown local embedder entry "${entryId}". Choose one of: ${Object.keys(EMBEDDER_ENTRIES).join(', ')}.`,
+    );
+    this.name = 'UnknownLocalEmbedderEntryError';
+  }
+}
+
 /** Resolve a user-facing entry id. A raw model repository is intentionally not accepted. */
 export function selectEmbedderEntry(id?: string): EmbedderEntry {
   if (!id) return INCUMBENT_LOCAL_ENTRY;
   const entry = EMBEDDER_ENTRIES[id];
-  if (!entry) {
-    throw new Error(
-      `Unknown local embedder entry "${id}". Choose one of: ${Object.keys(EMBEDDER_ENTRIES).join(', ')}.`,
-    );
-  }
+  if (!entry) throw new UnknownLocalEmbedderEntryError(id);
   return entry;
 }
