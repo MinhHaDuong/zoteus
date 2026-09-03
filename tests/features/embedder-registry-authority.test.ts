@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  EMBEDDER_FINGERPRINT_VERSION,
+  EMBEDDER_REGISTRY_VERSION,
   INCUMBENT_LOCAL_ENTRY,
+  LEGACY_INCUMBENT_FINGERPRINT,
   entryFingerprint,
   parseEmbedderEntry,
   type EmbedderEntry,
@@ -36,6 +39,14 @@ describe('authoritative embedder records', () => {
         sources: { changed: 'yes' },
       }),
     ).toBe(entryFingerprint(INCUMBENT_LOCAL_ENTRY));
+  });
+
+  it('keeps record-schema evolution outside the stable vector fingerprint', () => {
+    const registryV1 = { schemaVersion: EMBEDDER_REGISTRY_VERSION, entry: INCUMBENT_LOCAL_ENTRY };
+    const registryV2 = { ...registryV1, schemaVersion: EMBEDDER_REGISTRY_VERSION + 1 };
+    expect(entryFingerprint(registryV2.entry)).toBe(entryFingerprint(registryV1.entry));
+    expect(EMBEDDER_FINGERPRINT_VERSION).toBe(1);
+    expect(entryFingerprint(INCUMBENT_LOCAL_ENTRY)).toBe(LEGACY_INCUMBENT_FINGERPRINT);
   });
 
   it('keeps the incumbent persisted identity unchanged', () => {

@@ -6,6 +6,7 @@ import type { Logger } from '../../lib/logger.js';
 import {
   INCUMBENT_LOCAL_ENTRY,
   LEGACY_INCUMBENT_FINGERPRINT,
+  UnknownLocalEmbedderEntryError,
   entryFingerprint,
   parseEmbedderEntry,
   selectEmbedderEntry,
@@ -568,8 +569,19 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
     case 'local':
     default: {
       // On the local path this setting names a complete curated entry, never a raw HF repo.
-      // Resolve it before probing or touching the index so a typo cannot degrade silently.
-      const entry = selectEmbedderEntry(config.embeddingModel);
+      // Resolve it before probing or touching the index. A typo or a legacy raw model name
+      // is explicit in status, but must not prevent the keyword-only server from starting.
+      let entry: EmbedderEntry;
+      try {
+        entry = selectEmbedderEntry(config.embeddingModel);
+      } catch (error) {
+        if (!(error instanceof UnknownLocalEmbedderEntryError)) throw error;
+        const unavailable =
+          `${error.message} No vectors are produced; keyword (BM25) search still works. ` +
+          'Set ZOTEUS_EMBEDDING_MODEL to a listed entry id, or unset it for the default.';
+        logger?.warn(`${unavailable} Using keyword-only search.`);
+        return { provider: null, configured: 'local', unavailable };
+      }
       if (!resolveTransformers(config.transformersPath)) {
         logger?.warn(
           `ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed` +
