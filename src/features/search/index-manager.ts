@@ -1,7 +1,8 @@
 import { BM25Index } from './bm25.js';
 import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
-import { normalizeForSearch, tokenize } from './tokenize.js';
+import { pruneTerms } from './query-terms.js';
+import { isStopword, normalizeForSearch, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
 import {
   DEFAULT_EMBED_BATCH_SIZE,
@@ -160,7 +161,7 @@ export function makeSnippet(text: string, query: string, max = 240): string {
   // start at character 0.
   const folded = normalizeForSearch(clean);
   let pos = -1;
-  for (const t of tokenize(query)) {
+  for (const t of pruneTerms(tokenize(query), isStopword)) {
     const i = folded.indexOf(t);
     if (i >= 0 && (pos < 0 || i < pos)) pos = i;
   }

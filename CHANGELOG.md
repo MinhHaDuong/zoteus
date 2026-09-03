@@ -4,6 +4,20 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A query made mostly of common words returned a confident wrong answer instead of an
+  honest one.** `tokenize()` dropped 29 English function words from every query, and
+  `to be or not to be` is all of them except `not` — so the search that ran was a
+  single-term OR on a word that means nothing, and what came back was whatever prose
+  happened to contain it. Not an empty result, which would at least have been honest.
+  Pruning now stops when it would change the question rather than shorten it, and the
+  list moved off the document side: `tokenize()` is also the in-memory backend's document
+  tokenizer, so the list was deleting those terms from the index, and a term that is not
+  indexed cannot be searched for even deliberately. Both backends now index every term and
+  only queries prune; ordinary queries are unaffected.
+
 ## [1.12.0] - 2026-08-31
 
 ### Fixed

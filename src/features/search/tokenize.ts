@@ -1,7 +1,28 @@
+/**
+ * The words this search treats as too common to rank on.
+ *
+ * Consulted on the query side only, and only through `pruneTerms`, which restores the
+ * whole token set when dropping these would leave too little to answer with. It used to
+ * be applied here instead, inside `tokenize()`, which meant it also governed what the
+ * in-memory backend *indexed* — and a term absent from the index cannot be searched for
+ * even deliberately, which is what made the fallback impossible to write.
+ */
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'is', 'are', 'was', 'were',
   'be', 'by', 'as', 'at', 'that', 'this', 'it', 'from', 'we', 'our', 'their', 'its', 'these', 'those',
+  // `not` is the thirtieth, and its absence is what made `to be or not to be` return a wrong
+  // answer rather than no answer: every other word of that line was already here, so one
+  // term limped through and the search ran as a single-term OR on it. Added alone, and
+  // deliberately — the list omits plenty of other common words (`no`, `but`, `which`,
+  // `when`), but which of them matter is a property of the corpus rather than of English,
+  // and guessing further here is the habit this list should be losing.
+  'not',
 ]);
+
+/** Whether a term is on the list above. The `TermPredicate` a query is pruned by. */
+export function isStopword(term: string): boolean {
+  return STOPWORDS.has(term);
+}
 
 /**
  * Combining marks sitting on a **Latin** base, which is the only place
@@ -140,15 +161,20 @@ function shield(chars: string, base: number): { hide: (s: string) => string; sho
 const NO_TRANSFORM_SHIELD = shield(NO_TRANSFORM, 0xfdd0);
 
 /**
- * Fold, split on non-alphanumerics, drop stopwords and 1-char tokens.
+ * Fold, split on non-alphanumerics, drop 1-char tokens.
  *
  * The token class is `\p{L}\p{N}`, not `[a-z0-9]`, and that half earns its place on its
  * own: it keeps `théorie`, `Θεωρία`, `теория` and `日本語` single tokens instead of
  * fragments, and it would have prevented this defect even without the fold — a whole token
  * misses cleanly, a fragment matches a high-frequency English string.
+ *
+ * **The stopword list no longer lives here**, and that is the point of the change rather
+ * than tidying. This function is the *document* tokenizer as well as the query one on the
+ * in-memory backend, so dropping a word here deleted it from the index, and a term the
+ * index does not hold cannot be searched for on purpose. Pruning is now a query-side
+ * decision, taken in `query-terms.ts`, where it can be undone when it would leave the
+ * query with nothing to say. Both backends index every term; only queries prune.
  */
 export function tokenize(text: string): string[] {
-  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-    (t) => t.length > 1 && !STOPWORDS.has(t),
-  );
+  return (normalizeForSearch(text).match(/[\p{L}\p{N}]+/gu) ?? []).filter((t) => t.length > 1);
 }
