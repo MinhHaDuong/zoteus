@@ -57,6 +57,11 @@ const RUNTIME: EmbedderRuntimeShape = {
   executionProvider: 'cpu',
 };
 
+// Exact validation key for ENTRY + RUNTIME under validator revision
+// `local-compatibility/1`; revision 2 must never accept its stale PASS.
+const REVISION_1_VALIDATION_KEY =
+  'dc1edad9fdeb78d042385c6ff3572fa31cd12625d4d1b362e49efc65fc13ff8b';
+
 const RAW: Readonly<Record<string, number[]>> = {
   [`passage: ${EMBEDDER_VALIDATION_FIXTURE.sentinel}`]: [1, 2, 2],
   [`query: ${EMBEDDER_VALIDATION_FIXTURE.query}`]: [3, 0, 0],
@@ -414,27 +419,32 @@ describe('validated local embedding transport', () => {
     expect(await provider.embed([EMBEDDER_VALIDATION_FIXTURE.query], 'query')).toHaveLength(1);
   });
 
-  it('derives the incumbent legacy identity from its verified fingerprint, not a claim', () => {
-    const fingerprint = entryFingerprint(INCUMBENT_LOCAL_ENTRY);
-    const target: LocalValidationTarget = {
-      name: 'local',
-      model: INCUMBENT_LOCAL_ENTRY.model,
-      entryId: INCUMBENT_LOCAL_ENTRY.id,
-      entry: INCUMBENT_LOCAL_ENTRY,
-      vectorFingerprint: fingerprint,
-      legacyIdentity: false,
-      validationRuntimeShape: async () => RUNTIME,
-      embedPreparedForValidation: async () => [],
-      embed: async () => [],
+  it('derives the incumbent legacy identity from its verified fingerprint, not a claim', async () => {
+    const extractor = async (texts: string[], options: { normalize: boolean }) => {
+      const rows = texts.map((text) => {
+        const head = text.includes(EMBEDDER_VALIDATION_FIXTURE.unmatched)
+          ? [0, 3, 0]
+          : text.includes(EMBEDDER_VALIDATION_FIXTURE.matched)
+            ? [3, 0.1, 0]
+            : text.includes(EMBEDDER_VALIDATION_FIXTURE.query)
+              ? [3, 0, 0]
+              : [1, 2, 2];
+        return [...head, ...Array<number>(INCUMBENT_LOCAL_ENTRY.dimension - head.length).fill(0)];
+      });
+      const vectors = options.normalize ? rows.map(normalized) : rows;
+      return {
+        data: new Float32Array(vectors.flat()),
+        dims: [vectors.length, INCUMBENT_LOCAL_ENTRY.dimension],
+      };
     };
-    const validation = {
-      status: 'passed' as const,
-      key: 'a'.repeat(64),
-      entryFingerprint: fingerprint,
-      dimension: INCUMBENT_LOCAL_ENTRY.dimension,
-      runtime: RUNTIME,
-      cached: false,
-    };
+    extractor.tokenizer = { model_max_length: INCUMBENT_LOCAL_ENTRY.windowTokens };
+    const target = new LocalEmbeddingProvider(INCUMBENT_LOCAL_ENTRY, async () => extractor, {
+      validationRuntime: RUNTIME,
+    });
+    const validation = await validateLocalEmbedder(
+      target,
+      mkdtempSync(join(tmpdir(), 'zoteus-incumbent-validation-')),
+    );
     const provider = new ValidatedLocalEmbeddingProvider(target, validation, {
       embed: async () => {
         throw new Error('not called');
@@ -442,6 +452,27 @@ describe('validated local embedding transport', () => {
     });
     expect(provider.legacyIdentity).toBe(true);
     expect(embedderIdentity(provider)).toBe(`local:${INCUMBENT_LOCAL_ENTRY.model}`);
+  });
+
+  it.each([
+    ['an arbitrary key', 'a'.repeat(64)],
+    ['a PASS key from validator revision 1', REVISION_1_VALIDATION_KEY],
+  ])('rejects %s before constructing a client or transport', async (_name, staleKey) => {
+    const target = new FixtureTarget();
+    const validation = await validateLocalEmbedder(
+      target,
+      mkdtempSync(join(tmpdir(), 'zoteus-stale-validation-key-')),
+    );
+    const stale = { ...validation, key: staleKey };
+    expect(() => new InProcessLocalEmbeddingTransport(target, stale)).toThrow(/validation/i);
+    expect(
+      () =>
+        new ValidatedLocalEmbeddingProvider(target, stale, {
+          embed: async () => {
+            throw new Error('not called');
+          },
+        }),
+    ).toThrow(/validation/i);
   });
 
   it.each(['fingerprint', 'validationKey', 'dimension', 'runtime'] as const)(

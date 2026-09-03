@@ -349,11 +349,14 @@ function assertValidationMatchesTarget(
   validation: LocalValidationResult,
 ): string {
   const computedFingerprint = entryFingerprint(target.entry);
+  const validatedRuntime = normalizedRuntimeShape(validation.runtime);
+  const expectedKey = validationKey(target, validatedRuntime);
   if (
     computedFingerprint !== target.vectorFingerprint ||
     computedFingerprint !== validation.entryFingerprint ||
     target.entry.dimension !== validation.dimension ||
-    validation.status !== 'passed'
+    validation.status !== 'passed' ||
+    validation.key !== expectedKey
   ) {
     throw new Error('Local embedder validation does not match its complete registry entry.');
   }
