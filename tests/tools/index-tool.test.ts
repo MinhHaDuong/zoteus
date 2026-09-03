@@ -43,7 +43,11 @@ function makeWeb(library: any[], attachments: any[] = [], fulltext: Record<strin
 function makeCtx(search: SearchIndex, library: any[], fullext?: { attachments: any[]; text: Record<string, string> }): any {
   const web = makeWeb(library, fullext?.attachments, fullext?.text);
   const config = loadConfig({ ZOTEUS_LOCAL: 'off' } as any);
-  const capabilities = { cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any, localApi: false };
+  const capabilities = {
+    cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any,
+    localApi: false,
+    localGroupIds: [],
+  };
   return {
     config: { ...config, dataDir: join(tmpdir(), `zoteus-index-tool-${process.pid}`) },
     capabilities,

@@ -30,7 +30,9 @@ function webClient(library: any[]) {
  * resolved: a user lib is addressed users/0 on the wire, a group lib groups/<id>. */
 function localClient(library: any[]) {
   return {
-    listItems: vi.fn(async (q: { limit?: number; start?: number }) => ({
+    // `_lib` is declared although it is unused: the assertions below read
+    // mock.calls[0][1], and vi.fn infers the tuple from this signature.
+    listItems: vi.fn(async (q: { limit?: number; start?: number }, _lib?: any) => ({
       data: library.slice(q.start ?? 0, (q.start ?? 0) + (q.limit ?? PAGE_SIZE)),
       totalResults: library.length,
       // The desktop app keeps its own version sequence, far behind the cloud's.

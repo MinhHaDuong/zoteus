@@ -37,6 +37,8 @@ function pingServer(): McpServer {
 }
 
 const form = (o: Record<string, string>): URLSearchParams => new URLSearchParams(o);
+/** `Response.json()` is `unknown`. These bodies are ad-hoc OAuth JSON, read field by field. */
+const json = (res: Response): Promise<any> => res.json();
 const authIdFrom = (html: string): string => /name="auth_id" value="([^"]+)"/.exec(html)![1];
 
 describe('OAuth 2.1 auth-code + PKCE flow', () => {
@@ -61,7 +63,7 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
     });
 
     // 1. AS metadata — and verify advertised endpoints are host-consistent with the public URL.
-    const asMeta = await (await fetch(`${base}/.well-known/oauth-authorization-server`)).json();
+    const asMeta = await json(await fetch(`${base}/.well-known/oauth-authorization-server`));
     expect(asMeta.code_challenge_methods_supported).toContain('S256');
     expect(asMeta.response_types_supported).toContain('code');
     expect(asMeta.grant_types_supported).toEqual(expect.arrayContaining(['authorization_code', 'refresh_token']));
@@ -71,7 +73,7 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
     expect(asMeta.registration_endpoint).toBe(`${base}/register`);
 
     // 2. Protected-resource metadata (path-specific per RFC 9728)
-    const prm = await (await fetch(`${base}/.well-known/oauth-protected-resource/mcp`)).json();
+    const prm = await json(await fetch(`${base}/.well-known/oauth-protected-resource/mcp`));
     expect(prm.resource).toBe(`${base}/mcp`);
     expect(prm.authorization_servers).toEqual(expect.arrayContaining([asMeta.issuer]));
 
@@ -92,7 +94,7 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
       body: JSON.stringify({ redirect_uris: [redirectUri], token_endpoint_auth_method: 'none', client_name: 'Test' }),
     });
     expect(reg.status).toBe(201);
-    const client = await reg.json();
+    const client = await json(reg);
     expect(client.client_id).toBeTruthy();
 
     // 5. PKCE
@@ -149,7 +151,7 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
       }),
     });
     expect(tokRes.status).toBe(200);
-    const tokens = await tokRes.json();
+    const tokens = await json(tokRes);
     expect(tokens.token_type).toBe('Bearer');
     expect(tokens.access_token).toBeTruthy();
 
@@ -205,7 +207,7 @@ describe('OAuth 2.1 auth-code + PKCE flow', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ redirect_uris: [httpsCallback], token_endpoint_auth_method: 'none', client_name: 'Web' }),
     });
-    const webClient = await reg2.json();
+    const webClient = await json(reg2);
     const exactUrl = new URL(asMeta.authorization_endpoint);
     exactUrl.search = form({
       response_type: 'code',

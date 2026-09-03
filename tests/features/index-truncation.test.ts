@@ -8,7 +8,10 @@ import { loadConfig } from '../../src/config.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} } as any;
 
-function keywordIndex(): SearchIndex {
+// MemorySearchIndex, not SearchIndex: these tests round-trip through toJSON/loadFromJSON,
+// which belong to the JSON backend (persistence.ts's JsonIndex) and not to the interface
+// the SQLite backend also satisfies.
+function keywordIndex(): MemorySearchIndex {
   return new MemorySearchIndex({ embedder: null, configured: 'off', logger: silentLogger });
 }
 

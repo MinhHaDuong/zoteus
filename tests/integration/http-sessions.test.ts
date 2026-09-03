@@ -63,7 +63,7 @@ describe('per-session transports (factory mode)', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
     });
     expect(res.status).toBe(404);
-    expect((await res.json()).error.code).toBe(-32001);
+    expect(((await res.json()) as { error: { code: number } }).error.code).toBe(-32001);
 
     // A request with no session ID at all is still a plain bad request, not a dead session.
     const noSession = await fetch(`http://127.0.0.1:${port}/mcp`, {

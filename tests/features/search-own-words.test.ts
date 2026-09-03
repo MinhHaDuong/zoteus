@@ -289,7 +289,7 @@ describe.each(backends)('an update keeps the reader\'s own words current (%s bac
     const { search, ctx, router } = await indexed(backend);
     const before = search.buildStatus().ownWordsPassages;
     router.itemVersions.mockImplementation(async (q: any) => ({
-      versions: q.itemType ? {} : { AAAAAAAA: 1, BBBBBBBB: 2, CCCCCCCC: 3 },
+      versions: (q.itemType ? {} : { AAAAAAAA: 1, BBBBBBBB: 2, CCCCCCCC: 3 }) as Record<string, number>,
       totalResults: q.itemType ? 0 : 3,
       lastModifiedVersion: 99,
     }));

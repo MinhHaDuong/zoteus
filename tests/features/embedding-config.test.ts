@@ -334,7 +334,9 @@ describe('vectors built with another model are not queried with this one', () =>
     return JSON.parse(JSON.stringify(search.toJSON()));
   }
 
-  function indexUsing(model: string): SearchIndex {
+  // MemorySearchIndex, not SearchIndex: loadFromJSON/toJSON are the JSON backend's
+  // (persistence.ts's JsonIndex), not part of the interface the SQLite backend satisfies.
+  function indexUsing(model: string): MemorySearchIndex {
     return new MemorySearchIndex({
       embedder: recordingEmbedder('openai', model),
       configured: 'openai',
