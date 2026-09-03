@@ -192,6 +192,36 @@ describe('zotero_semantic_search with no vectors', () => {
     expect(res.isError).toBeUndefined();
     expect(res.content[0].text).not.toMatch(/Semantic ranking is OFF/);
   });
+
+  it('rejects semantic mode when stale stored vectors survive but validation left no active embedder', async () => {
+    const producer: EmbeddingProvider = {
+      name: 'local',
+      model: 'fixture-model',
+      embed: async (texts) => texts.map(() => [1, 0, 0]),
+    };
+    const built = new MemorySearchIndex({ embedder: producer, configured: 'local', logger: silentLogger });
+    await built.build(items);
+    const unavailable = new MemorySearchIndex({
+      embedder: null,
+      configured: 'local',
+      unavailable: 'Local embedder validation failed: normalization check failed.',
+      logger: silentLogger,
+    });
+    unavailable.loadFromJSON(JSON.parse(JSON.stringify(built.toJSON())));
+    expect(unavailable.hasVectors).toBe(true);
+    expect(unavailable.embedderActive).toBe(false);
+
+    const res = await semanticSearch.handler(
+      { q: 'deep learning', mode: 'semantic' },
+      { search: unavailable } as any,
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/validation failed/i);
+    expect(res.content[0].text).toMatch(/query vector|not active/i);
+    await expect(unavailable.query('deep learning', { mode: 'semantic' })).rejects.toThrow(
+      /validation failed|not active/i,
+    );
+  });
 });
 
 describe('local-embedding diagnostics name the path that was searched (#38)', () => {
