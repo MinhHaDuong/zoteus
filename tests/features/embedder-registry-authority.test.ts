@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  APPLIED_FIELDS,
   EMBEDDER_FINGERPRINT_VERSION,
   EMBEDDER_REGISTRY_VERSION,
+  FINGERPRINT_PROJECTION_V1,
   INCUMBENT_LOCAL_ENTRY,
   LEGACY_INCUMBENT_FINGERPRINT,
   entryFingerprint,
@@ -10,23 +12,38 @@ import {
 } from '../../src/features/search/embedder-registry.js';
 import { LocalEmbeddingProvider, embedderIdentity } from '../../src/features/search/embeddings.js';
 
-function changed<K extends keyof EmbedderEntry>(key: K, value: EmbedderEntry[K]): EmbedderEntry {
-  return { ...INCUMBENT_LOCAL_ENTRY, [key]: value };
+function perturbProjectedField(field: (typeof APPLIED_FIELDS)[number]): EmbedderEntry {
+  const value: unknown = INCUMBENT_LOCAL_ENTRY[field];
+  const changed =
+    typeof value === 'string'
+      ? `${value}-changed`
+      : typeof value === 'number'
+        ? value + 1
+        : typeof value === 'boolean'
+          ? !value
+          : {
+              query: `${INCUMBENT_LOCAL_ENTRY.template.query}changed: `,
+              passage: INCUMBENT_LOCAL_ENTRY.template.passage,
+            };
+  return { ...INCUMBENT_LOCAL_ENTRY, [field]: changed } as EmbedderEntry;
 }
 
 describe('authoritative embedder records', () => {
-  it.each([
-    ['model', 'example/model'],
-    ['revision', 'deadbeef'],
-    ['dtype', 'q8'],
-    ['graphFile', 'onnx/model_quantized.onnx'],
-    ['pooling', 'cls'],
-    ['normalize', false],
-    ['template', { query: 'query: ', passage: 'passage: ' }],
-    ['windowTokens', 128],
-    ['dimension', 768],
-  ] as const)('changes the fingerprint when %s changes', (key, value) => {
-    expect(entryFingerprint(changed(key as any, value as any))).not.toBe(
+  it.each(FINGERPRINT_PROJECTION_V1.map(([field]) => field))(
+    'changes the fingerprint when projected field %s changes',
+    (field) => {
+      expect(entryFingerprint(perturbProjectedField(field))).not.toBe(
+        entryFingerprint(INCUMBENT_LOCAL_ENTRY),
+      );
+    },
+  );
+
+  it('canonicalizes template query and passage order in the projection', () => {
+    const reordered = {
+      passage: INCUMBENT_LOCAL_ENTRY.template.passage,
+      query: INCUMBENT_LOCAL_ENTRY.template.query,
+    };
+    expect(entryFingerprint({ ...INCUMBENT_LOCAL_ENTRY, template: reordered })).toBe(
       entryFingerprint(INCUMBENT_LOCAL_ENTRY),
     );
   });
@@ -46,6 +63,9 @@ describe('authoritative embedder records', () => {
     const registryV2 = { ...registryV1, schemaVersion: EMBEDDER_REGISTRY_VERSION + 1 };
     expect(entryFingerprint(registryV2.entry)).toBe(entryFingerprint(registryV1.entry));
     expect(EMBEDDER_FINGERPRINT_VERSION).toBe(1);
+    expect(LEGACY_INCUMBENT_FINGERPRINT).toBe(
+      '098eda2e37ba648b3a022a2a87f37f343b46b24812c24a73317b4e709971ee50',
+    );
     expect(entryFingerprint(INCUMBENT_LOCAL_ENTRY)).toBe(LEGACY_INCUMBENT_FINGERPRINT);
   });
 
