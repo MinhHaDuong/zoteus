@@ -5,5 +5,23 @@
 # duckdns module, or use a custom cert. See docs/deployment.md.
 {$ZOTEUS_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy zoteus:3939
+
+	# Endpoints that describe TRAFFIC rather than liveness are not public. /metrics
+	# publishes request and tool-call volume to anyone who asks, and /usage.json serves
+	# the usage rollups; both are guarded by ZOTEUS_METRICS_TOKEN in the app, and this is
+	# the second lock. 404 rather than 403, so the reply does not confirm the path exists.
+	# /healthz and /readyz stay open: they say only that the process is up, and deploys
+	# check them.
+	#
+	# handle blocks rather than a bare respond, because handle blocks are mutually
+	# exclusive and run in the order written, while bare directives are reordered by
+	# Caddy's own directive ranking.
+	@ops path /metrics /usage.json
+	handle @ops {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy zoteus:3939
+	}
 }

@@ -13,6 +13,11 @@ services:
   zoteus:
     image: ghcr.io/oscardvs/zoteus:latest
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Memory backstop for small (≈1 GB) free-tier VMs: cap the container so a runaway
     # (e.g. parsing a huge PDF) is OOM-killed + auto-restarted by Docker instead of the
     # host kernel thrashing/killing other processes. Raise on larger hosts. The primary
@@ -44,6 +49,11 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on: [zoteus]
     ports:
       - "80:80"

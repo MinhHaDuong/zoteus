@@ -284,17 +284,21 @@ traffic, say so in whatever privacy policy your instance publishes.
 Prometheus text format: `zoteus_tool_calls_total{tool,outcome}`, the
 `zoteus_tool_duration_ms` histogram, `zoteus_http_requests_total{route,status_class}` and
 `zoteus_http_scanner_requests_total`. Set `ZOTEUS_METRICS_TOKEN` to require a bearer token
-(it also guards `/usage.json`), and keep it behind your proxy/WAF as well — belt and
-braces, since the endpoint publishes how much your service is used:
+(it also guards `/usage.json`), and keep it off the public internet as well — belt and
+braces, since the endpoint publishes how much your service is used.
+
+**`deploy/Caddyfile` already does the second half**: `/metrics` and `/usage.json` answer
+404 from outside, while `/healthz` and `/readyz` stay open for deploy checks. To let an
+internal scraper through instead of blocking outright, swap the `handle @ops` block for:
 
 ```caddyfile
-@metrics path /metrics
-handle @metrics {
+@ops path /metrics /usage.json
+handle @ops {
     @allowed remote_ip 127.0.0.1 10.0.0.0/8
     handle @allowed {
         reverse_proxy zoteus:3939
     }
-    respond 403
+    respond 404
 }
 ```
 

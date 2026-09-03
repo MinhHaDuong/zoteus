@@ -89,6 +89,13 @@ All notable changes to Zoteus are documented here. The format is based on
   `debug`, and are kept out of the usage log.
 
 ### Fixed
+- **`deploy/Caddyfile` no longer publishes `/metrics` to the internet.** The shipped proxy
+  config was a blanket `reverse_proxy`, so every ops endpoint was public: on a live
+  instance `curl https://host/metrics` returned request and tool-call volume to anyone who
+  asked. `/metrics` and `/usage.json` now answer 404 from outside, in `handle` blocks so
+  the ordering does not depend on Caddy's directive ranking; `/healthz` and `/readyz` stay
+  open. `docker-compose.yml` also caps container logs at 3 x 10 MB, which Docker's default
+  `json-file` driver does not do at all.
 - **The local pipeline pools each model the way it was trained, instead of mean-pooling
   every model it is handed.** `ZOTEUS_EMBEDDING_MODEL` can name any transformers.js
   feature-extraction model, and the one pipeline call pooled all of them with `mean`: right
