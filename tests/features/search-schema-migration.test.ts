@@ -94,6 +94,13 @@ function readColumn(dbPath: string, sql: string): any {
   return row;
 }
 
+function readAll(dbPath: string, sql: string): any[] {
+  const db = new DatabaseSync(dbPath);
+  const rows = db.prepare(sql).all();
+  db.close();
+  return rows;
+}
+
 function sidelined(dbPath: string): string[] {
   const dir = dirname(dbPath);
   const name = basename(dbPath);
@@ -564,6 +571,31 @@ describe('the rung that adds the scope facets carries the index across', () => {
       expect(readColumn(path, "SELECT year AS y FROM items WHERE item_key = 'BBBBBBBB'").y).toBe(null);
     } finally {
       await second.close();
+    }
+  });
+
+  sqliteIt('fills both facets from a real build, and leaves a dateless item without a year', async () => {
+    // Through `build()` rather than through `putItem`, because a setter that works and a
+    // crawl that never calls it is a column nobody can scope by. The dateless row is the
+    // discriminating half: a parser that guesses would put that item in a year it does not
+    // belong to, which is the one failure a scope filter must not have.
+    const path = tmpDbPath('facets-from-build');
+    const index = await openIndex(path, { embedder: new CountingEmbedder() });
+    try {
+      await index.build([
+        { key: 'DATED111', meta: { parsedDate: '2016-03-04' }, data: { itemType: 'book', title: 'Deep learning' } },
+        { key: 'RAWDATE1', data: { itemType: 'journalArticle', title: 'Attention', date: 'June 2017' } },
+        { key: 'NODATE11', data: { itemType: 'thesis', title: 'Unfinished', date: 'n.d.' } },
+      ]);
+      await index.save();
+      const rows = readAll(path, 'SELECT item_key AS k, year AS y, item_type AS t FROM items ORDER BY item_key');
+      expect(rows).toEqual([
+        { k: 'DATED111', y: 2016, t: 'book' },
+        { k: 'NODATE11', y: null, t: 'thesis' },
+        { k: 'RAWDATE1', y: 2017, t: 'journalArticle' },
+      ]);
+    } finally {
+      await index.close();
     }
   });
 

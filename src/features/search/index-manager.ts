@@ -118,6 +118,25 @@ function itemText(d: any): string {
 }
 
 /**
+ * The scope facets of one item: the year it is dated to, and its Zotero type.
+ *
+ * The year comes from `meta.parsedDate` where the API supplies it — that is Zotero's own
+ * reading of a free-text date field, and re-deriving it here would be a second, worse
+ * parser — and falls back to the raw `data.date`, which is what the `data`-only shape and
+ * the local API's item payloads carry. Either way only a four-digit year is taken, and a
+ * date that yields none leaves `year` null rather than a guess: an item filed as
+ * "n.d." or "forthcoming" has no year, and inventing one would put it in a scope it does
+ * not belong to, which is the one failure a scope filter must not have.
+ */
+function itemFacets(item: any): { year: number | null; itemType: string | null } {
+  const d = item?.data ?? item ?? {};
+  const dated = String(item?.meta?.parsedDate ?? d.date ?? '');
+  const m = /\b(\d{4})\b/.exec(dated);
+  const year = m ? Number(m[1]) : null;
+  return { year, itemType: typeof d.itemType === 'string' && d.itemType ? d.itemType : null };
+}
+
+/**
  * An item's key, from either shape the APIs return it in (a wrapped item, or the `data`
  * object alone). Empty when it has none, which every caller reads as "not indexable".
  */
@@ -837,7 +856,8 @@ export abstract class SearchIndexBase implements SearchIndex {
       const d = item.data ?? item;
       const key = item.key ?? d.key;
       if (!key) continue;
-      this.putItem(key, d.title ?? '(untitled)');
+      const facets = itemFacets(item);
+      this.putItem(key, d.title ?? '(untitled)', facets.year, facets.itemType);
       const base = itemText(d);
       const extra = opts.extraText?.get(key);
       const text = extra ? `${base}. ${extra}` : base;
@@ -2021,7 +2041,8 @@ export abstract class SearchIndexBase implements SearchIndex {
     const key = item.key ?? d.key;
     if (!key) return undefined;
     const title = d.title ?? '(untitled)';
-    this.putItem(key, title);
+    const facets = itemFacets(item);
+    this.putItem(key, title, facets.year, facets.itemType);
     for (const ch of chunkText(itemText(d))) {
       const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title, text: ch.text };
       this.putPassage(rec);
@@ -2213,8 +2234,13 @@ export class MemorySearchIndex extends SearchIndexBase {
     this.ownWordsPassages = 0;
   }
 
-  protected putItem(itemKey: string, title: string): void {
+  protected putItem(itemKey: string, title: string, year?: number | null, itemType?: string | null): void {
     this.items.set(itemKey, title);
+    // The in-memory index answers no scoped query, so it stores no facet — stated rather
+    // than left to an optional parameter's silence, because a facet accepted and dropped
+    // is exactly the defect an explicit no-op makes visible.
+    void year;
+    void itemType;
   }
 
   protected putPassage(rec: ChunkRecord): void {
