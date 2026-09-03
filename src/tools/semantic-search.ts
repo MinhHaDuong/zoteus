@@ -83,20 +83,26 @@ const semanticSearch: ToolDefinition = {
     // A store that could not be opened explains itself; this branch would otherwise tell
     // the caller their index holds no vectors and to rebuild it, which is true and beside
     // the point. Falling through lets query() refuse with the file and the command.
-    if (args.mode === 'semantic' && !ctx.search.hasVectors && !ctx.search.storeFault) {
+    if (
+      args.mode === 'semantic' &&
+      (!ctx.search.hasVectors || !ctx.search.embedderActive) &&
+      !ctx.search.storeFault
+    ) {
       const why =
         // A model switch is the one cause that names its own remedy, so it wins over the
         // generic "no vectors yet" line.
         status.vectorsStaleReason ??
-        (ctx.search.embedderActive
-          ? 'The index holds no vectors yet. Rebuild it with zotero_index action:"build" (an index built while the embedder was unavailable stays keyword-only until rebuilt).'
-          : `No vectors exist because the embedder is not active: ${ctx.search.embedderReason ?? 'unavailable'}`);
+        (!ctx.search.embedderActive
+          ? `The embedder is not active: ${ctx.search.embedderReason ?? 'unavailable'}`
+          : 'The index holds no vectors yet. Rebuild it with zotero_index action:"build" (an index built while the embedder was unavailable stays keyword-only until rebuilt).');
       return {
         content: [
           {
             type: 'text',
             text:
-              `mode:"semantic" cannot run: it ranks by vector similarity only, and this index has 0 vectors. ${why} ` +
+              (ctx.search.hasVectors
+                ? `mode:"semantic" cannot run: no validated embedder is active to produce its query vector. ${why} Stored vectors are not queried without that exact embedder. `
+                : `mode:"semantic" cannot run: it ranks by vector similarity only, and this index has 0 vectors. ${why} `) +
               'Re-run with mode:"keyword" (or the default "auto") to search this library right now.',
           },
         ],
