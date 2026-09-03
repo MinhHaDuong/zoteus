@@ -768,6 +768,11 @@ a mirrored or renamed checkpoint whose id the table cannot speak for; `auto` is 
 it wrong and retrieval degrades silently, so leave it unset unless you have read the file. The
 pooling is not part of the embedder identity below: the model id already determines it.
 
+If you built a local index with one of the `cls` models before this release, it holds
+mean-pooled vectors and your queries are now `cls`-pooled against them. The identity did not
+change, so nothing tells you: rebuild once with `zotero_index action:"build"`. That index was
+the one retrieving badly, so the rebuild is the repair.
+
 **Changing the model means rebuilding**, exactly as it does for an API provider: the identity
 stored beside the vectors becomes `local:Xenova/multilingual-e5-small`, the old vectors are
 dropped with a notice, and one `zotero_index action:"build"` re-embeds the library. See

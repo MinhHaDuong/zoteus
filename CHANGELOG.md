@@ -66,6 +66,14 @@ All notable changes to Zoteus are documented here. The format is based on
   prefixes, and with the same warning: set wrong, it degrades retrieval silently. It does
   not join the embedder identity, since the model id already determines the pooling.
 
+  One index is affected and it is worth saying so plainly: if you built a local index with
+  one of the `cls` models between the release that let you name a model and this one, its
+  vectors were mean-pooled and your queries will now be `cls`-pooled against them, under an
+  identity that did not change and so raises no notice. Rebuild it with
+  `zotero_index action:"build"`. That index was already the degraded one — the rebuild is
+  the repair, not its price — and no index built before those models could be named is
+  touched, since `mean` was right for every model that could reach the pipeline then.
+
 ## [1.13.0] - 2026-09-03
 
 ### Added
