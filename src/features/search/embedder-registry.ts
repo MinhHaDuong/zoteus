@@ -289,12 +289,63 @@ export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = parseEmbedderEntry({
   },
 });
 
-type Candidate = Pick<
+type FamilyProvenance = Pick<
   EmbedderEntry,
   'id' | 'model' | 'revision' | 'pooling' | 'normalize' | 'template' | 'windowTokens' | 'dimension'
 >;
 
-const CANDIDATES: readonly Candidate[] = [
+/** Public study snapshot from which the six measured family records were transcribed. */
+export const EMBEDDER_STUDY_REVISION = 'aa9d82f0692208ce1e8b72e57094bd2d533900ea';
+const EMBEDDER_STUDY_MODELS =
+  `https://github.com/MinhHaDuong/search-works-for-zotero/blob/${EMBEDDER_STUDY_REVISION}` +
+  '/bench/models.json';
+
+function studyField(candidate: FamilyProvenance, field: string): string {
+  return `${EMBEDDER_STUDY_MODELS}#models[id=${candidate.id}].${field}`;
+}
+
+function pinnedModel(candidate: FamilyProvenance): string {
+  return `https://huggingface.co/${candidate.model}/tree/${candidate.revision}`;
+}
+
+function pinnedModelFile(candidate: FamilyProvenance, path: string, field?: string): string {
+  return (
+    `https://huggingface.co/${candidate.model}/blob/${candidate.revision}/${path}` +
+    (field ? `#${field}` : '')
+  );
+}
+
+/** Field-specific immutable evidence for one measured family and graph dtype. */
+function measuredSources(
+  candidate: FamilyProvenance,
+  dtype: (typeof MEASURED_DTYPES)[number],
+): Readonly<Record<FingerprintedEntryField, string>> {
+  const graphFile = GRAPH_BY_DTYPE[dtype];
+  const graph = pinnedModelFile(candidate, graphFile);
+  return Object.freeze({
+    model: `model: ${studyField(candidate, 'hf_repo')}; ${pinnedModel(candidate)}`,
+    revision: `revision: ${studyField(candidate, 'hf_revision')}; ${pinnedModel(candidate)}`,
+    dtype:
+      `dtype: ${graph}; https://unpkg.com/@huggingface/transformers@4.2.0/` +
+      `src/utils/dtypes.js#DEFAULT_DTYPE_SUFFIX_MAPPING[${dtype}]`,
+    graphFile: `graphFile: ${graph}`,
+    pooling:
+      `pooling: ${studyField(candidate, 'pooling')}; ` +
+      studyField(candidate, 'pooling_source'),
+    normalize:
+      `normalize: ${studyField(candidate, 'normalize')}; ` +
+      studyField(candidate, 'normalize_source'),
+    template:
+      `template: ${studyField(candidate, 'input_template.query')}; ` +
+      studyField(candidate, 'input_template.passage'),
+    // Deliberately not models.json#max_seq: registry windows are the tokenizer's actual
+    // truncation setting, not the architecture's positional capacity.
+    windowTokens: `windowTokens: ${pinnedModelFile(candidate, 'tokenizer_config.json', 'model_max_length')}`,
+    dimension: `dimension: ${pinnedModelFile(candidate, 'config.json', 'hidden_size')}`,
+  });
+}
+
+const FAMILY_PROVENANCE: readonly FamilyProvenance[] = [
   {
     id: 'granite-97m-multilingual-r2',
     model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
@@ -358,21 +409,14 @@ const CANDIDATES: readonly Candidate[] = [
 ];
 
 const MEASURED_DTYPES = ['fp32', 'q8', 'uint8'] as const;
-const measuredEntries = CANDIDATES.flatMap((candidate) =>
+const measuredEntries = FAMILY_PROVENANCE.flatMap((candidate) =>
   MEASURED_DTYPES.map((dtype) =>
     parseEmbedderEntry({
       ...candidate,
       id: `${candidate.id}-${dtype}`,
       dtype,
       graphFile: GRAPH_BY_DTYPE[dtype],
-      sources: Object.fromEntries(
-        APPLIED_FIELDS.map((field) => [
-          field,
-          field === 'windowTokens'
-            ? 'tokenizer_config.json model_max_length in the cached repository revision, verified with Transformers.js 4.2.0'
-            : 'bench/models.json and the model repository configuration used by the measured CPU cell',
-        ]),
-      ),
+      sources: measuredSources(candidate, dtype),
     }),
   ),
 ).filter((entry) => entry.id !== 'granite-97m-multilingual-r2-q8');
