@@ -4,6 +4,68 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **One OpenAI `429` no longer ends an index build (#48).** The embedding request path had
+  no retry at all: a single rate-limit answer flipped the embedder off, and the build
+  carried on writing passages BM25-only to the end. A `429`, a `5xx`, a timeout or a dropped
+  connection now waits and tries again, exponentially from 1 s with jitter, honouring
+  `Retry-After` in either form the header takes, capped at 60 s per wait and about three
+  minutes of waiting per request; `ZOTEUS_EMBED_MAX_RETRIES` sets how many attempts that is,
+  and `0` restores the old behaviour. A `400` is still fatal on the first answer, deliberately:
+  that is OpenAI's reply to a request carrying more tokens than it accepts, and the batch
+  would be exactly as oversized on every retry, so retrying it would turn an instant,
+  actionable failure into a slow one. The default pause between requests stays `0`. Backoff
+  is what a library that never approaches a limit needs, and no one standing pause is right
+  for both a Tier 1 account and a Tier 5 one; the pause is for a build that has been told it
+  is riding the ceiling, and now it gets told.
+- **A build whose embedder gave up keeps its place instead of starting over (#48).** The
+  reporter lost the full-text pass of a 10,428-item library six times running, and every
+  retry re-embedded all 87,000 passages, which is the expensive half of the job. Two faults
+  produced that. A provider failure never made the build *unfinished*: it reported
+  `state:"done"` and deleted the very checkpoint that would have let the next build carry
+  on. And even with a checkpoint, nothing could find the passages that were committed
+  without a vector, because they are indexed, so the crawl steps over their items by key and
+  the full-text pass steps over them by `hasFulltext`, both correctly. Now a build the
+  embedder died in keeps its checkpoint and withholds the library version stamp (so an
+  `action:"update"` falls back to the build that resumes, rather than running a `?since=`
+  delta that finds nothing to do and freezes the index half-embedded for good), and a
+  resumed build finishes by asking the store for committed passages carrying no vector, 500
+  at a time, and buying exactly those. No page is re-fetched, no PDF is re-read, no passage
+  is re-chunked. `action:"refresh"` still starts over, as it always has. The persist cadence
+  is unchanged and was measured rather than assumed: at about 8 passages per item, the
+  60-second trigger commits roughly 1,900 passages of work, and a SQLite commit of a 372 MB
+  full-text index costs 56 ms against the 4.2 s the JSON backend spends re-serializing one,
+  so halving the item trigger would double the dominant cost on one backend and bound the
+  loss no more tightly than the clock already does.
+
+### Added
+- **The rate math a build is running at, where the person watching it can read it (#48).**
+  Whether an API embedding provider will throttle a build is a sum of the batch size, the
+  pause between requests and the tokens a passage carries, and until now nothing Zoteus
+  printed mentioned a rate at all: the reporter worked it out from OpenAI's dashboard
+  against a reading of `dist/config.js`. `zotero_index action:"status"` now carries
+  `embedRate` for an API provider (batch size, pause, estimated tokens per request at four
+  characters per token, and the tokens per minute the build is actually sustaining), the
+  server log prints the same line when the full-text pass begins, and the status summary
+  speaks up when the measured rate reaches 800,000 tokens/min or a single request approaches
+  the 300,000 OpenAI rejects whole. Status also reports `passagesWithoutVectors`, so a
+  half-embedded index is no longer indistinguishable from one with no vectors at all, and
+  both `zotero_index` and `zotero_semantic_search` name the remedy: `action:"build"`, which
+  resumes, and never `action:"refresh"`, which pays for every vector a second time.
+- **`ZOTEUS_EMBED_BATCH_SIZE` and `ZOTEUS_EMBED_BATCH_DELAY_MS` are documented where a
+  failing build sends you (#48).** Both were in `docs/configuration.md` and
+  `docs/semantic-search.md` already, and the reporter still found them only by reading
+  `dist/config.js`, which says the tables were not the problem. They are now in the README's
+  own configuration table, in a README note about embedding a large library through an API,
+  in the descriptions of the desktop-extension settings that set them (each naming the
+  other, since neither dial works alone), and in the `zotero_index` tool description the
+  model reads before it explains a failure. `docs/semantic-search.md` gains a **When a build
+  gets rate-limited** section with the retry policy, the resume behaviour, and the
+  `ZOTEUS_EMBED_BATCH_SIZE=256` / `ZOTEUS_EMBED_BATCH_DELAY_MS=8000` pairing that carried the
+  reporter's library through in one uninterrupted 45-minute run at about 400,000 tokens/min.
+
 ## [1.12.0] - 2026-08-31
 
 ### Fixed

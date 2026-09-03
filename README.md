@@ -70,6 +70,8 @@ Zoteus detects a running Zotero desktop app and talks to it directly: the key-fr
 
 > **Semantic search setup.** The first `zotero_semantic_search` builds the library index in the background. On very large libraries you can also run `zotero_index` (action:"build") yourself, then poll action:"status" until it is done. The build pages your library through the same local-first path as every other read, so it needs no cloud API key while the desktop app is running. That covers your personal library and, on Zotero 10+, any group library the app holds; a key is needed when the app is closed, and for a group the app does not hold.
 
+> **Embedding through an API on a large library.** A full-text build of a 10k-item library is tens of thousands of requests, and at the default pacing the rate rides at OpenAI's tokens-per-minute ceiling whatever your tier. A rate-limited request now backs off and retries rather than failing the build, and a build that still ends short keeps everything it indexed: run `zotero_index action:"build"` again and it resumes, embedding only the passages that have no vector yet (`action:"refresh"` is the one that starts over). To pace it up front, set `ZOTEUS_EMBED_BATCH_SIZE=256` and `ZOTEUS_EMBED_BATCH_DELAY_MS=8000`. See [`docs/semantic-search.md`](./docs/semantic-search.md#when-a-build-gets-rate-limited).
+
 > **Vector ranking is opt-in.** Keyword (BM25) search works out of the box everywhere. On-device vectors need `@huggingface/transformers`, which the desktop-extension bundle cannot ship (the resolved dependency tree, onnxruntime's native binaries included, is about 700 MB): install it into a directory of its own (`mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps && npm init -y && npm i @huggingface/transformers`) and set `ZOTEUS_TRANSFORMERS_PATH` to `~/.zoteus-deps/node_modules`. Not `npm i -g`: Claude Desktop runs the server on its own built-in Node, so a global install under a version manager sits next to a Node the extension never executes. When vectors are unavailable Zoteus says so in `zotero_index` status, `zotero_whoami`, and `zotero_semantic_search` rather than quietly returning nothing. See [`docs/semantic-search.md`](./docs/semantic-search.md).
 
 ## Configuration
@@ -80,6 +82,8 @@ Zoteus detects a running Zotero desktop app and talks to it directly: the key-fr
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off`: use the Zotero desktop app (reads + personal-library writes) |
 | `ZOTEUS_LOCAL_API_KEY` | none | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
+| `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call. Lower it if an API provider rejects a whole request (OpenAI answers `400` above 300K tokens per request) |
+| `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between embedding calls. Raise it if an API provider rate-limits a large build: `256` and `8000` together hold a full-text build near 400K tokens/min |
 | `ZOTEUS_INDEX_OWN_WORDS` | `true` | Index your own child notes and PDF annotations as searchable passages |
 | `ZOTEUS_INDEX_FULLTEXT` | `false` | Index PDF body text for semantic search (opt-in; costly) |
 | `ZOTEUS_ALLOW_ELECTRON_FULLTEXT` | `false` | Let a full-text **build** run under Electron (Claude Desktop), where it currently kills the server process ([#37](https://github.com/oscardvs/zoteus/issues/37)). Build headlessly instead; `action:"update"` is never gated |

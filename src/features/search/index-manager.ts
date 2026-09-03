@@ -9,7 +9,7 @@ import {
   SATURATED_FULLTEXT_CONCURRENCY,
 } from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
-import { progressLine } from './build.js';
+import { embedRateLine, progressLine } from './build.js';
 import { describeLibraryToken } from './backend.js';
 import { saveIndex } from './persistence.js';
 import type {
@@ -20,6 +20,7 @@ import type {
   OwnWordsEntry,
   IncrementalBuildOptions,
   IncrementalUpdateOptions,
+  EmbedRate,
   IndexBuildStatus,
   IndexCounts,
   IndexSnapshot,
@@ -70,6 +71,9 @@ export type {
 export const FULLTEXT_CHUNK_SIZE = 1200;
 export const FULLTEXT_CHUNK_OVERLAP = 150;
 
+/** The chunker's own default, named here so the rate arithmetic can quote it. */
+export const METADATA_CHUNK_SIZE = 512;
+
 /** One sentence for the status fields that have room only to say the index is unusable. */
 export const UNREADABLE_STORE = 'the search index cannot be read';
 
@@ -87,6 +91,21 @@ const PAGE_GROUP = 100;
  * batches at the default batch size of 32.
  */
 const VECTOR_BACKFILL_GROUP = 500;
+
+/**
+ * Characters per token, for the rate arithmetic on `IndexBuildStatus.embedRate`. The rule
+ * of thumb every provider publishes for English prose; a real count would need this side to
+ * ship a tokenizer per model, and the answer is being compared against limits quoted in
+ * round millions, so the third significant figure buys nothing.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Characters embedded before the observed tokens-per-minute figure is reported at all. Below
+ * it the measurement is one or two requests' latency, which says more about the first
+ * connection than about the rate this build will sustain.
+ */
+const RATE_SAMPLE_CHARS = 200_000;
 
 function itemText(d: any): string {
   const creators = (d.creators ?? []).map((c: any) => c.lastName ?? c.name).filter(Boolean).join(' ');
@@ -352,6 +371,17 @@ export abstract class SearchIndexBase implements SearchIndex {
    * to show for it, so the loss was discovered on the next startup (#10).
    */
   private persistError: string | undefined = undefined;
+  /**
+   * The pacing this job is embedding at, and what it has actually achieved: enough to
+   * answer "will this build be rate-limited?", which is the question #48 turned out to be.
+   * `embedChars` and `embedMs` cover the time inside the provider plus the configured
+   * pauses, i.e. the wall clock the embedding pass owns, so their ratio is the sustained
+   * rate rather than a peak.
+   */
+  private embedBatchInUse: number | undefined = undefined;
+  private embedDelayInUse = 0;
+  private embedChars = 0;
+  private embedMs = 0;
 
   constructor(protected readonly opts: SearchIndexOptions) {}
 
@@ -588,6 +618,30 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
   }
 
+  /**
+   * The rate arithmetic for this job, or undefined when it does not apply: no API provider
+   * (a local pipeline answers to no tokens-per-minute limit), or nothing embedded yet.
+   */
+  private embedRate(): EmbedRate | undefined {
+    const name = this.opts.embedder?.name;
+    if (name !== 'openai' && name !== 'gemini') return undefined;
+    const batchSize = this.embedBatchInUse;
+    if (!batchSize) return undefined;
+    // The chunk size this job is actually producing: body passages are more than twice the
+    // size of metadata ones, so quoting one figure for both would be wrong by that much on
+    // whichever build it did not describe.
+    const chunk = this.fulltextEnabled ? FULLTEXT_CHUNK_SIZE : METADATA_CHUNK_SIZE;
+    const rate: EmbedRate = {
+      batchSize,
+      delayMs: this.embedDelayInUse,
+      tokensPerRequest: Math.round((batchSize * chunk) / CHARS_PER_TOKEN),
+    };
+    if (this.embedChars >= RATE_SAMPLE_CHARS && this.embedMs > 0) {
+      rate.tokensPerMinute = Math.round((this.embedChars / CHARS_PER_TOKEN / this.embedMs) * 60_000);
+    }
+    return rate;
+  }
+
   /** Record the first provider failure so status, not just the log, can report it. */
   private noteEmbedFailure(e: unknown): void {
     if (this.embedderError) return;
@@ -628,6 +682,8 @@ export abstract class SearchIndexBase implements SearchIndex {
       const missing = base.documents - base.vectors;
       if (missing > 0) s.passagesWithoutVectors = missing;
     }
+    const rate = this.embedRate();
+    if (rate) s.embedRate = rate;
     if (this.fault) {
       s.state = 'error';
       s.lastError = UNREADABLE_STORE;
@@ -835,6 +891,12 @@ export abstract class SearchIndexBase implements SearchIndex {
     // look degraded for as long as the index lives.
     this.localApiDegradedAt = undefined;
     this.itemsRemoved = 0;
+    // This job reports its own rate, like everything else here: the pacing of the last
+    // build says nothing about whether this one will be throttled.
+    this.embedBatchInUse = undefined;
+    this.embedDelayInUse = 0;
+    this.embedChars = 0;
+    this.embedMs = 0;
     this.phase = 'metadata';
     this.fulltextItemsScanned = 0;
     this.fulltextItemsTotal = 0;
@@ -1157,6 +1219,13 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.phase = 'fulltext';
         this.fulltextItemsTotal = worklist.length;
         forceLog();
+        // Said once, at the start of the pass that does the spending, because this is the
+        // pass where an API provider's tokens-per-minute limit decides whether the build
+        // finishes. The metadata pass is over in minutes and never reaches a rate that
+        // matters; the body crawl runs for hours at whatever pace these two dials set, and
+        // until #48 nothing anywhere printed what that pace was.
+        const plan = this.embedRate();
+        if (plan) this.opts.logger?.info(`index build: embedding through ${this.opts.embedder!.name} at ${embedRateLine(plan)}.`);
         // Items whose attachments Zotero has no extracted text for are dropped here rather
         // than awaited one by one: on a library where a minority of items have PDFs that is
         // most of the worklist, and each would otherwise cost a round trip to learn nothing.
@@ -1839,14 +1908,24 @@ export abstract class SearchIndexBase implements SearchIndex {
       pending.length = 0;
       return;
     }
+    // Recorded per drain rather than per build, so `embedRate` describes the pacing in
+    // force right now even on a job whose caller changed it between passes.
+    this.embedBatchInUse = batchSize;
+    this.embedDelayInUse = delayMs;
     while (pending.length >= (force ? 1 : batchSize)) {
       if (token.cancelled) return;
       const batch = pending.splice(0, Math.min(batchSize, pending.length));
+      const startedAt = Date.now();
       try {
         const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text));
         batch.forEach((r, i) => {
           if (vecs[i]) this.putVector(r.id, vecs[i]!);
         });
+        // Only a request that produced vectors counts towards the rate: one that spent two
+        // minutes backing off and then failed measures the provider's refusal, not this
+        // build's throughput.
+        this.embedChars += batch.reduce((n, r) => n + r.text.length, 0);
+        this.embedMs += Date.now() - startedAt + delayMs;
       } catch (e) {
         // hasEmbedder goes false from here, which both stops this loop and makes every
         // later status report say why the index has no vectors.

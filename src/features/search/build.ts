@@ -1,6 +1,6 @@
 import type { ToolContext } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
-import type { IndexBuildStatus, VersionBackend } from './backend.js';
+import type { EmbedRate, IndexBuildStatus, VersionBackend } from './backend.js';
 import { canonicalLibraryToken } from './backend.js';
 import { createFulltextSource, type FulltextSource } from './fulltext-source.js';
 import { electronFulltextRefusal } from './electron.js';
@@ -103,6 +103,79 @@ export function staleVectorsNotice(s: IndexBuildStatus): string {
 }
 
 /**
+ * Sustained tokens per minute above which a build is told to slow itself down.
+ *
+ * Not a provider's published limit, and deliberately below the lowest one that matters:
+ * OpenAI allows 1,000,000 tokens/min for text-embedding-3-small on Tier 2, and #48 shows
+ * what happens to a build that sits exactly on it, which is that natural variance in
+ * request size puts it over and the whole job dies on the 429. 800k leaves room for that
+ * variance and still lets an unthrottled build on a smaller library say nothing at all.
+ */
+export const EMBED_TPM_HINT = 800_000;
+
+/**
+ * Per-request token estimate above which the batch is called out on its own account.
+ * OpenAI rejects a request over 300,000 tokens whole, with a 400 no retry can help; this is
+ * close enough to say so before the build finds out.
+ */
+export const EMBED_TOKENS_PER_REQUEST_HINT = 250_000;
+
+/** Thousands separators, without a locale: the same string on every machine and in tests. */
+function grouped(n: number): string {
+  return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * The pacing a build is embedding at, in one line, for the server log at the start of the
+ * full-text pass and for anything else that has to explain the rate.
+ *
+ * This is the arithmetic the reporter of #48 had to do by hand, from the provider's
+ * dashboard and a reading of `dist/config.js`, to discover that their build was sitting on
+ * OpenAI's tokens-per-minute ceiling. It costs one log line to hand it over.
+ */
+export function embedRateLine(r: EmbedRate): string {
+  const pace =
+    r.delayMs > 0
+      ? `a ${r.delayMs} ms pause between requests`
+      : 'no pause between requests (ZOTEUS_EMBED_BATCH_DELAY_MS=0), so the rate is set only by how fast the provider answers';
+  const measured = r.tokensPerMinute ? `; measured at ${grouped(r.tokensPerMinute)} tokens/min so far` : '';
+  return (
+    `${r.batchSize} passages per request (ZOTEUS_EMBED_BATCH_SIZE), about ${grouped(r.tokensPerRequest)} ` +
+    `tokens each, with ${pace}${measured}`
+  );
+}
+
+/**
+ * Sentence appended when a build is embedding fast enough to be throttled, or in batches
+ * large enough to be rejected outright.
+ *
+ * Only when there is something to act on. A build well under the limits should not be
+ * lectured about rate limits it will never meet, which is why the plain arithmetic goes to
+ * the log and only the verdict comes here.
+ */
+export function embedRateNotice(s: IndexBuildStatus): string {
+  const r = s.embedRate;
+  if (!r) return '';
+  const parts: string[] = [];
+  if (r.tokensPerRequest > EMBED_TOKENS_PER_REQUEST_HINT) {
+    parts.push(
+      `Each embedding request carries about ${grouped(r.tokensPerRequest)} tokens, near the 300,000 OpenAI ` +
+        'rejects outright with a 400 that no retry can help: lower ZOTEUS_EMBED_BATCH_SIZE.',
+    );
+  }
+  if (r.tokensPerMinute && r.tokensPerMinute >= EMBED_TPM_HINT) {
+    parts.push(
+      `This build is embedding at about ${grouped(r.tokensPerMinute)} tokens/min, at or near the ` +
+        '1,000,000 tokens/min OpenAI allows text-embedding-3-small on Tier 2, where a build gets rate-limited ' +
+        'whatever its tier, because request sizes vary around the ceiling. Pace it with ' +
+        'ZOTEUS_EMBED_BATCH_DELAY_MS (8000, with ZOTEUS_EMBED_BATCH_SIZE=256, holds a large full-text build ' +
+        'near 400,000 tokens/min).',
+    );
+  }
+  return parts.length ? ` ${parts.join(' ')}` : '';
+}
+
+/**
  * Sentence appended when the index holds passages nothing has embedded yet.
  *
  * The half of #48 that no existing notice covered. When an embedder failed partway through
@@ -118,10 +191,11 @@ export function unembeddedNotice(s: IndexBuildStatus): string {
   if (!s.passagesWithoutVectors || s.state === 'building') return '';
   return (
     ` ${s.passagesWithoutVectors} indexed passage(s) carry no vector yet, so semantic ranking cannot see them` +
-    ' (keyword search can). Run zotero_index action:"build" again: it RESUMES, embedding exactly those and' +
-    ' re-fetching nothing. Do NOT use action:"refresh", which starts the whole crawl over and pays for every' +
-    ' vector a second time. If an API rate limit is what stopped it, pace the next run with' +
-    ' ZOTEUS_EMBED_BATCH_SIZE and ZOTEUS_EMBED_BATCH_DELAY_MS.'
+    ' (keyword search can). Run zotero_index action:"build" again to fill them in: when a build is what left' +
+    ' them, that RESUMES it, embedding exactly those passages and re-fetching nothing. Do NOT use' +
+    ' action:"refresh", which starts the whole crawl over and pays for every vector a second time. If an API' +
+    ' rate limit is what stopped it, pace the next run with ZOTEUS_EMBED_BATCH_SIZE and' +
+    ' ZOTEUS_EMBED_BATCH_DELAY_MS.'
   );
 }
 
@@ -210,6 +284,7 @@ export function statusSummary(s: IndexBuildStatus): string {
     embedderNotice(s) +
     staleVectorsNotice(s) +
     unembeddedNotice(s) +
+    embedRateNotice(s) +
     fulltextNotice(s) +
     ownWordsNotice(s) +
     truncationNotice(s) +
