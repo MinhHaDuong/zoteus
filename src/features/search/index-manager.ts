@@ -1,8 +1,8 @@
 import { BM25Index } from './bm25.js';
 import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
-import { pruneTerms } from './query-terms.js';
-import { accentKey, isStopword, normalizeForSearch, tokenize } from './tokenize.js';
+import { pruneTerms, type TermPredicate } from './query-terms.js';
+import { accentKey, normalizeForSearch, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
 import {
   DEFAULT_EMBED_BATCH_SIZE,
@@ -147,8 +147,16 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
   return [...scores.entries()].map(([id, score]) => ({ id, score })).sort((a, b) => b.score - a.score);
 }
 
-/** Build a readable, query-centred snippet trimmed to word boundaries. */
-export function makeSnippet(text: string, query: string, max = 240): string {
+/**
+ * Build a readable, query-centred snippet trimmed to word boundaries.
+ *
+ * `highDf` is the index's droplist, and passing it is not optional polish. This function
+ * centres on the EARLIEST query term it finds, so a term the corpus is saturated with is
+ * found at or near character 0 of almost every passage and every snippet becomes the
+ * passage's opening words. With the 29-word stoplist gone from `tokenize()`, that is what
+ * `the theory of games` would do to every result it returned.
+ */
+export function makeSnippet(text: string, query: string, max = 240, highDf?: TermPredicate): string {
   // NFC changes no character the reader sees, and it is what the token comparison below
   // normalizes to.
   const clean = text.replace(/\s+/g, ' ').trim().normalize('NFC');
@@ -167,7 +175,7 @@ export function makeSnippet(text: string, query: string, max = 240): string {
   // The stripped form is compared too, because query expansion lets an unaccented query
   // reach an accented document: a passage spelling `théorie` answers a query for
   // `theorie`, and the snippet must be able to find what the search found.
-  const wanted = new Set(pruneTerms(tokenize(query), isStopword));
+  const wanted = new Set(pruneTerms(tokenize(query), highDf, 'raw'));
   let pos = -1;
   for (const m of clean.matchAll(/[\p{L}\p{N}]+/gu)) {
     const token = normalizeForSearch(m[0]);
@@ -440,6 +448,26 @@ export abstract class SearchIndexBase implements SearchIndex {
    * never a failed build.
    */
   protected finalizeVectors(): void {}
+  /**
+   * Bring this index's droplist level with the passages it is derived from.
+   *
+   * Called beside `finalizeVectors` and for the same reason — after the writing, before the
+   * persist, so a derived fact commits with the rows it was derived from. `force` says a
+   * full build has just walked the whole corpus, which is the declared recompute point; an
+   * update passes false and the store decides for itself whether the corpus has drifted far
+   * enough to be worth rescanning.
+   *
+   * Must not throw, on the same rule as `finalizeVectors`: a droplist that could not be
+   * derived is a slower index, never a failed build.
+   */
+  protected refreshDroplist(_force: boolean): void {}
+  /**
+   * The terms this index's corpus cannot discriminate on, or undefined where the store has
+   * no droplist — which must mean "prune nothing", never "prune everything".
+   */
+  protected highDf(): TermPredicate | undefined {
+    return undefined;
+  }
   /** Width of the stored vectors (undefined when none are stored). Their embedder's fingerprint. */
   protected abstract vectorDimension(): number | undefined;
   /** Keyword candidates, best first. */
@@ -737,6 +765,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
     this.builtFromVersion = opts.version ?? 0;
     this.finalizeVectors();
+    this.refreshDroplist(true);
     return this.status();
   }
 
@@ -1171,6 +1200,10 @@ export abstract class SearchIndexBase implements SearchIndex {
       // its partial index stays searchable, and it would otherwise pay for them on the
       // first query instead.
       this.finalizeVectors();
+      // A stopped build gets one too, for the same reason its codes are built: its partial
+      // index stays queryable, and a droplist derived from most of the corpus is a far
+      // better answer for it than none at all.
+      this.refreshDroplist(true);
       await persistNow();
       this.buildState = 'done';
       if (resume) noteResumed();
@@ -1408,6 +1441,12 @@ export abstract class SearchIndexBase implements SearchIndex {
       // adds codes for the passages it added and nothing else, and a failure below rolls
       // them back with the rest.
       this.finalizeVectors();
+      // Not forced: a delta of a few items cannot move a 30% threshold, and the scan that
+      // derives the droplist is the one cost in this whole feature a user could feel. The
+      // store rescans only when the corpus has drifted far enough to change the answer —
+      // or when it holds no droplist at all, which is how an index built by an older
+      // version adopts one without waiting for a rebuild.
+      this.refreshDroplist(false);
       // Persisted once, at the end: the delta is small by construction, and one commit is
       // what makes "the stamp advanced" and "the rows are on disk" a single durable fact.
       try {
@@ -1894,11 +1933,14 @@ export abstract class SearchIndexBase implements SearchIndex {
     const fused = rrf([keyword, vector]);
     const seen = new Set<string>();
     const hits: SearchHit[] = [];
+    // Read once rather than per hit: on the SQLite backend it is a set lookup, on the JSON
+    // one a closure over the live postings, and neither wants to be rebuilt ten times.
+    const highDf = this.highDf();
     for (const { id, score } of fused) {
       const rec = this.passage(id);
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
-      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q), score };
+      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q, 240, highDf), score };
       // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
       // zotero_get_fulltext, whereas a metadata one is just the abstract — and a note or
       // annotation is the reader's own, which is a different thing again to be told.
@@ -2084,6 +2126,17 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   protected vectorDimension(): number | undefined {
     return this.vectors.dimension;
+  }
+
+  /**
+   * Live off the resident postings, so this backend stores no droplist and needs no cadence
+   * rule: `df` is exact, it is rebuilt from the raw passage text on every load exactly as
+   * the postings are, and a JSON artifact written before this change therefore adopts the
+   * pruning the moment it is read back. `refreshDroplist` stays a no-op here for the same
+   * reason — there is nothing to derive and nothing to persist.
+   */
+  protected highDf(): TermPredicate {
+    return (t) => this.bm25.isHighDf(t);
   }
 
   protected keywordSearch(q: string, topK: number): RankedId[] {

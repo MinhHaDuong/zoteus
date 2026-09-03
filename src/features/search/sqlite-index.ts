@@ -4,8 +4,15 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { SearchIndexBase } from './index-manager.js';
-import { MAX_ACCENT_VARIANTS, pruneTerms } from './query-terms.js';
-import { accentKey, isStopword, normalizeForSearch, tokenize } from './tokenize.js';
+import {
+  highDfMinimum,
+  MAX_ACCENT_VARIANTS,
+  MIN_DERIVATION_PASSAGES,
+  pruneTerms,
+  REDERIVE_DRIFT,
+  type TermPredicate,
+} from './query-terms.js';
+import { accentKey, normalizeForSearch, tokenize } from './tokenize.js';
 import {
   SearchIndexCorruptError,
   SearchIndexUnreadableError,
@@ -386,6 +393,18 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private codesUnusable: string | undefined;
   /** Whether the database holds any code at all, so a fresh build skips 255k no-op deletes. */
   private hasCodes = false;
+  /**
+   * This library's droplist, as derived at the last build, or undefined where the database
+   * holds none.
+   *
+   * The distinction is load-bearing, and it is the reason this is not simply an empty set:
+   * undefined means an index written before droplists existed, which must behave exactly as
+   * it did then and prune nothing, while an empty set is a real derivation over a corpus no
+   * term saturates. Both prune nothing today; only the first is owed an adoption.
+   */
+  private dropSet: Set<string> | undefined;
+  /** The passage count the droplist was derived at, against which drift is measured. */
+  private dropSetPassages = 0;
   /** Rescore statements by candidate count; see RESCORE_BATCH. */
   private rescoreStmts = new Map<number, StatementSync>();
 
@@ -1038,6 +1057,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // Absent in databases written before the library stamp: an unstamped index refuses
     // nothing (assertLibrary), so old files keep building rather than stranding.
     this.library = this.meta('library') || undefined;
+    // Absent in databases written before the droplist: such an index prunes nothing until
+    // its next build or update derives one, which is the same adoption the library stamp
+    // gets. `??` and not `||`, so a genuinely empty droplist stays a derivation.
+    const droplist = this.meta('droplist');
+    this.dropSet = droplist === undefined ? undefined : new Set(droplist.split(' ').filter(Boolean));
+    this.dropSetPassages = Number(this.meta('droplistPassages') ?? 0) || 0;
     // An index that HOLDS full-text passages counts as full-text-enabled, even before this
     // process runs a build of its own (same rule as the JSON backend's load).
     this.fulltextEnabled = this.c.fulltextPassages > 0;
@@ -1346,7 +1371,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
    * scale of their scores.
    */
   protected keywordSearch(q: string, topK: number): RankedId[] {
-    const terms = pruneTerms([...new Set(tokenize(q))], isStopword);
+    const terms = pruneTerms([...new Set(tokenize(q))], this.highDf(), 'raw');
     if (!terms.length) return [];
     const match = terms.map((t) => this.expandTerm(t)).join(' OR ');
     try {
@@ -1826,6 +1851,98 @@ export class SqliteSearchIndex extends SearchIndexBase {
           'semantic queries will scan every vector instead.',
       );
     }
+  }
+
+  protected highDf(): TermPredicate | undefined {
+    const drop = this.dropSet;
+    if (!drop) return undefined;
+    return (t: string) => drop.has(t);
+  }
+
+  /**
+   * Derive this library's droplist from the keyword index and store it, when the corpus has
+   * moved far enough to be worth the scan.
+   *
+   * **Why derived state, when FTS5 already knows every term's document frequency.** It does
+   * not know it in a form that can be asked. `fts5vocab` is a virtual table over the index
+   * that already exists — no migration, no rebuild, nothing stored — but it is ordered by
+   * term, not by document count, so a "which terms exceed 30%" question is a full scan of
+   * it: measured over 639 888 terms on a 477 512-passage library at 2 020 ms on a first
+   * call and 1 774 ms on a second (an earlier pair on the same machine read 2 281
+   * and 2 013 ms). Those are WARM figures — the
+   * page cache is not dropped between runs, and dropping it needs privileges a test does
+   * not have, so the cold cost is unmeasured and is not guessed at here. Warm is already
+   * far too slow for query time and too slow to pay at every server start. Everything else
+   * about the answer is small — 23 terms, 75 bytes stored at that size — so the scan
+   * happens where a full walk of the corpus is already being paid for.
+   *
+   * **The cadence, therefore.** At the end of a full build, which already costs ~264 s on
+   * that library, so this is under 1% on top and invisible. Not on every delta, where 2 s
+   * would be the one user-visible cost in the feature and where a handful of new items
+   * cannot move a 30% threshold anyway — the stored passage count is what turns that into a
+   * rule rather than a hope. And unconditionally when the database holds no droplist at
+   * all, which is how an index built by an older version adopts one.
+   *
+   * The temp-schema virtual table is dropped again: `fts5vocab` reads the index it names
+   * and stores nothing, so leaving it would still add a row to `sqlite_master` that an
+   * older build would not understand.
+   */
+  protected refreshDroplist(force: boolean): void {
+    if (!this.db) return;
+    const passages = this.c.documents;
+    if (!force && !this.droplistIsStale(passages)) return;
+    try {
+      this.begin();
+      const db = this.handle;
+      db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS temp.passages_vocab USING fts5vocab('main', 'passages_fts', 'row')");
+      try {
+        // Too small for a proportion to mean anything: derive an empty list rather than no
+        // list, so the index records that it looked and found nothing to prune.
+        const rows = (passages < MIN_DERIVATION_PASSAGES
+          ? []
+          : db
+              .prepare('SELECT term FROM temp.passages_vocab WHERE doc >= ?')
+              .all(highDfMinimum(passages))) as Array<{ term: string }>;
+        // A list naming every term in the vocabulary is not a list. It happens on a corpus
+        // too small for a document frequency to mean anything — three passages put the bar
+        // at one, so everything clears it — and the consequence is not a slow index but a
+        // silent one: every query prunes to nothing and nothing is what it returns. So the
+        // rule declines to act rather than acting on a statistic it does not have.
+        const vocabulary = (db.prepare('SELECT count(*) AS n FROM temp.passages_vocab').get() as { n: number }).n;
+        if (rows.length >= vocabulary) rows.length = 0;
+        // Sorted so the stored value is a function of the corpus and not of the scan order,
+        // which makes two derivations over the same index byte-comparable.
+        const terms = rows.map((r) => r.term).sort();
+        this.dropSet = new Set(terms);
+        this.dropSetPassages = passages;
+        this.stmts.setMeta.run('droplist', terms.join(' '));
+        this.stmts.setMeta.run('droplistPassages', String(passages));
+        this.opts.logger?.debug(`search index: droplist of ${terms.length} term(s) over ${passages} passages`);
+      } finally {
+        db.exec('DROP TABLE IF EXISTS temp.passages_vocab');
+      }
+    } catch (e) {
+      if (isCorruptionError(e)) {
+        this.noteCorruption(e);
+        return;
+      }
+      // Same rule as the codes: a droplist that could not be derived is a slower index,
+      // never a failed build. The previous one — or none — stays in force.
+      this.opts.logger?.warn(
+        `The query droplist could not be derived (${e instanceof Error ? e.message : String(e)}); ` +
+          'keyword queries will be sent unpruned.',
+      );
+    }
+  }
+
+  /** Whether the corpus has drifted far enough since the droplist was derived to redo it. */
+  private droplistIsStale(passages: number): boolean {
+    if (this.dropSet === undefined) return true;
+    // <= 0 rather than === 0: the count is re-read from `meta` on open, and a nonsensical
+    // stored value must count as stale — a negative one would otherwise make the drift
+    // ratio negative and suppress rederivation forever.
+    if (this.dropSetPassages <= 0) return true;
+    return Math.abs(passages - this.dropSetPassages) / this.dropSetPassages > REDERIVE_DRIFT;
   }
 
   protected passage(id: string): ChunkRecord | undefined {
