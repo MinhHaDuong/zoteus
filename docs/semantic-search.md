@@ -749,6 +749,25 @@ identity below. `ZOTEUS_EMBEDDING_PREFIXES` overrides the detection in both dire
 never prefixes, `e5` always does (for a mirrored checkpoint whose name does not say what it
 is), `auto` is the default.
 
+**Pooling is decided by the model, from a table.** A model folds its per-token outputs into one
+vector either by averaging them (`mean`) or by taking the first, `[CLS]`, token (`cls`), and it
+is trained for one of the two. The other reads its outputs wrong without ever failing: the
+graph still returns a unit vector of the right width, it just retrieves worse. Measured on a
+257-passage, 68-query cross-lingual set with pooling as the only variable at fp32, mean pooling
+costs `granite-embedding-97m-multilingual-r2` 27.5% of its MRR and 34.6% of its hit@1,
+`gte-multilingual-base` 12.7% and 10.3%, `arctic-embed-m-v2` 10.3% and 14.7%. Unlike the E5
+prefixes, nothing in the model id says which pooling a model wants, and the value cannot be
+read at load time either: it is published in `1_Pooling/config.json` on the model's source
+repository, which the ONNX mirrors the pipeline loads (`Xenova/*`, `onnx-community/*`) do not
+republish. So Zoteus carries a curated table (`MODEL_POOLING` in `embeddings.ts`, each row naming
+the repository its value was read from): `mean` for MiniLM, the E5 family and the
+paraphrase-multilingual models, `cls` for the granite, gte, arctic-embed and bge-m3 models, and
+`mean` for any model the table does not list, which is exactly what every model got before the
+table existed. `ZOTEUS_EMBEDDING_POOLING=mean` or `=cls` overrides the table for every model, for
+a mirrored or renamed checkpoint whose id the table cannot speak for; `auto` is the default. Set
+it wrong and retrieval degrades silently, so leave it unset unless you have read the file. The
+pooling is not part of the embedder identity below: the model id already determines it.
+
 **Changing the model means rebuilding**, exactly as it does for an API provider: the identity
 stored beside the vectors becomes `local:Xenova/multilingual-e5-small`, the old vectors are
 dropped with a notice, and one `zotero_index action:"build"` re-embeds the library. See

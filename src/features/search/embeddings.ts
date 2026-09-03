@@ -114,6 +114,108 @@ export function inputPrefixes(model: string, mode: PrefixMode = 'auto'): Readonl
 }
 
 /**
+ * How a model's per-token outputs are folded into one vector: the average over the tokens,
+ * or the first (`[CLS]`) token alone, in the transformers.js pipeline's own names. A model
+ * is trained with one of them and the other reads its outputs wrong. Nothing fails: the
+ * graph still returns a unit vector of the right width, it just retrieves worse, in the same
+ * silent way a missing E5 prefix does.
+ */
+export const POOLING_MODES = ['mean', 'cls'] as const;
+
+export type PoolingMode = (typeof POOLING_MODES)[number];
+
+/**
+ * How the pooling is chosen: from the table below, or one mode regardless of the model.
+ * The same two-part shape as {@link PrefixMode}, with a different oracle underneath: for
+ * prefixes the default layer infers from the model id, for pooling no inference is
+ * possible (see {@link MODEL_POOLING}), so the default layer is a curated table instead.
+ */
+export type PoolingSetting = 'auto' | PoolingMode;
+
+/**
+ * What every local vector ever built was pooled with, and what a model absent from
+ * {@link MODEL_POOLING} still is. Right for the default MiniLM and for the E5 family, which
+ * is to say for every model this project has recommended; wrong for roughly half the
+ * multilingual field, and unlike the E5 prefixes nothing in a model id says which half.
+ */
+export const DEFAULT_POOLING: PoolingMode = 'mean';
+
+/**
+ * The pooling each known model was trained with, by the ids someone might put in
+ * ZOTEUS_EMBEDDING_MODEL: the ONNX repository the pipeline loads and the source repository
+ * it mirrors, since both ids name the same weights. Matched exactly, as the setting is
+ * passed through.
+ *
+ * Curated rather than read, because there is nothing to read from. A model's pooling is
+ * published in `1_Pooling/config.json`, a sentence-transformers file that lives on the
+ * source repository only: the ONNX mirrors the pipeline loads (`Xenova/*`,
+ * `onnx-community/*`) do not republish it, so unlike an E5 prefix there is nothing for
+ * id-inference to look at, and transformers.js takes whatever pooling the caller names.
+ *
+ * Every value was read from that file on the repository named beside it, on 2026-09-03,
+ * and says so: a pooling copied from a sibling model is how this goes wrong in the first
+ * place. `cls` is the half that matters. Measured on a 257-passage, 68-query
+ * cross-lingual set with pooling as the only variable, at fp32, mean pooling costs
+ * `granite-embedding-97m-multilingual-r2` 27.5% of its MRR and 34.6% of its hit@1,
+ * `gte-multilingual-base` 12.7% and 10.3%, `arctic-embed-m-v2` 10.3% and 14.7%. The `mean`
+ * rows are here so a reader can tell "known to be mean" from "unlisted, so mean by default",
+ * which the code cannot otherwise distinguish.
+ */
+export const MODEL_POOLING: Readonly<Record<string, PoolingMode>> = {
+  // sentence-transformers/all-MiniLM-L6-v2: pooling_mode_mean_tokens true, every other
+  // mode false. The default, whose vectors must not move: this row says what the call
+  // site always said.
+  'Xenova/all-MiniLM-L6-v2': 'mean',
+  'sentence-transformers/all-MiniLM-L6-v2': 'mean',
+  // intfloat/multilingual-e5-small, -base and -large, and intfloat/e5-base-v2:
+  // pooling_mode_mean_tokens true, every other mode false, on each.
+  'Xenova/multilingual-e5-small': 'mean',
+  'intfloat/multilingual-e5-small': 'mean',
+  'Xenova/multilingual-e5-base': 'mean',
+  'intfloat/multilingual-e5-base': 'mean',
+  'Xenova/multilingual-e5-large': 'mean',
+  'intfloat/multilingual-e5-large': 'mean',
+  'intfloat/e5-base-v2': 'mean',
+  // sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 and
+  // -mpnet-base-v2: pooling_mode_mean_tokens true, every other mode false, on each.
+  'Xenova/paraphrase-multilingual-MiniLM-L12-v2': 'mean',
+  'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2': 'mean',
+  'Xenova/paraphrase-multilingual-mpnet-base-v2': 'mean',
+  'sentence-transformers/paraphrase-multilingual-mpnet-base-v2': 'mean',
+  // ibm-granite/granite-embedding-97m-multilingual-r2 and -311m-multilingual-r2:
+  // pooling_mode_cls_token true, every other mode false, on each.
+  'onnx-community/granite-embedding-97m-multilingual-r2-ONNX': 'cls',
+  'ibm-granite/granite-embedding-97m-multilingual-r2': 'cls',
+  'onnx-community/granite-embedding-311m-multilingual-r2-ONNX': 'cls',
+  'ibm-granite/granite-embedding-311m-multilingual-r2': 'cls',
+  // Alibaba-NLP/gte-multilingual-base: pooling_mode_cls_token true, every other mode false.
+  'onnx-community/gte-multilingual-base': 'cls',
+  'Alibaba-NLP/gte-multilingual-base': 'cls',
+  // Snowflake/snowflake-arctic-embed-m-v2.0 and -l-v2.0: pooling_mode_cls_token true, every
+  // other mode false, on each. Snowflake publishes the ONNX graph in the source repository
+  // itself, so each has one id.
+  'Snowflake/snowflake-arctic-embed-m-v2.0': 'cls',
+  'Snowflake/snowflake-arctic-embed-l-v2.0': 'cls',
+  // BAAI/bge-m3: pooling_mode_cls_token true, every other mode false.
+  'onnx-community/bge-m3-ONNX': 'cls',
+  'Xenova/bge-m3': 'cls',
+  'BAAI/bge-m3': 'cls',
+};
+
+/**
+ * The pooling to ask the pipeline for. The table is the deliverable: a model it does not
+ * know keeps {@link DEFAULT_POOLING}, which is exactly what it got before the table
+ * existed, so no install changes and nobody is refused a model for being unlisted. `mode`
+ * is the escape hatch for a mirrored or renamed checkpoint the table cannot speak for,
+ * exactly as it is for {@link inputPrefixes}; and as there, a wrong value does not error,
+ * it retrieves worse, which is why the table and not the setting is the default layer.
+ */
+export function poolingFor(model: string, mode: PoolingSetting = 'auto'): PoolingMode {
+  if (mode !== 'auto') return mode;
+  return MODEL_POOLING[model] ?? DEFAULT_POOLING;
+}
+
+/**
  * Identity of the vectors a provider produces. Two models never share a vector space (nor,
  * usually, a dimension), so an index persists this and refuses to rank its stored vectors
  * against queries embedded by a different one. See SearchIndex.loadFromJSON.
@@ -405,6 +507,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       prefixes?: PrefixMode;
       /** Weight precision to load (see DEFAULT_LOCAL_DTYPE); unset means full precision. */
       dtype?: EmbeddingDtype;
+      /** Pooling policy for this model (see poolingFor); unset means auto, i.e. the table. */
+      pooling?: PoolingSetting;
     } = {},
   ) {}
 
@@ -420,6 +524,16 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
    */
   get prefixes(): Readonly<Record<EmbedKind, string>> | null {
     return inputPrefixes(this.model, this.opts.prefixes ?? 'auto');
+  }
+
+  /**
+   * How the pipeline folds this model's tokens into one vector (see {@link MODEL_POOLING}).
+   * Like the prefixes, decided by the model id with the setting as the override, and like
+   * them it stays out of the identity: the id already determines it, and the override is
+   * the user's own word in the same position ZOTEUS_EMBEDDING_PREFIXES occupies.
+   */
+  get pooling(): PoolingMode {
+    return poolingFor(this.model, this.opts.pooling ?? 'auto');
   }
 
   private async ensure(): Promise<any> {
@@ -485,7 +599,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     for (let i = 0; i < texts.length; i += size) {
       const batch = texts.slice(i, i + size);
       const input = prefix ? batch.map((t) => prefix + t) : batch;
-      const tensor = await extractor(input, { pooling: 'mean', normalize: true });
+      // The pooling is the model's, not this call site's: the literal `mean` that stood
+      // here was right for MiniLM and E5 and silently wrong for every CLS-pooled model
+      // ZOTEUS_EMBEDDING_MODEL can name. Normalization stays unconditional, because the
+      // cosine ranking downstream assumes unit vectors whatever the model.
+      const tensor = await extractor(input, { pooling: this.pooling, normalize: true });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
       const dim = dims && dims.length > 1 ? dims[dims.length - 1]! : data.length / batch.length;
@@ -699,6 +817,7 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
           // The precision the weights are downloaded and run at. It reaches the identity,
           // so switching it costs one rebuild rather than quietly mixing two vector spaces.
           dtype: config.embeddingDtype,
+          pooling: config.embeddingPooling,
         }),
         configured: 'local',
       };

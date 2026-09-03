@@ -8,7 +8,12 @@ import {
   DEFAULT_EMBED_MAX_RETRIES,
   DEFAULT_INDEX_MAX_ITEMS,
 } from './features/search/limits.js';
-import { EMBEDDING_DTYPES, type EmbeddingDtype } from './features/search/embeddings.js';
+import {
+  EMBEDDING_DTYPES,
+  POOLING_MODES,
+  type EmbeddingDtype,
+  type PoolingSetting,
+} from './features/search/embeddings.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
@@ -26,6 +31,8 @@ export interface ZoteusConfig {
   embeddingPrefixes: 'auto' | 'off' | 'e5';
   /** Weight precision the local model loads at; part of the embedder identity above fp32. */
   embeddingDtype: EmbeddingDtype;
+  /** How the local model's tokens are pooled: from the curated table, or one mode (see embeddings.ts). */
+  embeddingPooling: PoolingSetting;
   /** Passages per embedding call (unset = DEFAULT_EMBED_BATCH_SIZE where one is batched). */
   embedBatchSize?: number;
   /** Pause between embedding batches in ms; 0 only yields to the event loop. */
@@ -190,6 +197,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_EMBEDDING_PREFIXES: z.enum(['auto', 'off', 'e5']).default('auto'),
         // Local only: an API provider's precision is decided on the provider's hardware.
         ZOTEUS_EMBEDDING_DTYPE: z.enum(EMBEDDING_DTYPES).default('fp32'),
+        // Local only, like the dtype. `auto` is the curated per-model table; a mode is the
+        // escape hatch for a checkpoint the table cannot speak for (see poolingFor).
+        ZOTEUS_EMBEDDING_POOLING: z.enum(['auto', ...POOLING_MODES]).default('auto'),
         ZOTEUS_EMBED_BATCH_SIZE: z.coerce.number().int().positive().optional(),
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
         // 0 restores the pre-#48 behaviour: one 429 ends the build. Nobody should want
@@ -364,6 +374,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     );
   }
 
+  // The same fact as for the dtype: pooling is an argument to the local pipeline, and an
+  // API provider pools on its own side.
+  if (
+    parsed.ZOTEUS_EMBEDDINGS !== 'local' &&
+    env.ZOTEUS_EMBEDDING_POOLING !== undefined &&
+    !isUnset(env.ZOTEUS_EMBEDDING_POOLING)
+  ) {
+    warnings.push(
+      `ZOTEUS_EMBEDDING_POOLING applies to on-device embeddings only and is ignored under ` +
+        `ZOTEUS_EMBEDDINGS=${parsed.ZOTEUS_EMBEDDINGS}; an API provider pools on its own side`,
+    );
+  }
+  // The generic rejection names the value it saw and the fallback; a pooling that is not
+  // one of the two the pipeline takes deserves the two named, because the likely typo
+  // (`max`, `average`, `CLS`) is a real pooling the pipeline does not have.
+  if (rejected.has('ZOTEUS_EMBEDDING_POOLING')) {
+    warnings.push(
+      `ZOTEUS_EMBEDDING_POOLING takes auto (the per-model table, the default) or one of ` +
+        `${POOLING_MODES.join(', ')}; the table decides for this run`,
+    );
+  }
+
   const allowedHosts = (parsed.ZOTEUS_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -381,6 +413,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     embeddingModel: parsed.ZOTEUS_EMBEDDING_MODEL?.trim() || undefined,
     embeddingPrefixes: parsed.ZOTEUS_EMBEDDING_PREFIXES,
     embeddingDtype: parsed.ZOTEUS_EMBEDDING_DTYPE,
+    embeddingPooling: parsed.ZOTEUS_EMBEDDING_POOLING,
     embedBatchSize: parsed.ZOTEUS_EMBED_BATCH_SIZE,
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
     embedMaxRetries: parsed.ZOTEUS_EMBED_MAX_RETRIES,

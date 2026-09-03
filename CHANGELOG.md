@@ -43,6 +43,29 @@ All notable changes to Zoteus are documented here. The format is based on
   it is ignored, because that provider's precision is decided on its own hardware. There is a
   matching field in the desktop extension's settings pane.
 
+### Fixed
+- **The local pipeline pools each model the way it was trained, instead of mean-pooling
+  every model it is handed.** `ZOTEUS_EMBEDDING_MODEL` can name any transformers.js
+  feature-extraction model, and the one pipeline call pooled all of them with `mean`: right
+  for `Xenova/all-MiniLM-L6-v2` and the E5 family, wrong for roughly half the multilingual
+  field, which is trained on the `[CLS]` token. The wrong pooling never fails, it retrieves
+  worse: measured on a 257-passage, 68-query cross-lingual set with pooling as the sole
+  variable at fp32, `mean` costs `granite-embedding-97m-multilingual-r2` 27.5% of its MRR
+  and 34.6% of its hit@1, `gte-multilingual-base` 12.7% and 10.3%, `arctic-embed-m-v2`
+  10.3% and 14.7%.
+
+  The value cannot be detected the way an E5 prefix is: it lives in `1_Pooling/config.json`
+  on a model's source repository, and the ONNX mirrors the pipeline loads (`Xenova/*`,
+  `onnx-community/*`) do not republish it. So it is curated: a table in `embeddings.ts`
+  maps each known model id, mirror and source alike, to its pooling, and every row names the
+  repository the value was read from. A model the table does not list keeps `mean`, which is
+  exactly what it got before, so no existing install changes and no model is refused; the
+  default model's vectors were byte-compared before and after. `ZOTEUS_EMBEDDING_POOLING`
+  (`auto`, `mean`, `cls`) is the escape hatch for a mirrored or renamed checkpoint the table
+  cannot speak for, in the same position `ZOTEUS_EMBEDDING_PREFIXES` occupies for the
+  prefixes, and with the same warning: set wrong, it degrades retrieval silently. It does
+  not join the embedder identity, since the model id already determines the pooling.
+
 ## [1.13.0] - 2026-09-03
 
 ### Added
