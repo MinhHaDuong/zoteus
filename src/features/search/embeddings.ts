@@ -26,6 +26,9 @@ export interface EmbeddingProvider {
 /** npm package that provides the on-device model runtime (optional, not bundled; see below). */
 export const TRANSFORMERS_MODULE = '@huggingface/transformers';
 
+/** The concrete device supplied to the loader; validation records its CPU provider. */
+export const LOCAL_EXECUTION_DEVICE = 'cpu' as const;
+
 /** API-provider defaults. On the local path ZOTEUS_EMBEDDING_MODEL selects a registry entry. */
 export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
   openai: 'text-embedding-3-small',
@@ -278,18 +281,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   /** Exact environment tuple that owns a cached compatibility PASS. */
   async validationRuntimeShape(): Promise<EmbedderRuntimeShape> {
     if (this.loadExtractor) {
-      return (
-        this.opts.validationRuntime ?? {
-          engineVersion: 'injected',
-          backendVersions: { injected: 'test' },
-          runtime: process.versions.electron ? 'electron' : 'node',
-          nodeVersion: process.versions.node,
-          ...(process.versions.electron ? { electronVersion: process.versions.electron } : {}),
-          operatingSystem: process.platform,
-          architecture: process.arch,
-          executionProvider: 'cpu',
-        }
-      );
+      if (!this.opts.validationRuntime) {
+        throw new Error('An injected local extractor must declare its validation runtime.');
+      }
+      return this.opts.validationRuntime;
     }
     const transformers = await this.ensureTransformers();
     const env = transformers.env ?? transformers.default?.env;
@@ -306,10 +301,9 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       ...(process.versions.electron ? { electronVersion: process.versions.electron } : {}),
       operatingSystem: process.platform,
       architecture: process.arch,
-      // Transformers.js 4.2 selects CPU under Node when no device option is supplied.
-      // Keep this beside the loader invocation below: a future device probe must change
-      // both together, and must record its concrete result rather than "auto".
-      executionProvider: 'cpu',
+      // The loader below receives this same concrete value. A future positive device
+      // probe must change both together and record its result rather than "auto".
+      executionProvider: LOCAL_EXECUTION_DEVICE,
     };
   }
 
@@ -319,6 +313,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     dtype: EmbedderEntry['dtype'];
     subfolder: string;
     model_file_name: string;
+    device: typeof LOCAL_EXECUTION_DEVICE;
   } {
     const [subfolder, filename] = this.entry.graphFile.split('/');
     const suffix = GRAPH_SUFFIX_BY_DTYPE[this.entry.dtype];
@@ -327,6 +322,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       dtype: this.entry.dtype,
       subfolder: subfolder!,
       model_file_name: filename!.slice(0, -suffix.length - '.onnx'.length),
+      device: LOCAL_EXECUTION_DEVICE,
     };
   }
 

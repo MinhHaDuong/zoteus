@@ -174,6 +174,7 @@ module.exports = { env, pipeline, pipelineArgs, extractorOptions };
         dtype: 'fp32',
         subfolder: 'onnx',
         model_file_name: 'model',
+        device: 'cpu',
       },
       ],
     ]);
