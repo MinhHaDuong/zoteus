@@ -13,7 +13,12 @@ import {
   type EmbedderRuntimeShape,
   type LocalValidationTarget,
 } from '../../src/features/search/embedder-validation.js';
-import type { EmbedderEntry } from '../../src/features/search/embedder-registry.js';
+import {
+  INCUMBENT_LOCAL_ENTRY,
+  entryFingerprint,
+  selectEmbedderEntry,
+  type EmbedderEntry,
+} from '../../src/features/search/embedder-registry.js';
 import { LocalEmbeddingProvider, embedderIdentity } from '../../src/features/search/embeddings.js';
 
 const ENTRY: EmbedderEntry = {
@@ -69,28 +74,51 @@ interface Mutants {
   nonFinite?: boolean;
   notNormalized?: boolean;
   nondeterministic?: boolean;
+  nondeterministicPublic?: boolean;
   ignoreTemplate?: boolean;
   reverseDiscrimination?: boolean;
+  batchSensitive?: boolean;
 }
 
 class FixtureTarget implements LocalValidationTarget {
   readonly name = 'local';
-  readonly model = ENTRY.model;
-  readonly entryId = ENTRY.id;
+  readonly model: string;
+  readonly entryId: string;
   readonly vectorFingerprint: string;
   readonly legacyIdentity: boolean;
-  readonly entry = ENTRY;
+  readonly entry: EmbedderEntry;
   preparedCalls = 0;
   publicCalls = 0;
 
   constructor(
     readonly runtimeShape: EmbedderRuntimeShape = RUNTIME,
-    fingerprint = 'f'.repeat(64),
+    fingerprint?: string,
     private readonly mutants: Mutants = {},
     legacyIdentity = false,
+    entry: EmbedderEntry = ENTRY,
   ) {
-    this.vectorFingerprint = fingerprint;
+    this.entry = entry;
+    this.model = entry.model;
+    this.entryId = entry.id;
+    this.vectorFingerprint = fingerprint ?? entryFingerprint(entry);
     this.legacyIdentity = legacyIdentity;
+  }
+
+  private vectors(texts: string[], normalize: boolean): number[][] {
+    let vectors = texts.map((text) => [...(RAW[text] ?? [0.2, 0.3, 0.4])]);
+    if (this.mutants.reverseDiscrimination) {
+      vectors = texts.map((text, index) =>
+        text.includes(EMBEDDER_VALIDATION_FIXTURE.matched)
+          ? [0, 3, 0]
+          : text.includes(EMBEDDER_VALIDATION_FIXTURE.unmatched)
+            ? [3, 0.1, 0]
+            : vectors[index]!,
+      );
+    }
+    if (this.mutants.batchSensitive) {
+      vectors = vectors.map((vector) => [vector[0]!, vector[1]!, vector[2]! + texts.length / 10]);
+    }
+    return normalize ? vectors.map(normalized) : vectors;
   }
 
   async validationRuntimeShape(): Promise<EmbedderRuntimeShape> {
@@ -99,14 +127,8 @@ class FixtureTarget implements LocalValidationTarget {
 
   async embedPreparedForValidation(texts: string[], normalize: boolean): Promise<number[][]> {
     this.preparedCalls++;
-    let vectors = texts.map((text) => [...(RAW[text] ?? [0.2, 0.3, 0.4])]);
-    if (this.mutants.reverseDiscrimination) {
-      vectors = vectors.map((vector, index) =>
-        index === 2 ? [0, 3, 0] : index === 3 ? [3, 0.1, 0] : vector,
-      );
-    }
+    const vectors = this.vectors(texts, normalize);
     if (this.mutants.nondeterministic && this.preparedCalls === 2) vectors[0]![0]! += 0.01;
-    if (normalize) vectors = vectors.map(normalized);
     if (normalize && this.mutants.notNormalized) vectors[0] = [1, 1, 1];
     if (this.mutants.nonFinite) vectors[0]![0] = Number.NaN;
     if (this.mutants.shape) vectors[0]!.pop();
@@ -115,14 +137,15 @@ class FixtureTarget implements LocalValidationTarget {
 
   async embed(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<number[][]> {
     this.publicCalls++;
-    const prefix = this.mutants.ignoreTemplate ? '' : ENTRY.template[role];
-    let vectors = texts.map((text) => [...(RAW[`${prefix}${text}`] ?? [0.2, 0.3, 0.4])]);
-    if (this.mutants.reverseDiscrimination && role === 'passage') {
-      vectors = vectors.map((vector, index) =>
-        index === 1 ? [0, 3, 0] : index === 2 ? [3, 0.1, 0] : vector,
-      );
+    const prefix = this.mutants.ignoreTemplate ? '' : this.entry.template[role];
+    const vectors = this.vectors(
+      texts.map((text) => `${prefix}${text}`),
+      true,
+    );
+    if (this.mutants.nondeterministicPublic && this.publicCalls === 2) {
+      vectors[0]![0]! += 0.01;
     }
-    return vectors.map(normalized);
+    return vectors;
   }
 }
 
@@ -173,7 +196,8 @@ describe('local embedder compatibility validation', () => {
       expect(result.cached).toBe(false);
       expect(changed.preparedCalls).toBeGreaterThan(0);
     }
-    const changedFingerprint = new FixtureTarget(RUNTIME, 'e'.repeat(64));
+    const changedEntry = { ...ENTRY, revision: 'b'.repeat(40) };
+    const changedFingerprint = new FixtureTarget(RUNTIME, undefined, {}, false, changedEntry);
     expect((await validateLocalEmbedder(changedFingerprint, dataDir)).cached).toBe(false);
 
     const electron = { ...RUNTIME, runtime: 'electron' as const, electronVersion: '40.0.0' };
@@ -198,16 +222,26 @@ describe('local embedder compatibility validation', () => {
     expect(next.preparedCalls).toBeGreaterThan(0);
   });
 
+  it('rejects a claimed fingerprint that does not match the complete entry before cache lookup', async () => {
+    const target = new FixtureTarget(RUNTIME, 'e'.repeat(64));
+    await expect(
+      validateLocalEmbedder(target, mkdtempSync(join(tmpdir(), 'zoteus-validation-fingerprint-'))),
+    ).rejects.toThrow(/fingerprint.*complete registry entry/i);
+    expect(target.preparedCalls).toBe(0);
+    expect(target.publicCalls).toBe(0);
+  });
+
   it.each([
     ['wrong shape', { shape: true }, /shape|dimension/i],
     ['non-finite output', { nonFinite: true }, /finite/i],
     ['normalization disabled', { notNormalized: true }, /normaliz/i],
     ['nondeterminism', { nondeterministic: true }, /determin/i],
+    ['public nondeterminism', { nondeterministicPublic: true }, /determin/i],
     ['template bypass', { ignoreTemplate: true }, /template/i],
     ['reversed discrimination', { reverseDiscrimination: true }, /matched|discrimin/i],
   ] as const)('rejects the %s mutant and does not cache it', async (_name, mutant, error) => {
     const dataDir = mkdtempSync(join(tmpdir(), 'zoteus-validation-mutant-'));
-    const target = new FixtureTarget(RUNTIME, 'f'.repeat(64), mutant);
+    const target = new FixtureTarget(RUNTIME, undefined, mutant);
     await expect(validateLocalEmbedder(target, dataDir)).rejects.toThrow(error);
     expect(
       readdirSync(dataDir, { recursive: true }).filter((name) => String(name).endsWith('.json')),
@@ -216,6 +250,31 @@ describe('local embedder compatibility validation', () => {
 
   it('uses the ratified L2 tolerance', () => {
     expect(NORMALIZATION_TOLERANCE).toBe(0.00001);
+  });
+
+  it('compares exact outputs only at identical batch shapes', async () => {
+    const target = new FixtureTarget(RUNTIME, undefined, { batchSensitive: true });
+    await expect(
+      validateLocalEmbedder(target, mkdtempSync(join(tmpdir(), 'zoteus-validation-batch-'))),
+    ).resolves.toMatchObject({ status: 'passed', cached: false });
+  });
+
+  it('does not run the local fixture or write cache state for an API provider', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'zoteus-api-validation-'));
+    const provider = { name: 'openai', model: 'api-model', embed: async () => [[1, 0, 0]] };
+    const selection = { provider, configured: 'openai' as const };
+    await expect(validateEmbeddingSelection(selection, dataDir)).resolves.toBe(selection);
+    expect(readdirSync(dataDir)).toEqual([]);
+  });
+
+  it('does not invent an execution provider for an injected extractor', async () => {
+    const extractor = async (texts: string[]) => ({
+      data: new Float32Array(texts.length * ENTRY.dimension),
+      dims: [texts.length, ENTRY.dimension],
+    });
+    extractor.tokenizer = { model_max_length: ENTRY.windowTokens };
+    const provider = new LocalEmbeddingProvider(ENTRY, async () => extractor);
+    await expect(provider.validationRuntimeShape()).rejects.toThrow(/must declare.*runtime/i);
   });
 
   it('validates the real provider seam and fails closed without choosing another entry', async () => {
@@ -276,11 +335,36 @@ describe('local embedder compatibility validation', () => {
     },
     30_000,
   );
+
+  const realE5It =
+    process.env.ZOTEUS_TRANSFORMERS_PATH && process.env.ZOTEUS_TEST_E5_Q8_CACHE_DIR ? it : it.skip;
+  realE5It(
+    'passes the batch-sensitive E5 q8 registry entry without weakening exact comparison',
+    async () => {
+      const provider = new LocalEmbeddingProvider(
+        selectEmbedderEntry('multilingual-e5-small-q8'),
+        undefined,
+        {
+          transformersPath: process.env.ZOTEUS_TRANSFORMERS_PATH,
+          modelCacheDir: process.env.ZOTEUS_TEST_E5_Q8_CACHE_DIR,
+        },
+      );
+      await expect(
+        validateLocalEmbedder(provider, mkdtempSync(join(tmpdir(), 'zoteus-real-e5-q8-'))),
+      ).resolves.toMatchObject({
+        status: 'passed',
+        cached: false,
+        entryFingerprint: provider.vectorFingerprint,
+        dimension: 384,
+      });
+    },
+    30_000,
+  );
 });
 
 describe('validated local embedding transport', () => {
   it('preserves vector identity and accepts the exact validated handshake', async () => {
-    const target = new FixtureTarget(RUNTIME, 'f'.repeat(64), {}, true);
+    const target = new FixtureTarget(RUNTIME, undefined, {}, true);
     const result = await validateLocalEmbedder(
       target,
       mkdtempSync(join(tmpdir(), 'zoteus-transport-')),
@@ -295,10 +379,40 @@ describe('validated local embedding transport', () => {
       model: target.model,
       entryId: target.entryId,
       vectorFingerprint: target.vectorFingerprint,
-      legacyIdentity: target.legacyIdentity,
+      legacyIdentity: false,
     });
-    expect(embedderIdentity(provider)).toBe(`local:${ENTRY.model}`);
+    expect(embedderIdentity(provider)).toBe(`local:registry-v${entryFingerprint(ENTRY)}`);
     expect(await provider.embed([EMBEDDER_VALIDATION_FIXTURE.query], 'query')).toHaveLength(1);
+  });
+
+  it('derives the incumbent legacy identity from its verified fingerprint, not a claim', () => {
+    const fingerprint = entryFingerprint(INCUMBENT_LOCAL_ENTRY);
+    const target: LocalValidationTarget = {
+      name: 'local',
+      model: INCUMBENT_LOCAL_ENTRY.model,
+      entryId: INCUMBENT_LOCAL_ENTRY.id,
+      entry: INCUMBENT_LOCAL_ENTRY,
+      vectorFingerprint: fingerprint,
+      legacyIdentity: false,
+      validationRuntimeShape: async () => RUNTIME,
+      embedPreparedForValidation: async () => [],
+      embed: async () => [],
+    };
+    const validation = {
+      status: 'passed' as const,
+      key: 'a'.repeat(64),
+      entryFingerprint: fingerprint,
+      dimension: INCUMBENT_LOCAL_ENTRY.dimension,
+      runtime: RUNTIME,
+      cached: false,
+    };
+    const provider = new ValidatedLocalEmbeddingProvider(target, validation, {
+      embed: async () => {
+        throw new Error('not called');
+      },
+    });
+    expect(provider.legacyIdentity).toBe(true);
+    expect(embedderIdentity(provider)).toBe(`local:${INCUMBENT_LOCAL_ENTRY.model}`);
   });
 
   it.each(['fingerprint', 'validationKey', 'dimension', 'runtime'] as const)(

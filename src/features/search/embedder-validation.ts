@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { EmbedderEntry } from './embedder-registry.js';
+import {
+  LEGACY_INCUMBENT_FINGERPRINT,
+  entryFingerprint,
+  type EmbedderEntry,
+} from './embedder-registry.js';
 import type { EmbedderSelection, EmbeddingProvider } from './embeddings.js';
 import type { Logger } from '../../lib/logger.js';
 
@@ -9,7 +13,7 @@ import type { Logger } from '../../lib/logger.js';
 export const NORMALIZATION_TOLERANCE = 0.00001;
 
 /** Bump whenever the meaning or implementation of a fixture check changes. */
-export const EMBEDDER_VALIDATOR_REVISION = 'local-compatibility/1';
+export const EMBEDDER_VALIDATOR_REVISION = 'local-compatibility/2';
 
 /**
  * Public, non-library text used only to prove that a selected vector chain executes as
@@ -217,31 +221,52 @@ function cosine(left: number[], right: number[]): number {
 
 async function runFixture(target: LocalValidationTarget): Promise<void> {
   const fixture = EMBEDDER_VALIDATION_FIXTURE;
-  const prepared = [
+  const preparedQuery = [`${target.entry.template.query}${fixture.query}`];
+  const preparedPassages = [
     `${target.entry.template.passage}${fixture.sentinel}`,
-    `${target.entry.template.query}${fixture.query}`,
     `${target.entry.template.passage}${fixture.matched}`,
     `${target.entry.template.passage}${fixture.unmatched}`,
   ];
-  const rawFirst = await target.embedPreparedForValidation(prepared, false);
-  const rawSecond = await target.embedPreparedForValidation(prepared, false);
-  const normalized = await target.embedPreparedForValidation(prepared, true);
-  const query = await target.embed([fixture.query], 'query');
-  const passages = await target.embed(
+  // Keep every compared call shape-identical. Dynamic quantization can legitimately
+  // produce different floats for a singleton and for the same text inside a larger batch;
+  // exact equality here is about template/role plumbing, not batch invariance.
+  const rawQueryFirst = await target.embedPreparedForValidation(preparedQuery, false);
+  const rawQuerySecond = await target.embedPreparedForValidation(preparedQuery, false);
+  const rawPassagesFirst = await target.embedPreparedForValidation(preparedPassages, false);
+  const rawPassagesSecond = await target.embedPreparedForValidation(preparedPassages, false);
+  const normalizedQuery = await target.embedPreparedForValidation(preparedQuery, true);
+  const normalizedPassages = await target.embedPreparedForValidation(preparedPassages, true);
+  const queryFirst = await target.embed([fixture.query], 'query');
+  const querySecond = await target.embed([fixture.query], 'query');
+  const passagesFirst = await target.embed(
+    [fixture.sentinel, fixture.matched, fixture.unmatched],
+    'passage',
+  );
+  const passagesSecond = await target.embed(
     [fixture.sentinel, fixture.matched, fixture.unmatched],
     'passage',
   );
   const dimension = target.entry.dimension;
-  checkVectors('Unnormalized fixture', rawFirst, prepared.length, dimension);
-  checkVectors('Repeated unnormalized fixture', rawSecond, prepared.length, dimension);
-  checkVectors('Normalized fixture', normalized, prepared.length, dimension);
-  checkVectors('Query-template fixture', query, 1, dimension);
-  checkVectors('Passage-template fixture', passages, 3, dimension);
+  checkVectors('Unnormalized query fixture', rawQueryFirst, 1, dimension);
+  checkVectors('Repeated unnormalized query fixture', rawQuerySecond, 1, dimension);
+  checkVectors('Unnormalized passage fixture', rawPassagesFirst, 3, dimension);
+  checkVectors('Repeated unnormalized passage fixture', rawPassagesSecond, 3, dimension);
+  checkVectors('Normalized query fixture', normalizedQuery, 1, dimension);
+  checkVectors('Normalized passage fixture', normalizedPassages, 3, dimension);
+  checkVectors('Query-template fixture', queryFirst, 1, dimension);
+  checkVectors('Repeated query-template fixture', querySecond, 1, dimension);
+  checkVectors('Passage-template fixture', passagesFirst, 3, dimension);
+  checkVectors('Repeated passage-template fixture', passagesSecond, 3, dimension);
 
-  if (!vectorsAreExact(rawFirst, rawSecond)) {
+  if (
+    !vectorsAreExact(rawQueryFirst, rawQuerySecond) ||
+    !vectorsAreExact(rawPassagesFirst, rawPassagesSecond) ||
+    !vectorsAreExact(queryFirst, querySecond) ||
+    !vectorsAreExact(passagesFirst, passagesSecond)
+  ) {
     throw new Error('Local embedder is not deterministic within this execution provider.');
   }
-  for (const [index, vector] of normalized.entries()) {
+  for (const [index, vector] of [...normalizedQuery, ...normalizedPassages].entries()) {
     const norm = Math.hypot(...vector);
     if (Math.abs(norm - 1) > NORMALIZATION_TOLERANCE) {
       throw new Error(
@@ -250,18 +275,19 @@ async function runFixture(target: LocalValidationTarget): Promise<void> {
     }
   }
 
-  const selected = target.entry.normalize ? normalized : rawFirst;
-  if (!vectorsAreExact(query, [selected[1]!])) {
+  const selectedQuery = target.entry.normalize ? normalizedQuery : rawQueryFirst;
+  const selectedPassages = target.entry.normalize ? normalizedPassages : rawPassagesFirst;
+  if (!vectorsAreExact(queryFirst, selectedQuery)) {
     throw new Error('Local embedder did not apply the declared query template and normalization.');
   }
-  if (!vectorsAreExact(passages, [selected[0]!, selected[2]!, selected[3]!])) {
+  if (!vectorsAreExact(passagesFirst, selectedPassages)) {
     throw new Error(
       'Local embedder did not apply the declared passage template and normalization.',
     );
   }
 
-  const matched = cosine(query[0]!, passages[1]!);
-  const unmatched = cosine(query[0]!, passages[2]!);
+  const matched = cosine(queryFirst[0]!, passagesFirst[1]!);
+  const unmatched = cosine(queryFirst[0]!, passagesFirst[2]!);
   if (!Number.isFinite(matched) || !Number.isFinite(unmatched) || !(matched > unmatched)) {
     throw new Error('Local embedder failed matched-over-unmatched fixture discrimination.');
   }
@@ -272,6 +298,12 @@ export async function validateLocalEmbedder(
   target: LocalValidationTarget,
   dataDir: string,
 ): Promise<LocalValidationResult> {
+  const computedFingerprint = entryFingerprint(target.entry);
+  if (computedFingerprint !== target.vectorFingerprint) {
+    throw new Error(
+      `Local embedder ${target.entry.id} fingerprint does not match its complete registry entry.`,
+    );
+  }
   const runtime = normalizedRuntimeShape(await target.validationRuntimeShape());
   const key = validationKey(target, runtime);
   const base = {
@@ -309,12 +341,30 @@ export interface LocalEmbeddingTransport {
   embed(request: LocalEmbedRequest): Promise<LocalEmbedReply>;
 }
 
+function assertValidationMatchesTarget(
+  target: LocalValidationTarget,
+  validation: LocalValidationResult,
+): string {
+  const computedFingerprint = entryFingerprint(target.entry);
+  if (
+    computedFingerprint !== target.vectorFingerprint ||
+    computedFingerprint !== validation.entryFingerprint ||
+    target.entry.dimension !== validation.dimension ||
+    validation.status !== 'passed'
+  ) {
+    throw new Error('Local embedder validation does not match its complete registry entry.');
+  }
+  return computedFingerprint;
+}
+
 /** The default transport. A future daemon implements this same request/reply contract. */
 export class InProcessLocalEmbeddingTransport implements LocalEmbeddingTransport {
   constructor(
     private readonly target: LocalValidationTarget,
     private readonly validation: LocalValidationResult,
-  ) {}
+  ) {
+    assertValidationMatchesTarget(target, validation);
+  }
 
   async embed(request: LocalEmbedRequest): Promise<LocalEmbedReply> {
     const currentRuntime = normalizedRuntimeShape(await this.target.validationRuntimeShape());
@@ -354,11 +404,12 @@ export class ValidatedLocalEmbeddingProvider implements EmbeddingProvider {
     readonly validation: LocalValidationResult,
     private readonly transport: LocalEmbeddingTransport,
   ) {
+    const computedFingerprint = assertValidationMatchesTarget(target, validation);
     this.name = target.name;
     this.model = target.model;
     this.entryId = target.entryId;
-    this.vectorFingerprint = target.vectorFingerprint;
-    this.legacyIdentity = target.legacyIdentity ?? false;
+    this.vectorFingerprint = computedFingerprint;
+    this.legacyIdentity = computedFingerprint === LEGACY_INCUMBENT_FINGERPRINT;
   }
 
   async embed(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<number[][]> {

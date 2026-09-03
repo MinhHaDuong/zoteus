@@ -96,6 +96,7 @@ describe('authoritative embedder records', () => {
       dtype: 'q8',
       subfolder: 'onnx',
       model_file_name: 'model',
+      device: 'cpu',
     });
     expect(extractor.tokenizer.model_max_length).toBe(17);
   });
