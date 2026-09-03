@@ -69,6 +69,8 @@ export type TermPredicate = (term: string) => boolean;
  * being what the library is about. The narrower the library, the closer this gets, and
  * nothing here detects it.
  */
+export const HIGH_DF_RATIO = 0.3;
+
 /**
  * Distinct terms a query needs before it is worth running unpruned when every one of them
  * is common — the `phrase` answer below.
@@ -79,8 +81,6 @@ export type TermPredicate = (term: string) => boolean;
  * demote a content word.
  */
 export const MIN_PHRASE_TERMS = 3;
-
-export const HIGH_DF_RATIO = 0.3;
 
 /**
  * Passages a corpus needs before a document frequency says anything about it.

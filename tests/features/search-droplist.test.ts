@@ -399,3 +399,89 @@ describe('the pruning rule itself', () => {
     expect(pruneTerms(terms, undefined, 'raw')).toEqual(terms);
   });
 });
+
+/**
+ * The two query-side transforms together, because only the merged tree has both.
+ *
+ * The droplist arrived on a branch that predates `ZOTEUS_ACCENT_EXPANSION`, so nothing
+ * before this merge could assert how they behave side by side. The order is the one the
+ * droplist branch argued for and the one the code runs: prune the TYPED terms first, then
+ * expand whatever the prune ruled worth running. Neither half may quietly disable the
+ * other, and the flag governs exactly one of them.
+ */
+describe('the droplist and accent expansion, in the order they run', () => {
+  const backends: Array<'memory' | 'sqlite'> = hasSqlite ? ['memory', 'sqlite'] : ['memory'];
+
+  /**
+   * A corpus in which one term saturates and one accented spelling dominates.
+   *
+   * `zoteus` is in every passage, so the derivation prunes it. `théorie` is written with
+   * its accent in three passages and never without, so an unaccented `theorie` clears the
+   * dominance gate and expands. Nothing else connects the two, which is what makes the
+   * assertions below separable.
+   */
+  const corpus = [
+    ...Array.from({ length: 3 }, (_, i) => ({
+      key: `T${i}`,
+      data: {
+        itemType: 'book',
+        // Titled without the word, deliberately: the title is indexed too, and an
+        // unaccented spelling anywhere in the fixture would answer the query below
+        // without any expansion at all.
+        title: `Essai ${i}`,
+        abstractNote: 'zoteus edition. théorie économique et réalité industrielle',
+      },
+    })),
+    ...Array.from({ length: 110 }, (_, i) => ({
+      key: `F${String(i).padStart(3, '0')}`,
+      data: {
+        itemType: 'journalArticle',
+        title: `Filler ${i}`,
+        abstractNote: `zoteus edition. The report of the survey number ${i} is to be filed with the registry`,
+      },
+    })),
+  ];
+
+  async function expansionIndex(backend: 'memory' | 'sqlite', accentExpansion: boolean): Promise<SearchIndex> {
+    const store = await createSearchIndex({
+      embedder: null,
+      logger: silentLogger,
+      backend,
+      jsonPath: '',
+      accentExpansion,
+    });
+    await store.build(corpus);
+    return store;
+  }
+
+  it.each(backends)('prunes the saturating term and expands the survivor (%s)', async (backend) => {
+    const store = await expansionIndex(backend, true);
+    // `zoteus` is in all 113 passages and is dropped; `theorie` survives and reaches the
+    // accented documents through expansion. Both transforms fired, in that order.
+    expect((await keys(store, 'zoteus theorie', 200)).sort()).toEqual(['T0', 'T1', 'T2']);
+    await store.close();
+  });
+
+  it.each(backends)('still prunes with expansion off, and then answers as typed (%s)', async (backend) => {
+    const store = await expansionIndex(backend, false);
+    // The flag gates the expansion step and nothing else: `zoteus` is still dropped, so
+    // this is not the whole library, and `theorie` now runs strictly as typed, which no
+    // passage spells that way.
+    expect(await keys(store, 'zoteus theorie', 200)).toEqual([]);
+    // And the proof that pruning is what emptied it rather than the query missing
+    // outright: the accented spelling still answers exactly, flag or no flag.
+    expect((await keys(store, 'zoteus théorie', 200)).sort()).toEqual(['T0', 'T1', 'T2']);
+    await store.close();
+  });
+
+  it.each(backends)('leaves a dropped term no expansion of its own (%s)', async (backend) => {
+    const store = await expansionIndex(backend, true);
+    // A dropped term takes its spellings with it: `zoteus` never reaches the variants
+    // lookup, so a query carrying it beside a content word costs one posting list rather
+    // than the library. Asked alone it prunes to nothing and the raw set runs, which is
+    // the degeneracy fallback rather than an expansion.
+    expect((await keys(store, 'zoteus theorie', 200)).sort()).toEqual(['T0', 'T1', 'T2']);
+    expect((await keys(store, 'zoteus', 200)).length).toBe(corpus.length);
+    await store.close();
+  });
+});
