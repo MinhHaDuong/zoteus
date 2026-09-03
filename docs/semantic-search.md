@@ -392,26 +392,67 @@ items are unchanged in Zotero, so they would appear in no delta, ever. The check
 what such a build leaves instead, and `action:"build"` picks the body crawl up from it: see
 [Resuming an interrupted build](#resuming-an-interrupted-build).
 
-### Full-text builds are refused inside Claude Desktop
+### Full-text builds inside Claude Desktop
 
-Claude Desktop runs a bundled (`.mcpb`) extension inside its own process, an Electron
-`UtilityProcess` on Electron's embedded Node, rather than as a separate program. There, a
-build that reaches the full-text pass **kills the server process** partway through: no
-thrown error, no stack, no out-of-memory report, nothing on stderr, just
-`Server transport closed unexpectedly` in the host's log ([#37]). The identical build over
-the identical library, index file and environment runs to completion under standalone Node,
-and the metadata pass, which embeds thousands of passages through the same on-device model
-first, is never the one that dies.
+Claude Desktop runs a bundled (`.mcpb`) extension inside its own process rather than as a
+separate program: it forks an Electron `utilityProcess`
+(`--utility-sub-type=node.mojom.NodeService`) and imports the server into it, which is what
+"Using built-in Node.js for MCP server" means in its log. Through 1.12.0, a build that
+reached the full-text pass **killed the server process** there partway through: no thrown
+error, no stack, no out-of-memory report, nothing on stderr, just
+`Server transport closed unexpectedly` in the host's log ([#37]). It is fixed in 1.13.0, and
+what it turned out to be is worth writing down.
 
-The cause is **not known**. It is below the JavaScript layer, on a runtime Zoteus does not
-ship and cannot reproduce against, so rather than guess at a fix Zoteus refuses the one pass
-that is known to take the process down. Under Electron, `zotero_index action:"build"` or
-`"refresh"` with full text requested (by `fulltext:true`, or by the "Index PDF full text"
-setting) returns an error naming the ways forward, and **changes nothing**: the index on
-disk is left exactly as it was.
+**The process was crashed on purpose, by the allocator.** The reproduction, outside Claude
+Desktop but faithful to it, is a prebuilt Electron 42.10.0, the desktop app's own
+`mcp-runtime/nodeHost.js`, the same `utilityProcess` fork and the same JSON-RPC bridge over
+a `MessagePort`. The child dies of **SIGTRAP**, which is Chromium's deliberate crash rather
+than a fault, and the crash report the desktop app itself filed for the original failure
+says the same thing on the same utility sub-type. Chromium replaces the process allocator,
+and an allocation it will not serve does not come back as null for the caller to handle: it
+takes the process down immediately, before any handler could run. That is why the death was
+silent, and why no `uncaughtException` hook would ever have caught it.
 
-The workaround is to build once outside the desktop app and read the result from inside it.
-Desktop only ever needs read access to the index file:
+**What asked for the allocation was the on-device embedding model.** Three runs separate the
+causes:
+
+| Run | Runtime | Embedder | Full text | Outcome |
+|---|---|---|---|---|
+| A | Electron `utilityProcess` | `local` | yes | **SIGTRAP**, 14 s into a resumed build, peak RSS 1008 MB |
+| B | Electron `utilityProcess` | `off` | yes | **completed**: all 262 items, 18287 body passages, peak RSS 283 MB |
+| C | Electron `utilityProcess`, no Zotero and no SQLite at all | `local` | n/a | **SIGTRAP** inside `extractor()` |
+
+B exonerates the crawl, the concurrent attachment reads, the SQLite write path and the
+persist cadence in one run. C removes everything except the model: load
+`@huggingface/transformers` in a bare `utilityProcess` and call the feature-extraction
+pipeline on batches of growing length, and it embeds 32 passages of 512 characters and 32 of
+1200 characters happily, then dies on a batch whose sequences reach the model's 512-token
+limit. The identical loop under standalone Node completes, at 2 GB RSS, having never been
+refused an allocation.
+
+**So the size of one pipeline call is the whole story**, and that size is batch x sequence².
+`all-MiniLM-L6-v2` computes a batch x 12-head x seq x seq attention tensor: at 32 passages
+of 512 tokens that is about 400 MB in a single block, and onnxruntime's arena asks for it in
+one piece. Metadata passages are chunked at 512 characters, roughly 128 tokens, so the same
+batch of 32 needs about 25 MB and never comes close — which is why the metadata pass
+embedding thousands of passages first proved nothing about the native layer, and why the
+full-text pass, chunked at 1200 characters (`FULLTEXT_CHUNK_SIZE`) and dense enough to reach
+the token cap, was the one that always died.
+
+**The fix is a bound, not a gate.** Under Electron the local embedder takes 8 passages per
+call instead of 32, which puts the largest tensor it can ask for at roughly 100 MB, a
+quarter of the size measured to crash. Only the local provider is capped and only under
+Electron: an API provider's batch is an HTTP request body and allocates nothing large in
+this process. A `ZOTEUS_EMBED_BATCH_SIZE` lower than the cap is kept; a higher one is
+lowered to it, and the server logs one line saying so. With that in place the full-text
+build this issue was filed about runs to completion inside a `utilityProcess`, on the same
+library, with the model in the same process.
+
+The refusal that 1.12.0 put in front of the pass, and its `ZOTEUS_ALLOW_ELECTRON_FULLTEXT`
+override, are both gone. A build inside the desktop app is a little slower than the same
+build in a terminal and produces exactly the same index, so building headlessly once against
+the same `ZOTEUS_DATA_DIR` is still the faster route on a large library, and Desktop reads
+the result either way:
 
 ```bash
 # In a terminal, pointed at the same data directory Claude Desktop uses.
@@ -422,31 +463,10 @@ npx -y @oscardvs/zoteus
 ```
 
 Drive that server over stdio with any MCP client (`npm run inspector` is one) and call
-`zotero_index action:"build" fulltext:true`. When it finishes, restart Claude Desktop and
-it picks the finished index up.
-
-From then on `zotero_index action:"update"` keeps that index current **from inside Claude
-Desktop**, body text included: an update re-reads only the items Zotero changed, plus the
-attachments its full-text sequence has extracted since the stored cursor (see
-[Text extracted after the build](#text-extracted-after-the-build)), so it never enters the
-long pass this refusal is about. Only `action:"build"` and `action:"refresh"` are gated.
-
-Two other ways out:
-
-- **Index metadata only in there.** Pass `fulltext:false` to `zotero_index`, or turn the
-  "Index PDF full text" setting (`ZOTEUS_INDEX_FULLTEXT`) off. Titles, abstracts, creators,
-  tags, notes and annotations are all still indexed and searchable, and that build is
-  unaffected by any of this.
-- **Try it anyway.** `ZOTEUS_ALLOW_ELECTRON_FULLTEXT=true` lifts the refusal. The server may
-  die mid-build; what it indexed before that point is kept, stays searchable, and
-  `action:"build"` resumes from it. Please attach anything you learn to [#37].
-
-The gate is not narrowed to any one embedding provider. The reported suspicion is
-`onnxruntime-node`'s native binary under Electron's Node ABI, which is explicitly
-unconfirmed, and the full-text pass differs from the metadata pass in several other ways
-that also reach native code: an order of magnitude more passages, sustained concurrent HTTP
-against Zotero for the whole pass, and minute-long SQLite write transactions carrying much
-bulkier rows. Refusing on the one signal that actually correlates says only what is known.
+`zotero_index action:"build" fulltext:true`. `zotero_index action:"update"` then keeps the
+index current from inside Claude Desktop, body text included: an update re-reads only the
+items Zotero changed, plus the attachments its full-text sequence has extracted since the
+stored cursor (see [Text extracted after the build](#text-extracted-after-the-build)).
 
 [#37]: https://github.com/oscardvs/zoteus/issues/37
 

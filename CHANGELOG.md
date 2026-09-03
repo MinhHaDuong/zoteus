@@ -4,6 +4,65 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Full-text index builds work inside Claude Desktop again, and the crash that stopped
+  them is diagnosed (#37).** Through 1.12.0 an `action:"build"` that reached the attachment
+  full-text pass took the whole server process down inside the desktop app, with no thrown
+  error, no stack, no out-of-memory report and nothing on stderr. That was reproduced
+  outside Claude Desktop and taken apart: a prebuilt Electron 42.10.0, the desktop app's own
+  `mcp-runtime/nodeHost.js`, the same `utilityProcess` fork
+  (`--utility-sub-type=node.mojom.NodeService`) and the same JSON-RPC bridge over a
+  `MessagePort`. The child dies of **SIGTRAP**, which is Chromium's deliberate crash rather
+  than a fault, and the crash report the desktop app itself filed for the original failure
+  says the same thing on the same utility sub-type. Chromium replaces the process allocator,
+  and an allocation it will not serve is not handed back as null for the caller to deal
+  with: it takes the process down immediately, before any handler runs. That is the whole
+  reason the death was silent, and why no `uncaughtException` hook would ever have caught
+  it.
+
+  What asked for that allocation was the on-device embedding model, and three runs separate
+  it from everything else. The same full-text build under Electron with **no embedder** ran
+  to completion, all 262 items and 18287 body passages written to SQLite at a peak RSS of
+  283 MB, which clears the crawl, the concurrent attachment reads, the SQLite write path and
+  the persist cadence in one run. With the local embedder it died in 14 seconds. And with
+  no Zotero and no SQLite anywhere near it, loading `@huggingface/transformers` in a bare
+  `utilityProcess` and calling the feature-extraction pipeline on batches of growing length
+  reproduces the crash on its own: it embeds 32 passages of 512 characters and 32 of 1200
+  characters happily, then dies inside `extractor()` on a batch whose sequences reach the
+  model's 512-token limit. The identical loop under standalone Node finishes, at 2 GB RSS,
+  having never been refused an allocation.
+
+  So the size of one pipeline call is the whole story, and that size is batch times sequence
+  squared. `all-MiniLM-L6-v2` computes a batch by 12-head by sequence by sequence attention
+  tensor: 32 passages at 512 tokens is about 400 MB in a single block, which onnxruntime's
+  arena asks for in one piece. Metadata passages are chunked at 512 characters, roughly 128
+  tokens, so the same batch of 32 needs about 25 MB and never comes close. That is why the
+  metadata pass embedding thousands of passages first proved nothing about the native layer,
+  and why the full-text pass, chunked at 1200 characters and dense enough to reach the token
+  cap, was the one that always died.
+
+  The fix is a bound rather than a gate: under Electron the local embedder takes 8 passages
+  per call instead of 32, putting the largest tensor it can ask for at roughly 100 MB, a
+  quarter of the size measured to crash. Only the local provider is capped and only under
+  Electron, because an API provider's batch is an HTTP request body and allocates nothing
+  large in this process. A `ZOTEUS_EMBED_BATCH_SIZE` below the cap is honoured; one above it
+  is lowered, with a line in the log saying so, since there is no throughput past a process
+  that has died. With that in place the build this issue was filed about runs to completion
+  inside a `utilityProcess`, on the same library, with the model in the same process.
+
+### Removed
+- **The Electron full-text refusal and `ZOTEUS_ALLOW_ELECTRON_FULLTEXT` (#37).** 1.12.0
+  refused the pass outright and offered that variable as an escape hatch. It was the honest
+  thing to ship while the cause was unknown, and it is the wrong thing to keep now that the
+  crash has a mechanism and a bound: refusing the headline feature in the primary
+  distribution channel would cost more than it saves. The setting is gone from the extension
+  manifest and the variable is no longer read; an install that still sets it just starts
+  normally. Building headlessly against the same `ZOTEUS_DATA_DIR` remains the faster route
+  on a large library, since a build inside the app is somewhat slower than the same build in
+  a terminal, and it produces exactly the same index either way.
+
 ## [1.12.0] - 2026-08-31
 
 ### Fixed

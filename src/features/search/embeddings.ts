@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
+import { localEmbedBatchNotice, localEmbedBatchSize } from './electron.js';
 
 export interface EmbeddingProvider {
   readonly name: string;
@@ -382,7 +383,7 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
       }
       return { provider: new ApiEmbeddingProvider('gemini', process.env.GEMINI_API_KEY, api), configured: 'gemini' };
     case 'local':
-    default:
+    default: {
       if (!resolveTransformers(config.transformersPath)) {
         logger?.warn(
           `ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed` +
@@ -390,15 +391,22 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
         );
         return { provider: null, configured: 'local', unavailable: missingTransformersHint(config) };
       }
+      // Under Electron the batch is capped, because a single pipeline call big enough to
+      // need a gigabyte in one block is refused by Chromium's allocator and takes the
+      // process down with it (#37; see electron.ts). Off Electron this is the configured
+      // value unchanged.
+      const localBatchNotice = localEmbedBatchNotice(config.embedBatchSize);
+      if (localBatchNotice) logger?.info(localBatchNotice);
       return {
         provider: new LocalEmbeddingProvider(undefined, undefined, {
           transformersPath: config.transformersPath,
           dist: config.dist,
           modelCacheDir: join(config.dataDir, 'models'),
-          batchSize: config.embedBatchSize,
+          batchSize: localEmbedBatchSize(config.embedBatchSize),
           batchDelayMs: config.embedBatchDelayMs,
         }),
         configured: 'local',
       };
+    }
   }
 }

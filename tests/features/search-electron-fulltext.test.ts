@@ -1,10 +1,16 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MemorySearchIndex } from '../../src/features/search/index-manager.js';
 import {
-  ELECTRON_FULLTEXT_OVERRIDE,
-  electronFulltextRefusal,
+  ELECTRON_LOCAL_EMBED_BATCH,
   electronVersion,
+  localEmbedBatchNotice,
+  localEmbedBatchSize,
 } from '../../src/features/search/electron.js';
+import { createEmbeddingProvider, resolveTransformers } from '../../src/features/search/embeddings.js';
+import { DEFAULT_EMBED_BATCH_SIZE } from '../../src/features/search/limits.js';
 import { startIndexBuild, startIndexUpdate, PAGE_SIZE } from '../../src/features/search/build.js';
 import indexTool from '../../src/tools/index-tool.js';
 import { loadConfig } from '../../src/config.js';
@@ -13,8 +19,9 @@ const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /**
  * Electron's marker on this process, for the duration of one test. `process.versions` is a
- * writable object on every Node this suite runs on, and the gate reads the marker straight
- * off it, so this is what makes the refusal reachable from a runtime that is not Electron.
+ * writable object on every Node this suite runs on, and everything Electron-aware reads the
+ * marker straight off it, so this is what makes the capped path reachable from a runtime
+ * that is not Electron.
  */
 function pretendElectron(version = '42.10.0'): void {
   (process.versions as Record<string, string | undefined>).electron = version;
@@ -59,53 +66,180 @@ async function finished(search: MemorySearchIndex): Promise<void> {
   }
 }
 
-describe('electronFulltextRefusal', () => {
-  const allowed = { allowElectronFulltext: true };
-  const blocked = { allowElectronFulltext: false };
-
-  it('permits the full-text pass on a standalone Node', () => {
+describe('localEmbedBatchSize', () => {
+  it('changes nothing on a standalone Node', () => {
     expect(electronVersion({})).toBeUndefined();
-    expect(electronFulltextRefusal(blocked, {})).toBeUndefined();
+    expect(localEmbedBatchSize(undefined, {})).toBeUndefined();
+    expect(localEmbedBatchSize(32, {})).toBe(32);
+    expect(localEmbedBatchSize(256, {})).toBe(256);
     // An empty marker is not a version: a host that substitutes a blank string must not be
     // read as "this is Electron".
-    expect(electronFulltextRefusal(blocked, { electron: '  ' })).toBeUndefined();
+    expect(localEmbedBatchSize(256, { electron: '  ' })).toBe(256);
   });
 
-  it('refuses under Electron, naming the version, the workaround and the override', () => {
-    const reason = electronFulltextRefusal(blocked, { electron: '42.10.0' })!;
-    expect(reason).toContain('42.10.0');
-    expect(reason).toContain(ELECTRON_FULLTEXT_OVERRIDE);
-    // The two things a desktop user has to be told: the index is untouched, and an update
-    // is the call that still works from in here.
-    expect(reason).toMatch(/action:"update"/);
-    expect(reason).toMatch(/exactly as it was/);
+  it('caps the default batch under Electron', () => {
+    // The whole bug in one assertion: 32 passages of up to 512 tokens is a ~400 MB
+    // attention tensor in one block, and Chromium's allocator answers that with SIGTRAP.
+    expect(localEmbedBatchSize(undefined, { electron: '42.10.0' })).toBe(ELECTRON_LOCAL_EMBED_BATCH);
+    expect(ELECTRON_LOCAL_EMBED_BATCH).toBeLessThan(DEFAULT_EMBED_BATCH_SIZE);
   });
 
-  it('stands aside when the user has opted in', () => {
-    expect(electronFulltextRefusal(allowed, { electron: '42.10.0' })).toBeUndefined();
+  it('caps a configured batch that is larger, and leaves a smaller one alone', () => {
+    expect(localEmbedBatchSize(64, { electron: '42.10.0' })).toBe(ELECTRON_LOCAL_EMBED_BATCH);
+    // A ceiling, not a target: someone who already chose to embed two at a time keeps it.
+    expect(localEmbedBatchSize(2, { electron: '42.10.0' })).toBe(2);
   });
 });
 
-describe('startIndexBuild under Electron', () => {
-  it('refuses a full-text build before it touches the index', () => {
-    pretendElectron();
-    const { ctx, fullTextSince, searchItems } = makeCtx();
-    expect(() => startIndexBuild(ctx, undefined, undefined, { fulltext: true })).toThrow(/Electron 42\.10\.0/);
-    // Nothing started: no crawl, no state change, and the store is as it was. A refusal
-    // that had already cleared the index would be worse than the crash it replaces.
-    expect(searchItems).not.toHaveBeenCalled();
-    expect(fullTextSince).not.toHaveBeenCalled();
-    expect(ctx.search.buildStatus().state).toBe('idle');
-    expect(ctx.search.isBuilding).toBe(false);
+describe('localEmbedBatchNotice', () => {
+  it('says nothing when the cap is invisible', () => {
+    expect(localEmbedBatchNotice(32, {})).toBeUndefined();
+    expect(localEmbedBatchNotice(4, { electron: '42.10.0' })).toBeUndefined();
   });
 
-  it('refuses when ZOTEUS_INDEX_FULLTEXT is what asked for the pass', () => {
+  it('names the Electron version and both numbers when the cap bites', () => {
+    const notice = localEmbedBatchNotice(undefined, { electron: '42.10.0' })!;
+    expect(notice).toContain('42.10.0');
+    expect(notice).toContain(String(ELECTRON_LOCAL_EMBED_BATCH));
+    expect(notice).toContain(String(DEFAULT_EMBED_BATCH_SIZE));
+    expect(notice).toContain('#37');
+    // The reassurance that matters: a slower build, not a different index.
+    expect(notice).toMatch(/same index/);
+  });
+});
+
+/**
+ * The wiring, not the arithmetic: that the number `localEmbedBatchSize` computes is the
+ * number the pipeline is actually called with.
+ *
+ * The transformers package is an optional dependency and not installed here, so this plants
+ * a stub of it in a temp directory and points ZOTEUS_TRANSFORMERS_PATH at it, the same
+ * resolution path a real out-of-bundle install takes (see embedding-model-cache.test.ts).
+ * The stub's extractor records the size of every batch it is handed.
+ */
+describe('the local embedder under Electron', () => {
+  let root: string;
+  let stubModule: any;
+
+  beforeAll(async () => {
+    root = mkdtempSync(join(tmpdir(), 'zoteus-electron-batch-'));
+    const pkg = join(root, 'node_modules', '@huggingface', 'transformers');
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@huggingface/transformers', main: 'index.cjs' }));
+    writeFileSync(
+      join(pkg, 'index.cjs'),
+      `const env = { cacheDir: '/stub/.cache' };
+const batches = [];
+async function pipeline() {
+  return async (input) => {
+    const batch = Array.isArray(input) ? input : [input];
+    batches.push(batch.length);
+    return { data: new Float32Array(batch.length * 2).fill(0.5), dims: [batch.length, 2] };
+  };
+}
+module.exports = { env, pipeline, batches };
+`,
+    );
+    const specifier = resolveTransformers(root);
+    expect(specifier).not.toBeNull();
+    const mod = await import(specifier!);
+    stubModule = mod.default ?? mod;
+  });
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    stubModule.batches.length = 0;
+  });
+
+  const config = (env: Record<string, string> = {}) =>
+    loadConfig({ ZOTEUS_EMBEDDINGS: 'local', ZOTEUS_TRANSFORMERS_PATH: root, ...env } as any);
+
+  const passages = (n: number) => Array.from({ length: n }, (_, i) => `passage ${i}`);
+
+  it('hands the pipeline no more than the cap per call', async () => {
+    pretendElectron();
+    const { provider } = createEmbeddingProvider(config(), silentLogger as any);
+    await provider!.embed(passages(20));
+    expect(stubModule.batches).toEqual([8, 8, 4]);
+    expect(Math.max(...stubModule.batches)).toBeLessThanOrEqual(ELECTRON_LOCAL_EMBED_BATCH);
+  });
+
+  it('batches by the default off Electron, unchanged', async () => {
+    const { provider } = createEmbeddingProvider(config(), silentLogger as any);
+    await provider!.embed(passages(40));
+    expect(stubModule.batches).toEqual([DEFAULT_EMBED_BATCH_SIZE, 40 - DEFAULT_EMBED_BATCH_SIZE]);
+  });
+
+  it('refuses to let ZOTEUS_EMBED_BATCH_SIZE raise it back over the cap', async () => {
+    pretendElectron();
+    const { provider } = createEmbeddingProvider(config({ ZOTEUS_EMBED_BATCH_SIZE: '64' }), silentLogger as any);
+    await provider!.embed(passages(20));
+    expect(Math.max(...stubModule.batches)).toBe(ELECTRON_LOCAL_EMBED_BATCH);
+  });
+
+  it('logs why the batch shrank, so a slower build is not a mystery', () => {
+    pretendElectron();
+    const info = vi.fn();
+    createEmbeddingProvider(config(), { ...silentLogger, info } as any);
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('#37'));
+  });
+
+  it('leaves an API provider uncapped: its batch is a request body, not a tensor', () => {
+    pretendElectron();
+    process.env.OPENAI_API_KEY = 'sk-test';
+    try {
+      const { provider, configured } = createEmbeddingProvider(
+        loadConfig({ ZOTEUS_EMBEDDINGS: 'openai' } as any),
+        silentLogger as any,
+      );
+      expect(configured).toBe('openai');
+      // Nothing about the OpenAI path allocates in this process, so nothing about it is
+      // capped; asserting the provider exists is as far as this can go without a network.
+      expect(provider).not.toBeNull();
+    } finally {
+      delete process.env.OPENAI_API_KEY;
+    }
+  });
+});
+
+describe('a full-text build under Electron', () => {
+  it('is no longer refused: it starts, crawls and finishes', async () => {
+    pretendElectron();
+    const { ctx, fullTextSince, getFullText } = makeCtx();
+    startIndexBuild(ctx, undefined, undefined, { fulltext: true });
+    await finished(ctx.search);
+
+    const s = ctx.search.buildStatus();
+    expect(s.state).toBe('done');
+    expect(s.items).toBe(3);
+    expect(s.fulltextEnabled).toBe(true);
+    expect(fullTextSince).toHaveBeenCalled();
+    expect(getFullText).toHaveBeenCalled();
+  });
+
+  it('needs no override env var to do it', async () => {
     pretendElectron();
     const { ctx } = makeCtx({ ZOTEUS_INDEX_FULLTEXT: 'true' });
-    expect(() => startIndexBuild(ctx)).toThrow(new RegExp(ELECTRON_FULLTEXT_OVERRIDE));
+    // Would have thrown in 1.12.0 without ZOTEUS_ALLOW_ELECTRON_FULLTEXT=true.
+    expect(() => startIndexBuild(ctx)).not.toThrow();
+    await finished(ctx.search);
+    expect(ctx.search.buildStatus().state).toBe('done');
   });
 
-  it('still builds the metadata index, which is the pass that works there', async () => {
+  it('goes through the tool without an error result', async () => {
+    pretendElectron();
+    const { ctx, searchItems } = makeCtx();
+    const res: any = await indexTool.handler({ action: 'build', fulltext: true }, ctx);
+    expect(res.isError).toBeUndefined();
+    await finished(ctx.search);
+    expect(searchItems).toHaveBeenCalled();
+    expect(ctx.search.buildStatus().fulltextEnabled).toBe(true);
+  });
+
+  it('still builds metadata only when that is what was asked for', async () => {
     pretendElectron();
     const { ctx, fullTextSince } = makeCtx();
     startIndexBuild(ctx, undefined, undefined, { fulltext: false });
@@ -113,36 +247,23 @@ describe('startIndexBuild under Electron', () => {
 
     const s = ctx.search.buildStatus();
     expect(s.state).toBe('done');
-    expect(s.items).toBe(3);
     expect(s.fulltextEnabled).toBe(false);
     expect(fullTextSince).not.toHaveBeenCalled();
   });
 
-  it('runs the full-text pass anyway once the override is set', async () => {
+  it('lets the rebuild an update falls back to run too', async () => {
     pretendElectron();
-    const { ctx, fullTextSince } = makeCtx({ ZOTEUS_ALLOW_ELECTRON_FULLTEXT: 'true' });
-    startIndexBuild(ctx, undefined, undefined, { fulltext: true });
+    const { ctx } = makeCtx();
+    // No version stamp on a fresh index, so an update cannot run a delta and falls back to
+    // the full build that used to be refused here.
+    expect(() => startIndexUpdate(ctx, undefined, undefined, { fulltext: true })).not.toThrow();
     await finished(ctx.search);
-
-    const s = ctx.search.buildStatus();
-    expect(s.state).toBe('done');
-    expect(s.fulltextEnabled).toBe(true);
-    expect(fullTextSince).toHaveBeenCalled();
+    expect(ctx.search.buildStatus().state).toBe('done');
   });
 
-  it('refuses the rebuild an update falls back to, rather than crashing inside it', () => {
+  it('leaves an update itself alone, as before', async () => {
     pretendElectron();
     const { ctx } = makeCtx();
-    // No version stamp on a fresh index, so an update cannot run a delta and would
-    // otherwise start exactly the full-text build this gate exists to stop.
-    expect(() => startIndexUpdate(ctx, undefined, undefined, { fulltext: true })).toThrow(/Electron/);
-    expect(ctx.search.buildStatus().state).toBe('idle');
-  });
-
-  it('leaves an update itself alone: it never enters the long full-text pass', async () => {
-    pretendElectron();
-    const { ctx } = makeCtx();
-    // Give the index a stamp so the update runs as a delta rather than falling back.
     startIndexBuild(ctx, undefined, undefined, { fulltext: false });
     await finished(ctx.search);
     expect(ctx.search.buildStatus().libraryVersion).toBe(4);
@@ -152,28 +273,5 @@ describe('startIndexBuild under Electron', () => {
     const s = ctx.search.buildStatus();
     expect(s.state).toBe('done');
     expect(s.operation).toBe('update');
-  });
-});
-
-describe('zotero_index under Electron', () => {
-  it('hands the refusal back through the tool, having started nothing', async () => {
-    pretendElectron();
-    const { ctx, searchItems } = makeCtx();
-    // The handler throws, and the registry turns a thrown handler into an isError result
-    // carrying the message (see registerTools); the same route assertLibrary's refusal takes.
-    await expect(indexTool.handler({ action: 'build', fulltext: true }, ctx)).rejects.toThrow(
-      new RegExp(ELECTRON_FULLTEXT_OVERRIDE),
-    );
-    expect(searchItems).not.toHaveBeenCalled();
-    expect(ctx.search.buildStatus().state).toBe('idle');
-  });
-
-  it('leaves a metadata build through the tool untouched', async () => {
-    pretendElectron();
-    const { ctx } = makeCtx();
-    const res: any = await indexTool.handler({ action: 'build', fulltext: false }, ctx);
-    expect(res.isError).toBeUndefined();
-    await finished(ctx.search);
-    expect(ctx.search.buildStatus().items).toBe(3);
   });
 });
