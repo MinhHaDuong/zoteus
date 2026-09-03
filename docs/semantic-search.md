@@ -434,7 +434,7 @@ refused an allocation.
 `all-MiniLM-L6-v2` computes a batch x 12-head x seq x seq attention tensor: at 32 passages
 of 512 tokens that is about 400 MB in a single block, and onnxruntime's arena asks for it in
 one piece. Metadata passages are chunked at 512 characters, roughly 128 tokens, so the same
-batch of 32 needs about 25 MB and never comes close — which is why the metadata pass
+batch of 32 needs about 25 MB and never comes close, which is why the metadata pass
 embedding thousands of passages first proved nothing about the native layer, and why the
 full-text pass, chunked at 1200 characters (`FULLTEXT_CHUNK_SIZE`) and dense enough to reach
 the token cap, was the one that always died.
