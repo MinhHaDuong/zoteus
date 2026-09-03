@@ -20,6 +20,7 @@ function fakeCtx(): ToolContext {
     search: { isEmpty: true, embedderName: 'none', storage: 'memory', buildStatus: () => ({}), status: () => ({}) } as any,
     scholar: {} as any,
     fetcher: {} as any,
+    reopenSearchIndex: async () => ({}) as any,
     searchIndexPath: '',
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
@@ -86,7 +87,7 @@ describe('deferred startup', () => {
    */
   it('reports a failed build as a tool error, and retries it on the next call', async () => {
     const build = vi
-      .fn<[], Promise<ToolContext>>()
+      .fn<() => Promise<ToolContext>>()
       .mockRejectedValueOnce(new Error('database is locked'))
       .mockImplementation(async () => fakeCtx());
     const { client } = await connect(build);

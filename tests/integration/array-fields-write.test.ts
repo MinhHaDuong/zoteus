@@ -19,7 +19,9 @@ function fakeCtx() {
       version: 7,
       data: { version: 7, itemType: 'book', title: 'Old', creators: [] },
     })),
-    patchItem: vi.fn(async () => 8),
+    // Typed args, not `async () => 8`: without them vi.fn infers a zero-length tuple for
+    // mock.calls, and every `mock.calls[0][2]` assertion below is a compile error.
+    patchItem: vi.fn(async (..._args: any[]) => 8),
     writeItems: vi.fn(async (_lib: any, objects: any[]) => ({
       successful: objects.map((o, i) => ({ index: i, key: `KEY${i}`, version: 9, data: o })),
       unchanged: [],
@@ -30,7 +32,7 @@ function fakeCtx() {
   };
   const ctx: ToolContext = {
     config: { local: 'off', libraryType: 'user' } as any,
-    capabilities: { cloud: cloud as any, localApi: false },
+    capabilities: { cloud: cloud as any, localApi: false, localGroupIds: [] },
     router: { whoami: () => cloud, defaultLibrary: () => ({ type: 'user', id: 1 }) } as any,
     schema: {
       getSchema: vi.fn(async () => ({ version: 39, itemTypes: [] })),
@@ -44,6 +46,8 @@ function fakeCtx() {
     translation: { isUp: async () => false } as any,
     search: {} as any,
     scholar: {} as any,
+    fetcher: {} as any,
+    reopenSearchIndex: async () => ({}) as any,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
     searchIndexPath: '/tmp/unused-index.json',
   };

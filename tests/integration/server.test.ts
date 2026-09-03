@@ -11,7 +11,7 @@ function fakeCtx(): ToolContext {
   const cloud = { userID: 19552201, username: 'oscardvs', access: { user: { write: true } } };
   return {
     config: { local: 'off', libraryType: 'user' } as any,
-    capabilities: { cloud: cloud as any, localApi: false },
+    capabilities: { cloud: cloud as any, localApi: false, localGroupIds: [] },
     router: {
       whoami: () => cloud,
       defaultLibrary: () => ({ type: 'user', id: 19552201 }),
@@ -49,6 +49,9 @@ function fakeCtx(): ToolContext {
     search: { isEmpty: true, embedderName: 'none', status: () => ({}), query: async () => [] } as any,
     scholar: { lookup: async () => null, references: async () => [], citations: async () => [], related: async () => [] } as any,
     toolCatalog: tools.map((t) => ({ name: t.name, title: t.title, description: t.description })),
+    fetcher: {} as any,
+    searchIndexPath: '/tmp/unused-index.json',
+    reopenSearchIndex: async () => ({}) as any,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   };
 }

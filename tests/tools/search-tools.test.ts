@@ -19,7 +19,11 @@ function makeCtx(search: SearchIndex): any {
   };
   // No desktop app in reach here, so the router pages the cloud Web API.
   const config = loadConfig({ ZOTEUS_LOCAL: 'off' } as any);
-  const capabilities = { cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any, localApi: false };
+  const capabilities = {
+    cloud: { userID: 19552201, username: 'oscardvs', access: {} } as any,
+    localApi: false,
+    localGroupIds: [],
+  };
   return {
     config: { ...config, dataDir: join(tmpdir(), `zoteus-idx-${process.pid}`) },
     capabilities,
