@@ -21,7 +21,7 @@ const silentLogger = { debug() {}, info() {}, warn() {}, error() {} } as any;
  * A quantized model answers the same question with different numbers, so it is a different
  * vector space wearing the same model name (#43). These tests pin the two halves that makes
  * necessary: the precision has to reach the pipeline, and it has to reach the identity the
- * stale-vector guard compares — without declaring every index built before the setting
+ * stale-vector guard compares, without declaring every index built before the setting
  * existed stale, all of which are fp32.
  */
 
