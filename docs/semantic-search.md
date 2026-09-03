@@ -623,9 +623,53 @@ Set `ZOTEUS_EMBEDDINGS`:
 
 | Value | Behaviour |
 |---|---|
-| `local` (default) | On-device embeddings via `@huggingface/transformers` (model `all-MiniLM-L6-v2`). **No data leaves your machine.** |
+| `local` (default) | On-device embeddings via `@huggingface/transformers`, with any transformers.js model you name (default `Xenova/all-MiniLM-L6-v2`; see [Choosing a local model](#choosing-a-local-model)). **No data leaves your machine.** |
 | `openai` / `gemini` | API embeddings (opt-in; requires `OPENAI_API_KEY` / `GEMINI_API_KEY`; data is sent to the provider). |
 | `off` | Keyword-only (BM25). |
+
+### Choosing a local model
+
+`ZOTEUS_EMBEDDING_MODEL` names the model of whichever provider is active, and that includes
+`local` (#43): set it to any [transformers.js](https://huggingface.co/models?library=transformers.js&pipeline_tag=feature-extraction)
+feature-extraction model and the on-device pipeline loads that one instead. Unset keeps
+`Xenova/all-MiniLM-L6-v2`, so nothing changes for an existing install.
+
+The default is English-centric, which is the whole reason the knob exists. It was trained on
+English sentence pairs, and on a mixed-language library it ranks by *language* before topic: a
+German question puts every German passage above the English paper that actually answers it.
+
+| Model | Dimensions | Downloaded once | Languages | Input prefixes |
+|---|---|---|---|---|
+| `Xenova/all-MiniLM-L6-v2` (default) | 384 | ~90 MB | English | none |
+| `Xenova/multilingual-e5-small` | 384 | ~470 MB | ~100, German included | `query: ` / `passage: `, applied for you |
+
+Measured on a 12-passage German/English corpus with four German questions (the script is in
+the [#43](https://github.com/oscardvs/zoteus/issues/43) thread): both models put the German
+passage that answers the question first, but MiniLM ranked its English twin **9.5th of 12**,
+below every unrelated German passage, while `multilingual-e5-small` ranked it **2.5th**.
+Same 384 dimensions, so the index costs exactly what it did before.
+
+**E5 models want their prefixes.** The E5 family is trained with a marker on every input, and
+an asymmetric one: `query: ` in front of a question, `passage: ` in front of a document.
+Zoteus applies them for you when the model id carries `e5` as a segment
+(`Xenova/multilingual-e5-small`, `intfloat/e5-base-v2`), and never otherwise, so a symmetric
+model such as MiniLM keeps getting exactly the text you gave it. The prefix goes to the model
+and nowhere else: it is not stored with the passage, and it is not part of the embedder
+identity below. `ZOTEUS_EMBEDDING_PREFIXES` overrides the detection in both directions: `off`
+never prefixes, `e5` always does (for a mirrored checkpoint whose name does not say what it
+is), `auto` is the default.
+
+**Changing the model means rebuilding**, exactly as it does for an API provider: the identity
+stored beside the vectors becomes `local:Xenova/multilingual-e5-small`, the old vectors are
+dropped with a notice, and one `zotero_index action:"build"` re-embeds the library. See
+[Changing the model means rebuilding the index](#tuning-api-embeddings) below.
+
+The weights are downloaded once into `<ZOTEUS_DATA_DIR>/models/<org>/<model>`, so deleting the
+data directory still removes them along with the index. The sizes above are what
+`@huggingface/transformers` 4.2.0 fetches by default (the full-precision ONNX weights);
+smaller quantized variants exist on the Hub, but Zoteus does not select one, because a dtype
+does not show up in the embedder identity and a silently re-quantized index is worse than a
+large download.
 
 ### Tuning API embeddings
 
@@ -634,7 +678,7 @@ behaviour:
 
 | Variable | Default | What it changes |
 |---|---|---|
-| `ZOTEUS_EMBEDDING_MODEL` | provider default | The model the active **API** provider embeds with: `text-embedding-3-small` (openai) or `text-embedding-004` (gemini). |
+| `ZOTEUS_EMBEDDING_MODEL` | provider default | The model the active provider embeds with: `text-embedding-3-small` (openai), `text-embedding-004` (gemini), `Xenova/all-MiniLM-L6-v2` (local, see [Choosing a local model](#choosing-a-local-model)). |
 | `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call — one API request, or one local pipeline call. |
 | `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop; a positive value sleeps. |
 
@@ -655,7 +699,8 @@ ZOTEUS_EMBED_BATCH_DELAY_MS=200
 
 **Changing the model means rebuilding the index.** Vectors from two models share neither
 dimension nor vector space, so comparing them produces scores that look plausible and mean
-nothing. Zoteus therefore stores the embedder identity (`openai:text-embedding-3-small`)
+nothing. Zoteus therefore stores the embedder identity (`openai:text-embedding-3-small`,
+`local:Xenova/multilingual-e5-small`)
 alongside the vectors: when the index is loaded under a different one, the stored vectors are
 **discarded** and `zotero_index action:"status"` (plus every `zotero_semantic_search`
 summary) says so and names the remedy. Keyword search keeps working throughout; run
@@ -672,9 +717,9 @@ width from the stored ones.
 npm i @huggingface/transformers
 ```
 
-The first local build downloads the model (~25 MB) once, into
-`<ZOTEUS_DATA_DIR>/models` — so deleting the data directory removes the weights along
-with the index.
+The first local build downloads the model once (~90 MB for the default MiniLM, more for a
+larger one) into `<ZOTEUS_DATA_DIR>/models`, so deleting the data directory removes the
+weights along with the index.
 
 ### Why it is not bundled
 

@@ -80,6 +80,7 @@ Zoteus detects a running Zotero desktop app and talks to it directly: the key-fr
 | `ZOTEUS_LOCAL` | `auto` | `auto\|on\|off`: use the Zotero desktop app (reads + personal-library writes) |
 | `ZOTEUS_LOCAL_API_KEY` | none | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
+| `ZOTEUS_EMBEDDING_MODEL` | provider default | The model that provider embeds with, `local` included: `Xenova/multilingual-e5-small` for a German or otherwise multilingual library, `Xenova/all-MiniLM-L6-v2` by default |
 | `ZOTEUS_INDEX_OWN_WORDS` | `true` | Index your own child notes and PDF annotations as searchable passages |
 | `ZOTEUS_INDEX_FULLTEXT` | `false` | Index PDF body text for semantic search (opt-in; costly) |
 | `ZOTEUS_ALLOW_ELECTRON_FULLTEXT` | `false` | Let a full-text **build** run under Electron (Claude Desktop), where it currently kills the server process ([#37](https://github.com/oscardvs/zoteus/issues/37)). Build headlessly instead; `action:"update"` is never gated |

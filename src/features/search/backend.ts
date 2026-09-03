@@ -1,4 +1,4 @@
-import type { EmbeddingProvider } from './embeddings.js';
+import type { EmbedKind, EmbeddingProvider } from './embeddings.js';
 import type { Logger } from '../../lib/logger.js';
 import type { LibraryRef } from '../../api/web-client.js';
 
@@ -568,7 +568,7 @@ export interface SearchIndex {
   /** Cooperatively cancel the running build. Returns false if nothing is building. */
   requestStop(): boolean;
   /** Embed arbitrary texts with the configured provider (empty array if none). */
-  embed(texts: string[]): Promise<number[][]>;
+  embed(texts: string[], kind?: EmbedKind): Promise<number[][]>;
   build(libraryItems: any[], opts?: BuildOptions): Promise<SearchIndexStatus>;
   buildIncremental(fetchPage: PageFetcher, opts?: IncrementalBuildOptions): Promise<IndexBuildStatus>;
   /**

@@ -65,7 +65,7 @@
     "embedding_model": {
       "type": "string",
       "title": "Embedding model",
-      "description": "Model used by the API provider selected above: text-embedding-3-small for openai, text-embedding-004 for gemini. Ignored by local embeddings. Vectors from two models are not comparable, so the index is dropped (with a notice) and has to be rebuilt after you change this. Leave empty to use the provider's own default.",
+      "description": "Model used by the provider selected above, local included: Xenova/all-MiniLM-L6-v2 for local, text-embedding-3-small for openai, text-embedding-004 for gemini. For local embeddings this is any transformers.js feature-extraction model, which is how a German or otherwise multilingual library gets an embedder trained for it: Xenova/multilingual-e5-small (same 384 dimensions, weights downloaded once into the data directory, E5 query/passage prefixes applied for you). Vectors from two models are not comparable, so the index is dropped (with a notice) and has to be rebuilt after you change this. Leave empty to use the provider's own default.",
       "required": false
     },
     "embed_batch_size": {
