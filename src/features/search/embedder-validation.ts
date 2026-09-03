@@ -268,7 +268,10 @@ async function runFixture(target: LocalValidationTarget): Promise<void> {
   }
   for (const [index, vector] of [...normalizedQuery, ...normalizedPassages].entries()) {
     const norm = Math.hypot(...vector);
-    if (Math.abs(norm - 1) > NORMALIZATION_TOLERANCE) {
+    // Compare against the closed interval directly. Computing `abs(norm - 1)`
+    // can round an exactly representable endpoint such as `1 + tolerance`
+    // slightly above the tolerance and incorrectly reject the inclusive bound.
+    if (norm < 1 - NORMALIZATION_TOLERANCE || norm > 1 + NORMALIZATION_TOLERANCE) {
       throw new Error(
         `Local embedder normalization failed for fixture vector ${index}: L2 norm ${norm}.`,
       );
