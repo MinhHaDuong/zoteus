@@ -78,6 +78,7 @@ interface Mutants {
   ignoreTemplate?: boolean;
   reverseDiscrimination?: boolean;
   batchSensitive?: boolean;
+  normalizedScale?: number;
 }
 
 class FixtureTarget implements LocalValidationTarget {
@@ -118,7 +119,10 @@ class FixtureTarget implements LocalValidationTarget {
     if (this.mutants.batchSensitive) {
       vectors = vectors.map((vector) => [vector[0]!, vector[1]!, vector[2]! + texts.length / 10]);
     }
-    return normalize ? vectors.map(normalized) : vectors;
+    if (!normalize) return vectors;
+    return vectors.map((vector) =>
+      normalized(vector).map((value) => value * (this.mutants.normalizedScale ?? 1)),
+    );
   }
 
   async validationRuntimeShape(): Promise<EmbedderRuntimeShape> {
@@ -257,6 +261,31 @@ describe('local embedder compatibility validation', () => {
     await expect(
       validateLocalEmbedder(target, mkdtempSync(join(tmpdir(), 'zoteus-validation-batch-'))),
     ).resolves.toMatchObject({ status: 'passed', cached: false });
+  });
+
+  it('accepts the inclusive normalization bounds and rejects values outside them', async () => {
+    for (const normalizedScale of [
+      1 - NORMALIZATION_TOLERANCE,
+      1 + NORMALIZATION_TOLERANCE,
+    ]) {
+      await expect(
+        validateLocalEmbedder(
+          new FixtureTarget(RUNTIME, undefined, { normalizedScale }),
+          mkdtempSync(join(tmpdir(), 'zoteus-validation-normalization-bound-')),
+        ),
+      ).resolves.toMatchObject({ status: 'passed' });
+    }
+    for (const normalizedScale of [
+      1 - NORMALIZATION_TOLERANCE - 1e-9,
+      1 + NORMALIZATION_TOLERANCE + 1e-9,
+    ]) {
+      await expect(
+        validateLocalEmbedder(
+          new FixtureTarget(RUNTIME, undefined, { normalizedScale }),
+          mkdtempSync(join(tmpdir(), 'zoteus-validation-normalization-outside-')),
+        ),
+      ).rejects.toThrow(/normalization failed/i);
+    }
   });
 
   it('does not run the local fixture or write cache state for an API provider', async () => {
