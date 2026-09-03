@@ -70,18 +70,72 @@ export interface EmbedderEntry {
   readonly sources: Readonly<Record<string, string>>;
 }
 
-const VECTOR_FIELDS = [
-  'model',
-  'revision',
-  'dtype',
-  'graphFile',
-  'pooling',
-  'normalize',
-  'template',
-  'windowTokens',
-  'dimension',
-] as const;
-const ENTRY_FIELDS = ['id', ...VECTOR_FIELDS, 'sources'] as const;
+function fingerprintField<K extends keyof EmbedderEntry>(
+  field: K,
+  project: (entry: EmbedderEntry) => EmbedderEntry[K],
+): readonly [K, (entry: EmbedderEntry) => EmbedderEntry[K]] {
+  return Object.freeze([field, project] as const);
+}
+
+/**
+ * The one ordered authority for vector identity version 1. Tuple order and projected key
+ * names are serialized, so changing either requires a new fingerprint compatibility
+ * version. Structured values must be projected explicitly rather than inheriting object
+ * insertion order from a caller.
+ */
+export const FINGERPRINT_PROJECTION_V1 = Object.freeze([
+  fingerprintField('model', (entry) => entry.model),
+  fingerprintField('revision', (entry) => entry.revision),
+  fingerprintField('dtype', (entry) => entry.dtype),
+  fingerprintField('graphFile', (entry) => entry.graphFile),
+  fingerprintField('pooling', (entry) => entry.pooling),
+  fingerprintField('normalize', (entry) => entry.normalize),
+  fingerprintField('template', (entry) => ({
+    query: entry.template.query,
+    passage: entry.template.passage,
+  })),
+  fingerprintField('windowTokens', (entry) => entry.windowTokens),
+  fingerprintField('dimension', (entry) => entry.dimension),
+] as const);
+
+type FingerprintedEntryField = (typeof FINGERPRINT_PROJECTION_V1)[number][0];
+
+/** Fields of the record that are executed and therefore projected into vector identity. */
+export const APPLIED_FIELDS = Object.freeze(
+  FINGERPRINT_PROJECTION_V1.map(([field]) => field),
+) as readonly FingerprintedEntryField[];
+
+/** Fields the record declares that nothing consumes yet. Kept explicit for the guard test. */
+export const DECLARED_ONLY_FIELDS = [] as const satisfies readonly (keyof EmbedderEntry)[];
+
+/** Fields that describe the record rather than the vectors it produces. */
+export const ENTRY_METADATA_FIELDS = ['id', 'sources'] as const satisfies readonly (
+  keyof EmbedderEntry
+)[];
+
+type ClassifiedEntryField =
+  | FingerprintedEntryField
+  | (typeof DECLARED_ONLY_FIELDS)[number]
+  | (typeof ENTRY_METADATA_FIELDS)[number];
+type AssertNever<T extends never> = T;
+
+/** Compile-time tripwire: a new record field must be projected or explicitly classified. */
+export type UnclassifiedEmbedderEntryFields = AssertNever<
+  Exclude<keyof EmbedderEntry, ClassifiedEntryField>
+>;
+
+/** Compile-time tripwire: reclassification must first remove the old classification. */
+export type MultiplyClassifiedEmbedderEntryFields = AssertNever<
+  | Extract<FingerprintedEntryField, (typeof ENTRY_METADATA_FIELDS)[number]>
+  | Extract<FingerprintedEntryField, (typeof DECLARED_ONLY_FIELDS)[number]>
+  | Extract<(typeof ENTRY_METADATA_FIELDS)[number], (typeof DECLARED_ONLY_FIELDS)[number]>
+>;
+
+const ENTRY_FIELDS = Object.freeze([
+  ...APPLIED_FIELDS,
+  ...DECLARED_ONLY_FIELDS,
+  ...ENTRY_METADATA_FIELDS,
+]);
 const DTYPES: readonly EmbedderDtype[] = [
   'fp32',
   'fp16',
@@ -110,15 +164,9 @@ export function entryFingerprint(entry: EmbedderEntry): string {
     // Keep the serialized field name and value stable: incumbent indexes already carry
     // the digest of this exact payload.
     version: EMBEDDER_FINGERPRINT_VERSION,
-    model: entry.model,
-    revision: entry.revision,
-    dtype: entry.dtype,
-    graphFile: entry.graphFile,
-    pooling: entry.pooling,
-    normalize: entry.normalize,
-    template: { query: entry.template.query, passage: entry.template.passage },
-    windowTokens: entry.windowTokens,
-    dimension: entry.dimension,
+    ...Object.fromEntries(
+      FINGERPRINT_PROJECTION_V1.map(([field, project]) => [field, project(entry)]),
+    ),
   };
   return createHash('sha256').update(JSON.stringify(vectorShape)).digest('hex');
 }
@@ -170,7 +218,7 @@ export function parseEmbedderEntry(value: unknown): EmbedderEntry {
   }
   if (!row.sources || typeof row.sources !== 'object' || Array.isArray(row.sources))
     throw new Error('Embedder entry sources must be an object.');
-  for (const field of VECTOR_FIELDS) {
+  for (const field of [...APPLIED_FIELDS, ...DECLARED_ONLY_FIELDS]) {
     if (
       typeof (row.sources as Record<string, unknown>)[field] !== 'string' ||
       !(row.sources as Record<string, string>)[field]
@@ -197,15 +245,6 @@ export function parseEmbedderEntry(value: unknown): EmbedderEntry {
     sources: frozenSources,
   }) as EmbedderEntry;
 }
-
-/** Fields of the record the loader reads today. */
-export const APPLIED_FIELDS = VECTOR_FIELDS;
-
-/** Fields the record declares that nothing consumes yet. Kept explicit for the guard test. */
-export const DECLARED_ONLY_FIELDS = [] as const;
-
-/** Fields that describe the record rather than the embedder. */
-export const ENTRY_METADATA_FIELDS = ['id', 'sources'] as const;
 
 /**
  * The incumbent local embedder: the chain zoteus has run since hybrid search landed.
@@ -326,11 +365,14 @@ const measuredEntries = CANDIDATES.flatMap((candidate) =>
       id: `${candidate.id}-${dtype}`,
       dtype,
       graphFile: GRAPH_BY_DTYPE[dtype],
-      sources: Object.fromEntries(VECTOR_FIELDS.map((field) => [field,
-        field === 'windowTokens'
-          ? 'tokenizer_config.json model_max_length in the cached repository revision, verified with Transformers.js 4.2.0'
-          : 'bench/models.json and the model repository configuration used by the measured CPU cell',
-      ])),
+      sources: Object.fromEntries(
+        APPLIED_FIELDS.map((field) => [
+          field,
+          field === 'windowTokens'
+            ? 'tokenizer_config.json model_max_length in the cached repository revision, verified with Transformers.js 4.2.0'
+            : 'bench/models.json and the model repository configuration used by the measured CPU cell',
+        ]),
+      ),
     }),
   ),
 ).filter((entry) => entry.id !== 'granite-97m-multilingual-r2-q8');

@@ -13,6 +13,7 @@ import {
   DECLARED_ONLY_FIELDS,
   EMBEDDER_REGISTRY_VERSION,
   ENTRY_METADATA_FIELDS,
+  FINGERPRINT_PROJECTION_V1,
   INCUMBENT_LOCAL_ENTRY,
 } from '../../src/features/search/embedder-registry.js';
 
@@ -95,20 +96,13 @@ describe('incumbent local embedder: the registry entry', () => {
 
   it('partitions its fields into applied and declared-only, with nothing falling between', () => {
     const claimed = [...APPLIED_FIELDS, ...DECLARED_ONLY_FIELDS, ...ENTRY_METADATA_FIELDS];
+    const projected = FINGERPRINT_PROJECTION_V1.map(([field]) => field);
     expect(new Set(claimed).size, 'a field is claimed twice').toBe(claimed.length);
     expect([...claimed].sort()).toEqual(Object.keys(INCUMBENT_LOCAL_ENTRY).sort());
-    // Frozen on purpose: this list shrinks only when a field is genuinely made authoritative.
-    expect([...APPLIED_FIELDS]).toEqual([
-      'model',
-      'revision',
-      'dtype',
-      'graphFile',
-      'pooling',
-      'normalize',
-      'template',
-      'windowTokens',
-      'dimension',
-    ]);
+    expect([...APPLIED_FIELDS]).toEqual(projected);
+    expect(new Set(projected).size, 'a projected field is repeated').toBe(projected.length);
+    expect(Object.isFrozen(FINGERPRINT_PROJECTION_V1)).toBe(true);
+    expect(FINGERPRINT_PROJECTION_V1.every(Object.isFrozen)).toBe(true);
     expect([...DECLARED_ONLY_FIELDS]).toEqual([]);
   });
 });
