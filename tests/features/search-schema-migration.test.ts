@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { nodeSqliteAvailable, sqliteIndexPath } from '../../src/features/search/factory.js';
+import { repairSearchIndex } from '../../src/features/search/repair.js';
+import type { ToolContext } from '../../src/registry/registry.js';
 import type { EmbeddingProvider } from '../../src/features/search/embeddings.js';
 import type { SchemaMigration } from '../../src/features/search/sqlite-index.js';
 
@@ -226,6 +228,60 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     } finally {
       await repaired.close();
     }
+  });
+
+  sqliteIt('gives that refusal nothing to delete, so a build cannot discard the intact file', async () => {
+    // The refusal above ends with "a rebuild is NOT needed and would discard a usable
+    // index", and the product has to mean it. `zotero_index action:"build"` repairs an
+    // unreadable store by deleting exactly the files the fault names, and the fault this
+    // refusal raises used to name the database itself — so the one call a user makes after
+    // reading "search is unavailable" would have unlinked the intact, fully vectorized file
+    // the sentence had just called intact, over a full disk. A fault whose remedy is a
+    // restart names no file, and the repair refuses instead.
+    const path = tmpDbPath('migrate-failure-repair');
+    const first = await openIndex(path);
+    await first.build(ITEMS);
+    await first.save();
+    const documents = first.status().documents;
+    await first.close();
+
+    const broken: SchemaMigration[] = [
+      {
+        to: 3,
+        what: 'added passages.language',
+        up: (db) => {
+          db.exec('ALTER TABLE passages ADD COLUMN language TEXT');
+          throw new Error('database or disk is full');
+        },
+      },
+    ];
+    const refusal = await openIndex(path, { schemaVersion: 3, migrations: broken }).then(
+      () => {
+        throw new Error('the open was expected to refuse');
+      },
+      (e: Error & { files?: string[] }) => e,
+    );
+    expect(refusal.files).toEqual([]);
+
+    // Through the repair itself, because that is where the deletion would have happened.
+    // It never reaches the reopen: a fault naming no file is refused before anything is
+    // unlinked, and the refusal repeats the advice that actually works.
+    const ctx = {
+      search: {
+        storeFault: refusal,
+        isBuilding: false,
+        close: async () => {},
+      },
+      reopenSearchIndex: async () => {
+        throw new Error('the repair must not get as far as reopening');
+      },
+    };
+    await expect(repairSearchIndex(ctx as unknown as ToolContext)).rejects.toThrow(
+      /could not be upgraded to 3/,
+    );
+    expect(existsSync(path)).toBe(true);
+    expect(readColumn(path, 'SELECT COUNT(*) AS n FROM passages').n).toBe(documents);
+    expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
   });
 
   sqliteIt('still sidelines when the rung failure IS corruption', async () => {

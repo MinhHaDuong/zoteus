@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import { mkdtempSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { accentKey, foldMarks, normalizeForSearch, tokenize, UNICODE61_KEEPS_CASE } from '../../src/features/search/tokenize.js';
-import { createSearchIndex, nodeSqliteAvailable } from '../../src/features/search/factory.js';
+import { createSearchIndex, nodeSqliteAvailable, sqliteIndexPath } from '../../src/features/search/factory.js';
 import { MemorySearchIndex, makeSnippet } from '../../src/features/search/index-manager.js';
 import { loadIndex, saveIndex } from '../../src/features/search/persistence.js';
 import type { SearchIndex } from '../../src/features/search/backend.js';
@@ -406,6 +407,50 @@ describe('the expansion group is bounded', () => {
     const loners = found.filter((k) => k.startsWith('S')).length;
     expect(loners).toBeLessThanOrEqual(23);
     await index.close();
+  });
+});
+
+describe('the expansion map is derived state, so failing to derive it costs recall and nothing else', () => {
+  const sqliteIt = hasSqlite ? it : it.skip;
+
+  sqliteIt('opens, and answers, when the vocabulary scan cannot run', async () => {
+    // `accent_variants` is derived exactly as the binary vector codes are, and the build
+    // path already says so: a refresh that throws there is caught and logged, because a
+    // map that could not be rebuilt is yesterday's expansions rather than a failed build.
+    // The same scan runs on every open, where it was unguarded — so a transient condition
+    // (a full disk, a file limit) reached the factory as an untyped throw, which the
+    // factory does not degrade, and the whole server failed to start over a cache it can
+    // rebuild in one scan. Corruption still propagates; nothing else should.
+    const dir = mkdtempSync(join(tmpdir(), 'zoteus-variants-'));
+    const jsonPath = join(dir, 'search-index.json');
+    const first = await createSearchIndex({ embedder: null, logger: silentLogger, backend: 'sqlite', jsonPath });
+    await first.build([
+      { key: 'V1', data: { itemType: 'book', title: 'F', abstractNote: 'năm 2020 phát triển bền vững' } },
+      { key: 'V2', data: { itemType: 'book', title: 'F', abstractNote: 'năm 2021 chính sách năng lượng' } },
+      { key: 'EN', data: { itemType: 'book', title: 'F', abstractNote: 'nam river basin hydrology' } },
+    ]);
+    await first.close();
+
+    // Sabotage the derivation in a way SQLite reports as an ordinary error rather than as
+    // corruption: `DROP TABLE` refuses to drop a view, which is the first thing the scan
+    // does. The stamp goes with it, so the open below genuinely tries to re-derive.
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite');
+    const db = new DatabaseSync(sqliteIndexPath(jsonPath));
+    db.exec("DELETE FROM meta WHERE key = 'accentVariantsPassages'");
+    db.exec('DROP TABLE accent_variants');
+    db.exec("CREATE VIEW accent_variants AS SELECT '' AS folded, '' AS term, 0 AS df WHERE 0");
+    db.close();
+
+    const second = await createSearchIndex({ embedder: null, logger: silentLogger, backend: 'sqlite', jsonPath });
+    try {
+      // Open, and searching. Expansion is what was lost: the unaccented query no longer
+      // reaches the accented documents, which is the recall the map buys and the only
+      // thing its absence may cost.
+      expect(await hits(second, 'năm')).toEqual(expect.arrayContaining(['V1', 'V2']));
+      expect(await hits(second, 'nam')).toEqual(['EN']);
+    } finally {
+      await second.close();
+    }
   });
 });
 

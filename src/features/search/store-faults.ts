@@ -54,6 +54,10 @@ export function sidecarsOf(dbPath: string): string[] {
  * is the remedy. Before this, a truncated `search-index.json` was swallowed into `false`
  * and became an empty index that reported itself healthy — and, worse, the next shutdown
  * flush wrote that emptiness back over the file (#21).
+ *
+ * Not every unreadable store is a store to delete, which is what `repair` is for. A
+ * database that is intact but could not be migrated today is unreadable in the same sense
+ * and repairable in the opposite one: the fix is a restart, not a rebuild.
  */
 export class SearchIndexUnreadableError extends Error {
   readonly detail: string;
@@ -62,16 +66,27 @@ export class SearchIndexUnreadableError extends Error {
   constructor(
     readonly path: string,
     cause: unknown,
+    /**
+     * What a repair would have to delete, and the sentence that says so.
+     *
+     * Defaults to the artifact itself, which is the truncated-JSON case above. A fault
+     * whose remedy is NOT deletion passes `files: []`, and that empty list is load-bearing
+     * rather than tidy: `repairSearchIndex` deletes exactly the files a fault names, so it
+     * is the only thing standing between `zotero_index action:"build"` and a database the
+     * message beside it just called intact.
+     */
+    repair: { files?: string[]; message?: string } = {},
   ) {
     const detail = cause instanceof Error ? cause.message : String(cause);
     super(
-      `The search index at ${path} cannot be read — ${detail}. Every other tool still works: only search is ` +
-        'affected, because the index is a derived cache and nothing else reads it. Nothing will be written over ' +
-        'it in this state, so the file is exactly as you found it. ' +
-        repairAdvice([path]),
+      repair.message ??
+        `The search index at ${path} cannot be read — ${detail}. Every other tool still works: only search is ` +
+          'affected, because the index is a derived cache and nothing else reads it. Nothing will be written over ' +
+          'it in this state, so the file is exactly as you found it. ' +
+          repairAdvice([path]),
     );
     this.detail = detail;
-    this.files = [path];
+    this.files = repair.files ?? [path];
     this.name = 'SearchIndexUnreadableError';
   }
 }

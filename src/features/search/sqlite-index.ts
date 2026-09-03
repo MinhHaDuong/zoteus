@@ -415,7 +415,20 @@ export class SqliteSearchIndex extends SearchIndexBase {
       if (existed) await this.reconcileSchema();
       if (!this.db) this.openHandle();
       this.createSchema();
-      this.refreshAccentVariants();
+      // Derived state does not get to decide whether the index opens, which is the same
+      // rule `finalizeVectors` applies to the same scan on the build path. A vocabulary
+      // scan that fails for a transient reason — a full disk, a file limit — leaves the
+      // map as it was, or empty, and that costs unaccented queries their expansion and
+      // nothing else; letting it out of `open()` would reach the factory as an untyped
+      // throw, which the factory does not degrade, and take the whole server down over a
+      // cache one scan rebuilds. Corruption is deliberately not caught here: that is
+      // evidence about the file, and the catch below is what turns it into a sideline.
+      try {
+        this.refreshAccentVariants();
+      } catch (e) {
+        if (isCorruptionError(e)) throw e;
+        this.opts.logger?.warn(`accent variants not refreshed: ${e instanceof Error ? e.message : String(e)}`);
+      }
       this.prepareStatements();
       // `existed` deliberately still gates the import after a sideline: the legacy JSON
       // was already consumed by whichever build wrote the incompatible database, and
@@ -580,26 +593,35 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // factory degrades this into "search refuses, and says why" — the server survives,
       // nothing is written over the file, and the next open retries the ladder against an
       // untouched database.
-      const refusal = new SearchIndexUnreadableError(
-        this.file,
-        new Error(
-          `it is intact at schema version ${stored} but could not be upgraded to ` +
-            `${this.schemaVersion} (${failure instanceof Error ? failure.message : String(failure)})`,
-        ),
-      );
+      const reason = failure instanceof Error ? failure.message : String(failure);
       // The class's stock message ends in rebuild advice, and for THIS refusal that
       // advice is exactly wrong: a rebuild deletes an intact, fully-vectorized database
       // to cure a transient condition a restart cures for free. Say the right thing
       // instead — the refusal is the whole value of this path.
-      refusal.message =
-        `The search index at ${this.file} is intact at schema version ${stored} but could not be ` +
-        `upgraded to ${this.schemaVersion}: ${failure instanceof Error ? failure.message : String(failure)}. ` +
-        'The file was left untouched and nothing will be written over it. Search is unavailable until the ' +
-        'upgrade succeeds; every other tool still works. Fix the underlying condition (a full disk, a file ' +
-        'limit, another process holding the database) and restart the server — the upgrade then completes ' +
-        'in place, with nothing re-read from Zotero and no vectors re-computed. A rebuild is NOT needed ' +
-        'and would discard a usable index.';
-      throw refusal;
+      //
+      // And say it in the machinery as well as in the sentence, with an empty file list.
+      // `repairSearchIndex` deletes precisely the files a fault names, on an explicit
+      // `action:"build"` — which is the very call someone makes after reading that search
+      // is unavailable. Naming the database here would have unlinked an intact index over
+      // a full disk, sidelining by another road and without even the sideline's copy. A
+      // fault naming nothing is refused by the repair, which then repeats this message.
+      throw new SearchIndexUnreadableError(
+        this.file,
+        new Error(
+          `it is intact at schema version ${stored} but could not be upgraded to ${this.schemaVersion} (${reason})`,
+        ),
+        {
+          files: [],
+          message:
+            `The search index at ${this.file} is intact at schema version ${stored} but could not be ` +
+            `upgraded to ${this.schemaVersion}: ${reason}. ` +
+            'The file was left untouched and nothing will be written over it. Search is unavailable until the ' +
+            'upgrade succeeds; every other tool still works. Fix the underlying condition (a full disk, a file ' +
+            'limit, another process holding the database) and restart the server — the upgrade then completes ' +
+            'in place, with nothing re-read from Zotero and no vectors re-computed. A rebuild is NOT needed ' +
+            'and would discard a usable index.',
+        },
+      );
     }
     await this.sideline(stored, contents);
   }
