@@ -60,6 +60,11 @@ export interface ZoteusConfig {
    * exact cosine rescore of the candidates. False forces the exact scan of every vector.
    */
   indexAnn: boolean;
+  /**
+   * Unaccented keyword-query terms also match the dominant accented spellings
+   * (ZOTEUS_ACCENT_EXPANSION). False answers every query strictly as typed.
+   */
+  accentExpansion: boolean;
   /** Candidates the code stage hands that rescore, per vector hit asked for. */
   indexAnnOversample: number;
   /** Floor on that candidate set, so a small page still rescores a real neighbourhood. */
@@ -213,6 +218,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_ALLOW_ELECTRON_FULLTEXT: bool(false),
         ZOTEUS_INDEX_MAX_ITEMS: z.coerce.number().int().positive().default(DEFAULT_INDEX_MAX_ITEMS),
         ZOTEUS_INDEX_BACKEND: z.enum(['auto', 'sqlite', 'memory']).default('auto'),
+        // Query-side accent expansion: an unaccented keyword-search term also matches the
+        // accented spellings that dominate the library's vocabulary. On by default — it
+        // compensates the recall that keeping diacritics in the index removed for
+        // unaccented queries; false opts into strict as-typed exactness. Query-time only:
+        // flipping it never needs a rebuild.
+        ZOTEUS_ACCENT_EXPANSION: bool(true),
         ZOTEUS_INDEX_ANN: bool(true),
         ZOTEUS_INDEX_ANN_OVERSAMPLE: z.coerce.number().int().positive().default(DEFAULT_ANN_OVERSAMPLE),
         ZOTEUS_INDEX_ANN_MIN_CANDIDATES: z.coerce.number().int().positive().default(DEFAULT_ANN_MIN_CANDIDATES),
@@ -367,6 +378,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     indexMaxItems: parsed.ZOTEUS_INDEX_MAX_ITEMS,
     indexBackend: parsed.ZOTEUS_INDEX_BACKEND,
     indexAnn: parsed.ZOTEUS_INDEX_ANN,
+    accentExpansion: parsed.ZOTEUS_ACCENT_EXPANSION,
     indexAnnOversample: parsed.ZOTEUS_INDEX_ANN_OVERSAMPLE,
     indexAnnMinCandidates: parsed.ZOTEUS_INDEX_ANN_MIN_CANDIDATES,
     scholarProviders: parsed.ZOTEUS_SCHOLAR_PROVIDERS.split(',')

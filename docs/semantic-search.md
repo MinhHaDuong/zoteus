@@ -472,20 +472,88 @@ about 5.4 GB of heap to parse and OOMs stock Node. Measured on the same 7540-ite
 | JSON (`memory`) | 337 s | 5370 MB | 370-500 ms | re-parses the whole file |
 | SQLite (`sqlite`) | 46.6 s | 162 MB | 1-76 ms | opens the file |
 
-The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 2`,
+The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 0`,
 ranked with `bm25()`) and vectors as per-passage `BLOB`s, so a keyword search reads only
 the rows it ranks and never materializes the library. The semantic path used to be the one
 that grew with the library, because it read every vector; it now reads a binary code per
 vector instead and fetches the float32 vectors of a few hundred candidates. See
 [Two-stage vector search](#two-stage-vector-search).
 
-**Diacritics.** Searches are diacritics-insensitive in both directions and on both
-backends: `Bronte` finds `Brontë` and `Brontë` finds `Bronte`. The document side of the
-FTS5 index is folded by SQLite (`remove_diacritics 2`); the query side is folded in JS by
-`tokenize.ts`, which is also what the JSON backend tokenizes with, so the two agree by
-construction. The JS fold deliberately reproduces `unicode61` and no more — `ø œ æ ł đ ð
-þ ß` are letters to unicode61 rather than accented forms, so they are letters here too,
-and `søren` does not answer to `soren`.
+**Diacritics.** An unaccented search finds accented words: `Bronte` finds `Brontë`, and
+`theorie` finds `théorie`, on both backends. An accented search is answered exactly:
+`Brontë` finds documents that spell it `Brontë`.
+
+The index holds each word exactly as it was written — the FTS5 table is declared
+`remove_diacritics 0` and nothing strips marks on the way in. The tolerant direction is
+paid on the **query** side instead: an unaccented query term is expanded to the accented
+spellings the library's vocabulary actually holds (`theorie` runs as
+`theorie OR théorie`), through a small folded-form → spellings map each backend derives
+from its own vocabulary. Because nothing extra is indexed, document length, term
+frequency and idf are what the text says they are, and ranking is untouched for every
+query that needs no expansion.
+
+Expansion is optional (`ZOTEUS_ACCENT_EXPANSION`, on by default): it compensates the
+recall that keeping diacritics in the index removed for unaccented queries, and setting
+it to `false` opts into strict as-typed exactness — a query-time switch only, so flipping
+it never needs a rebuild.
+
+Expansion is **dominance-gated**: a term expands only when the accented spellings
+outweigh the typed one in this library (by document frequency, compared at derivation
+time). `theorie` expands because the library overwhelmingly writes `théorie`; `trong`
+does not, because the library holds it 25 771 times as typed and its accented siblings
+(`trọng`, `trồng`, …) are different, rarer words whose high idf would otherwise outrank
+what the user asked for. The gate is corpus-derived — there is no threshold to tune.
+
+It used to strip marks from everything on both sides, and that is a different thing from
+being insensitive to them. In a library holding more than one language it merges
+vocabulary rather than normalizing spelling: Vietnamese `án`, `bé`, `thể` and `thế` all
+land on English `an`, `be` and `the`, and a tone mark in Vietnamese is part of the word,
+not an accent on it — `ma má mà mả mã mạ` are six words. Once merged into a token that
+common, they could not be searched for at all.
+
+The remaining asymmetry is deliberate: an accented query does **not** find a document that
+spells the word without its accents. Expansion runs one way only, because expanding `thể`
+toward `the` is exactly the merge above.
+
+Marks are stripped (for the expansion map's keys) the way `unicode61` strips them and no
+further — `ø œ æ ł đ ð þ ß` are letters to it rather than accented forms, so they are
+letters here too, and `søren` does not answer to `soren`.
+
+**Common words.** A keyword query is answered by OR-ing its terms, so a term that occurs
+in most of the library costs a full posting-list walk and separates nothing. Zoteus used to
+handle that with 29 hard-coded English function words, dropped from every query and every
+document. That list is wrong for a multilingual library — German `die` and English `die`
+are one string in the index, so no list can drop one and keep the other — and it is a guess
+about frequency rather than a measurement of it: `energy` sits at 26% document frequency in
+one real library, higher than several words that were on the list.
+
+Zoteus now measures the library instead. At the end of a full build it scans the keyword
+index's own term vocabulary (`fts5vocab`, a view over the index — no new tables, no
+rebuild) and records the terms that appear in **30% or more** of the passages. That list is
+applied to queries only, never to documents, and it is stored in the index, so it costs
+nothing at query time and nothing at startup. On a 477 512-passage library it is 23 terms
+and 75 bytes, and deriving it costs one scan of 639 888 vocabulary terms — a couple of
+seconds against a build that takes minutes. A delta update does not redo it unless the
+passage count has moved by more than 10%, since a handful of new items cannot change a
+30% threshold.
+
+Two consequences worth knowing. A query in which **no term survives** the prune is sent
+unpruned: a measured list can hold the library's own subject words (`economics` reaches 35%
+of the English passages of one real library), so answering such a query with silence would
+look like an empty library. While any term survives, the survivors are what runs — they
+are, by measurement, the words this library can discriminate on, and the prune is never
+abandoned on their account. And an index built by an earlier version prunes nothing
+until its next build or update, at which point it adopts a list of its own; nothing is
+stranded and no rebuild is forced.
+
+**Where this sits relative to accent expansion.** Both run between tokenizing the query
+and building the MATCH string, and the order is: prune first, then expand the survivors.
+The droplist judges the terms you typed, because they are the question, and expansion then
+serves whatever the prune ruled worth running (including the raw set, when nothing
+survived). A term the prune dropped is never expanded, so it costs no vocabulary lookup
+and no accented posting list. A variant is not re-pruned, because it is another spelling
+of a surviving term rather than a query term of its own, and the dominance gate above
+already requires it to outweigh the spelling you typed.
 
 **Where the files are.** `<ZOTEUS_DATA_DIR>/search-index.sqlite` beside the older
 `search-index.json` (and `search-index-<userId>.*` per tenant in multi-tenant mode). SQLite

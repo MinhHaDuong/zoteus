@@ -343,12 +343,23 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
     await sqlite.close();
   });
 
-  sqliteIt('tokenizes the query exactly like the JSON backend, stopwords included', async () => {
+  sqliteIt('tokenizes the query exactly like the JSON backend, common words included', async () => {
     const { memory, sqlite } = await both();
-    // "of"/"the" are dropped by tokenize.ts, so a query made only of them matches nothing
-    // on either backend rather than erroring or returning everything.
+    // A query of nothing but common words matches nothing on either backend, rather than
+    // erroring or returning everything. The mechanism moved — the words are no longer
+    // dropped by tokenize(), they are pruned query-side and nothing survives the prune —
+    // but the answer is the same, and that it is the same on BOTH backends is the point.
+    // Note the fixture below does contain `for` and `and`, so this is not green for want
+    // of the words being present anywhere.
     expect(await sqlite.query('of the', { mode: 'keyword' })).toEqual([]);
     expect(await memory.query('of the', { mode: 'keyword' })).toEqual([]);
+    // The case the assertion above stood in for and could not reach: a common word that
+    // IS in this fixture. Three items is far below the corpus size a document frequency
+    // needs to mean anything, so nothing is pruned here and both backends answer on the
+    // words as typed — identically, which is the claim this test makes.
+    const s2 = await sqlite.query('for and', { mode: 'keyword' });
+    const m2 = await memory.query('for and', { mode: 'keyword' });
+    expect(s2.map((h) => h.itemKey).sort()).toEqual(m2.map((h) => h.itemKey).sort());
     // Punctuation is not FTS5 syntax here: every term is quoted before it is OR-ed.
     const hits = await sqlite.query('"gardening" OR (tomatoes*)', { limit: 3, mode: 'keyword' });
     expect(hits[0]!.itemKey).toBe('B');
@@ -365,12 +376,14 @@ describe('the SQLite backend answers the same queries as the JSON one', () => {
     await memory.build(accented);
 
     for (const index of [sqlite, memory]) {
-      // Unaccented query, accented document: what remove_diacritics 2 buys on the FTS5
-      // side, and what tokenize.ts's fold now buys on the JSON side.
+      // Unaccented query, accented document: bought on both backends by expanding the
+      // query to the accented spellings the vocabulary holds (see accent-folding.test.ts).
       expect((await index.query('Bronte', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
       expect((await index.query('etude naivete', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
-      // And the other direction, which is the one that used to fail: an accented query
-      // reached MATCH as fragments of itself. See accent-folding.test.ts.
+      // Accented query, accented document: answered exactly, on the letters typed. This
+      // used to fail differently — an accented query reached MATCH as fragments of itself.
+      // What it must NOT do is reach an unaccented document; that case is asserted in
+      // accent-folding.test.ts, where the contrasting document exists to catch it.
       expect((await index.query('Brontë', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
       expect((await index.query('Étude naïveté', { mode: 'keyword' }))[0]?.itemKey).toBe('X');
     }

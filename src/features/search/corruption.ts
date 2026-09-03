@@ -1,5 +1,5 @@
 import { SearchIndexBase } from './index-manager.js';
-import { SearchIndexCorruptError, UNREADABLE } from './store-faults.js';
+import { SearchIndexCorruptError, SearchIndexUnreadableError, UNREADABLE } from './store-faults.js';
 import type {
   IndexCounts,
   IndexBuildStatus,
@@ -41,7 +41,7 @@ export class CorruptSearchIndex extends SearchIndexBase {
   /** No store to delete from, and never a delta: see `updateBlocker`. */
   readonly supportsDelete = false;
 
-  constructor(readonly failure: SearchIndexCorruptError, opts: SearchIndexOptions) {
+  constructor(readonly failure: SearchIndexCorruptError | SearchIndexUnreadableError, opts: SearchIndexOptions) {
     super(opts);
     // The channel the store already uses to explain what opening it did or refused to do,
     // so this reaches `status().storageNotice` and `statusSummary` the same way a refused
