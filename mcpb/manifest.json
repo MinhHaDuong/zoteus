@@ -29,6 +29,7 @@
         "ZOTEUS_LOCAL": "${user_config.local}",
         "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}",
         "ZOTEUS_EMBEDDING_MODEL": "${user_config.embedding_model}",
+        "ZOTEUS_EMBEDDING_DTYPE": "${user_config.embedding_dtype}",
         "ZOTEUS_EMBED_BATCH_SIZE": "${user_config.embed_batch_size}",
         "ZOTEUS_EMBED_BATCH_DELAY_MS": "${user_config.embed_batch_delay_ms}",
         "ZOTEUS_TRANSFORMERS_PATH": "${user_config.transformers_path}",
@@ -65,6 +66,12 @@
       "type": "string",
       "title": "Embedding model",
       "description": "Model used by the provider selected above, local included: Xenova/all-MiniLM-L6-v2 for local, text-embedding-3-small for openai, text-embedding-004 for gemini. For local embeddings this is any transformers.js feature-extraction model, which is how a German or otherwise multilingual library gets an embedder trained for it: Xenova/multilingual-e5-small (same 384 dimensions, weights downloaded once into the data directory, E5 query/passage prefixes applied for you). Vectors from two models are not comparable, so the index is dropped (with a notice) and has to be rebuilt after you change this. Leave empty to use the provider's own default.",
+      "required": false
+    },
+    "embedding_dtype": {
+      "type": "string",
+      "title": "Local embedding precision",
+      "description": "Weight precision the on-device model loads at. Leave empty for fp32, the full-precision weights, which is what every index built so far holds. q8 loads the quantized file instead: Xenova/multilingual-e5-small downloads at 129 MB rather than 465 MB, which is what makes local multilingual search practical on a machine with a few gigabytes of RAM. This names a file the model's repository has to publish, not a conversion performed here: the Xenova mirrors publish the quantized variants, a model's own repository often publishes fp32 only, and asking for one that does not exist fails at load rather than falling back. Above fp32 the precision is part of the stored embedder identity, so the index is dropped (with a notice) and has to be rebuilt after you change this. Ignored when the provider above is openai or gemini.",
       "required": false
     },
     "embed_batch_size": {

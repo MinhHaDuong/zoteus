@@ -726,10 +726,12 @@ The default is English-centric, which is the whole reason the knob exists. It wa
 English sentence pairs, and on a mixed-language library it ranks by *language* before topic: a
 German question puts every German passage above the English paper that actually answers it.
 
-| Model | Dimensions | Downloaded once | Languages | Input prefixes |
+| Model | Dimensions | Downloaded once (fp32 / q8) | Languages | Input prefixes |
 |---|---|---|---|---|
-| `Xenova/all-MiniLM-L6-v2` (default) | 384 | ~90 MB | English | none |
-| `Xenova/multilingual-e5-small` | 384 | ~470 MB | ~100, German included | `query: ` / `passage: `, applied for you |
+| `Xenova/all-MiniLM-L6-v2` (default) | 384 | 87 MB / 23 MB | English | none |
+| `Xenova/multilingual-e5-small` | 384 | 465 MB / 129 MB | ~100, German included | `query: ` / `passage: `, applied for you |
+
+The second size is what [`ZOTEUS_EMBEDDING_DTYPE`](#choosing-a-precision) fetches instead.
 
 Measured on a 12-passage German/English corpus with four German questions (the script is in
 the [#43](https://github.com/oscardvs/zoteus/issues/43) thread): both models put the German
@@ -753,11 +755,61 @@ dropped with a notice, and one `zotero_index action:"build"` re-embeds the libra
 [Changing the model means rebuilding the index](#tuning-api-embeddings) below.
 
 The weights are downloaded once into `<ZOTEUS_DATA_DIR>/models/<org>/<model>`, so deleting the
-data directory still removes them along with the index. The sizes above are what
-`@huggingface/transformers` 4.2.0 fetches by default (the full-precision ONNX weights);
-smaller quantized variants exist on the Hub, but Zoteus does not select one, because a dtype
-does not show up in the embedder identity and a silently re-quantized index is worse than a
-large download.
+data directory still removes them along with the index.
+
+### Choosing a precision
+
+`ZOTEUS_EMBEDDING_DTYPE` picks which of a repository's published weight files the on-device
+pipeline loads. Unset means `fp32`, the full-precision ONNX graph, which is what
+`@huggingface/transformers` 4.2.0 fetches on CPU and therefore what every local index built
+before this setting existed holds.
+
+```bash
+ZOTEUS_EMBEDDINGS=local
+ZOTEUS_EMBEDDING_MODEL=Xenova/multilingual-e5-small
+ZOTEUS_EMBEDDING_DTYPE=q8
+```
+
+That is the multilingual model at **129 MB instead of 465 MB** on disk, which is the
+difference between comfortable and marginal on a machine where the OS, a browser and a Linux
+container share a few gigabytes (#43: a ChromeOS/Crostini student setup is the case this was
+asked for). The ONNX graph itself is 113 MB against 449 MB; the remaining 16 MB is the
+sentencepiece tokenizer, which is the same file at either precision. `q8` is the useful one;
+`fp16`, `int8`, `uint8`, `q4`, `q4f16`, `q2`, `q2f16`, `q1`, `q1f16` and `bnb4` are accepted
+because a repository can publish any of them.
+
+**A dtype is a file, not a conversion.** `q8` asks the repository for
+`onnx/model_quantized.onnx`. The `Xenova/` mirrors publish the whole suffixed set; a model's
+own repository frequently publishes the plain fp32 graph alone, so
+`intfloat/multilingual-e5-small` has no `q8` to load while `Xenova/multilingual-e5-small`
+does. Asking for a variant that was never uploaded fails at load with a message naming the
+setting, the model and the mirrors that do serve it, rather than silently falling back to a
+precision you did not choose.
+
+**Quantization is a quality decision, and the answer is model-specific.** The benchmark in
+[#43](https://github.com/oscardvs/zoteus/issues/43) put six multilingual ONNX models through
+a cross-lingual probe with negative controls: the E5 family was the only one whose controls
+stayed clean at *every* quantization level, and `multilingual-e5-small`'s hit@10 moved by
+0.12 or less per lane between fp32 and 8-bit. The same probe found `granite-97m` respectable
+at fp32 and collapsing to 0.00–0.25 on several lanes at 8-bit. So `q8` is close to free on
+the model this table recommends, and that is a fact about E5, not about quantization.
+
+The 14-passage German/English probe used above agrees, for whatever four questions are worth:
+`multilingual-e5-small` ranks the German passage that answers each question **first at both
+precisions**, and ranks its English twin 2.0th on average at fp32 against 2.5th at `q8` (one
+question's twin moved from rank 2 to rank 4; the other three did not move). MiniLM ranks that
+twin 9.5th. The precision costs a fraction of what the model choice buys.
+
+**A precision change means one rebuild**, on exactly the mechanism a model change uses. Above
+`fp32` the dtype joins the stored embedder identity, so `Xenova/multilingual-e5-small` at
+`q8` stamps `local:Xenova/multilingual-e5-small@q8` and can never be confused with the fp32
+index of the same model: the old vectors are dropped with a notice and one
+`zotero_index action:"build"` re-embeds. `fp32` stays unsuffixed so that no existing index is
+declared stale by the arrival of this setting.
+
+`ZOTEUS_EMBEDDING_DTYPE` is on-device only. An API provider returns vectors computed on its
+own hardware at whatever precision it runs, so setting this under `ZOTEUS_EMBEDDINGS=openai`
+or `gemini` logs that it is ignored rather than implying a choice Zoteus cannot make.
 
 ### Tuning API embeddings
 
@@ -767,6 +819,7 @@ behaviour:
 | Variable | Default | What it changes |
 |---|---|---|
 | `ZOTEUS_EMBEDDING_MODEL` | provider default | The model the active provider embeds with: `text-embedding-3-small` (openai), `text-embedding-004` (gemini), `Xenova/all-MiniLM-L6-v2` (local, see [Choosing a local model](#choosing-a-local-model)). |
+| `ZOTEUS_EMBEDDING_DTYPE` | `fp32` | Weight precision of the **local** model, e.g. `q8` for a quarter-size download (see [Choosing a precision](#choosing-a-precision)). Ignored by the API providers. |
 | `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call — one API request, or one local pipeline call. |
 | `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop; a positive value sleeps. |
 | `ZOTEUS_EMBED_MAX_RETRIES` | `5` | Retries a rate-limited (`429`), timed-out or `5xx` embedding request gets before the build gives up. `0` restores the old behaviour, where one transient failure ended the job. |

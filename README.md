@@ -83,6 +83,7 @@ Zoteus detects a running Zotero desktop app and talks to it directly: the key-fr
 | `ZOTEUS_LOCAL_API_KEY` | none | Pre-provision the Zotero 10+ desktop write key (else granted once, in-app) |
 | `ZOTEUS_EMBEDDINGS` | `local` | `local\|openai\|gemini\|off` for semantic search |
 | `ZOTEUS_EMBEDDING_MODEL` | provider default | The model that provider embeds with, `local` included: `Xenova/multilingual-e5-small` for a German or otherwise multilingual library, `Xenova/all-MiniLM-L6-v2` by default |
+| `ZOTEUS_EMBEDDING_DTYPE` | `fp32` | Weight precision of the on-device model: `q8` downloads `Xenova/multilingual-e5-small` at 129 MB instead of 465 MB. Above `fp32` it joins the embedder identity, so changing it needs one rebuild |
 | `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call. Lower it if an API provider rejects a whole request (OpenAI answers `400` above 300K tokens per request) |
 | `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between embedding calls. Raise it if an API provider rate-limits a large build: `256` and `8000` together hold a full-text build near 400K tokens/min |
 | `ZOTEUS_INDEX_OWN_WORDS` | `true` | Index your own child notes and PDF annotations as searchable passages |

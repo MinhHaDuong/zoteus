@@ -8,6 +8,7 @@ import {
   DEFAULT_EMBED_MAX_RETRIES,
   DEFAULT_INDEX_MAX_ITEMS,
 } from './features/search/limits.js';
+import { EMBEDDING_DTYPES, type EmbeddingDtype } from './features/search/embeddings.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
@@ -23,6 +24,8 @@ export interface ZoteusConfig {
   embeddingModel?: string;
   /** Whether embedding inputs carry E5's `query: `/`passage: ` markers (see embeddings.ts). */
   embeddingPrefixes: 'auto' | 'off' | 'e5';
+  /** Weight precision the local model loads at; part of the embedder identity above fp32. */
+  embeddingDtype: EmbeddingDtype;
   /** Passages per embedding call (unset = DEFAULT_EMBED_BATCH_SIZE where one is batched). */
   embedBatchSize?: number;
   /** Pause between embedding batches in ms; 0 only yields to the event loop. */
@@ -185,6 +188,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_EMBEDDINGS: z.enum(['local', 'openai', 'gemini', 'off']).default('local'),
         ZOTEUS_EMBEDDING_MODEL: z.string().min(1).optional(),
         ZOTEUS_EMBEDDING_PREFIXES: z.enum(['auto', 'off', 'e5']).default('auto'),
+        // Local only: an API provider's precision is decided on the provider's hardware.
+        ZOTEUS_EMBEDDING_DTYPE: z.enum(EMBEDDING_DTYPES).default('fp32'),
         ZOTEUS_EMBED_BATCH_SIZE: z.coerce.number().int().positive().optional(),
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
         // 0 restores the pre-#48 behaviour: one 429 ends the build. Nobody should want
@@ -344,6 +349,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     );
   }
 
+  // A precision is a file the local pipeline downloads. An API provider returns vectors
+  // computed on someone else's hardware at whatever precision they run, so the variable is
+  // not merely unused there, it is a promise Zoteus cannot keep: say so rather than let it
+  // read as an accepted setting.
+  if (
+    parsed.ZOTEUS_EMBEDDINGS !== 'local' &&
+    env.ZOTEUS_EMBEDDING_DTYPE !== undefined &&
+    !isUnset(env.ZOTEUS_EMBEDDING_DTYPE)
+  ) {
+    warnings.push(
+      `ZOTEUS_EMBEDDING_DTYPE applies to on-device embeddings only and is ignored under ` +
+        `ZOTEUS_EMBEDDINGS=${parsed.ZOTEUS_EMBEDDINGS}; an API provider chooses its own precision`,
+    );
+  }
+
   const allowedHosts = (parsed.ZOTEUS_ALLOWED_HOSTS ?? '')
     .split(',')
     .map((s) => s.trim())
@@ -360,6 +380,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     embeddings: parsed.ZOTEUS_EMBEDDINGS,
     embeddingModel: parsed.ZOTEUS_EMBEDDING_MODEL?.trim() || undefined,
     embeddingPrefixes: parsed.ZOTEUS_EMBEDDING_PREFIXES,
+    embeddingDtype: parsed.ZOTEUS_EMBEDDING_DTYPE,
     embedBatchSize: parsed.ZOTEUS_EMBED_BATCH_SIZE,
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
     embedMaxRetries: parsed.ZOTEUS_EMBED_MAX_RETRIES,
