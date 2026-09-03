@@ -2,7 +2,12 @@ import { z } from 'zod';
 import { defaultDataDir, defaultZoteroDataDir } from './lib/paths.js';
 import { isUnset, looksUnexpanded } from './lib/env.js';
 import { DEFAULT_FULLTEXT_MAX_CHARS } from './features/search/fulltext-source.js';
-import { DEFAULT_ANN_MIN_CANDIDATES, DEFAULT_ANN_OVERSAMPLE, DEFAULT_INDEX_MAX_ITEMS } from './features/search/limits.js';
+import {
+  DEFAULT_ANN_MIN_CANDIDATES,
+  DEFAULT_ANN_OVERSAMPLE,
+  DEFAULT_EMBED_MAX_RETRIES,
+  DEFAULT_INDEX_MAX_ITEMS,
+} from './features/search/limits.js';
 
 export interface ZoteusConfig {
   apiKey?: string;
@@ -20,6 +25,8 @@ export interface ZoteusConfig {
   embedBatchSize?: number;
   /** Pause between embedding batches in ms; 0 only yields to the event loop. */
   embedBatchDelayMs: number;
+  /** Retries a rate-limited or 5xx embedding request gets before the build gives up. */
+  embedMaxRetries: number;
   /** Where to resolve @huggingface/transformers from when the install cannot see it itself. */
   transformersPath?: string;
   /** Index attachment full text (PDF bodies) alongside metadata. Opt-in: it is costly. */
@@ -177,6 +184,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_EMBEDDING_MODEL: z.string().min(1).optional(),
         ZOTEUS_EMBED_BATCH_SIZE: z.coerce.number().int().positive().optional(),
         ZOTEUS_EMBED_BATCH_DELAY_MS: z.coerce.number().int().nonnegative().default(0),
+        // 0 restores the pre-#48 behaviour: one 429 ends the build. Nobody should want
+        // that, but a knob that cannot be turned off is a knob nobody can rule out.
+        ZOTEUS_EMBED_MAX_RETRIES: z.coerce
+          .number()
+          .int()
+          .nonnegative()
+          .default(DEFAULT_EMBED_MAX_RETRIES),
         ZOTEUS_TRANSFORMERS_PATH: z.string().min(1).optional(),
         ZOTEUS_INDEX_FULLTEXT: bool(false),
         // On by default, unlike full text: the whole corpus is one paged crawl of text the
@@ -329,6 +343,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     embeddingModel: parsed.ZOTEUS_EMBEDDING_MODEL?.trim() || undefined,
     embedBatchSize: parsed.ZOTEUS_EMBED_BATCH_SIZE,
     embedBatchDelayMs: parsed.ZOTEUS_EMBED_BATCH_DELAY_MS,
+    embedMaxRetries: parsed.ZOTEUS_EMBED_MAX_RETRIES,
     transformersPath: parsed.ZOTEUS_TRANSFORMERS_PATH?.trim() || undefined,
     indexFulltext: parsed.ZOTEUS_INDEX_FULLTEXT,
     indexOwnWords: parsed.ZOTEUS_INDEX_OWN_WORDS,

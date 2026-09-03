@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ZoteusConfig } from '../../config.js';
 import type { Logger } from '../../lib/logger.js';
-import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
+import { DEFAULT_EMBED_BATCH_SIZE, DEFAULT_EMBED_MAX_RETRIES } from './limits.js';
 
 export interface EmbeddingProvider {
   readonly name: string;
@@ -41,6 +41,88 @@ export function batchPause(delayMs = 0): Promise<void> {
     else setImmediate(resolve);
   });
 }
+
+/** First wait, doubled per attempt: 1s, 2s, 4s, 8s, 16s. */
+export const EMBED_RETRY_BASE_MS = 1_000;
+
+/**
+ * Ceiling on ONE wait, honoured Retry-After included. A provider asking for longer than a
+ * minute is asking the build to sit idle for longer than it takes to notice something is
+ * wrong; the retry budget below is what decides whether to keep trying at all.
+ */
+export const EMBED_RETRY_MAX_WAIT_MS = 60_000;
+
+/**
+ * Ceiling on the TOTAL time one request may spend waiting across all its retries. Bounds
+ * the pathological case the per-wait cap does not: a provider that answers every attempt
+ * with a large Retry-After would otherwise stall a build for as long as it liked.
+ */
+export const EMBED_RETRY_TOTAL_MS = 180_000;
+
+/**
+ * Whether an HTTP status is worth trying again.
+ *
+ * 429 is the one this exists for. 5xx joins it because a gateway hiccup is no more the
+ * build's fault than a rate limit is, and 408 because a request timeout is the same event
+ * seen from the other end.
+ *
+ * 400 is deliberately absent, and that omission is load-bearing: OpenAI answers 400 when a
+ * request carries more tokens than it accepts, which is a batch that will be exactly as
+ * oversized on every retry. Retrying it would turn an instant, actionable failure ("lower
+ * ZOTEUS_EMBED_BATCH_SIZE") into a slow one. So are 401 and 403: a bad key does not heal.
+ */
+export function retryableEmbedStatus(status: number): boolean {
+  return status === 429 || status === 408 || status >= 500;
+}
+
+/**
+ * `Retry-After` in milliseconds, in either form the header is allowed to take: a count of
+ * seconds, or an HTTP date. Undefined when the header is absent or unparseable, which
+ * leaves the caller on its own exponential schedule rather than on a wait of zero.
+ */
+export function parseRetryAfter(header: string | null | undefined, now = Date.now()): number | undefined {
+  const raw = header?.trim();
+  if (!raw) return undefined;
+  if (/^\d+$/.test(raw)) return Number(raw) * 1000;
+  const at = Date.parse(raw);
+  if (Number.isNaN(at)) return undefined;
+  return Math.max(0, at - now);
+}
+
+/**
+ * How long to wait before retry number `attempt` (1-based).
+ *
+ * Exponential from {@link EMBED_RETRY_BASE_MS}, plus up to 25% jitter so a build that hit
+ * the limit on several concurrent requests does not send them all back at the same
+ * instant. A server-supplied `Retry-After` replaces the exponential term outright, because
+ * the server knows when its window reopens and this side is guessing; the jitter is still
+ * added on top, and the per-wait cap still applies to both.
+ */
+export function embedBackoffMs(attempt: number, retryAfterMs?: number, random: () => number = Math.random): number {
+  const base = retryAfterMs ?? EMBED_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1);
+  const capped = Math.min(base, EMBED_RETRY_MAX_WAIT_MS);
+  return Math.round(capped * (1 + 0.25 * random()));
+}
+
+/** How a wait reads in a log line: seconds, to one decimal, because that is the unit people wait in. */
+function seconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * The numbers a user staring at a 429 needs, and the two variables that produce them.
+ *
+ * Verbatim from #48, where a 10,428-item library rode exactly at OpenAI's Tier 2 ceiling of
+ * 1M tokens/min with the default batching and 429'd on six consecutive builds, and these
+ * settings then carried the same library through in one uninterrupted 45-minute run. A
+ * concrete pair of numbers that is known to have worked is worth more here than advice to
+ * "lower the batch size", which is what the docs already said and what the reporter could
+ * not find.
+ */
+export const RATE_LIMIT_HINT =
+  'If it keeps happening, pace the build: ZOTEUS_EMBED_BATCH_SIZE=256 with ' +
+  'ZOTEUS_EMBED_BATCH_DELAY_MS=8000 holds a large full-text build at roughly 400k tokens/min, ' +
+  "comfortably under OpenAI's 1M tokens/min Tier 2 limit.";
 
 const DIM = 64;
 
@@ -275,6 +357,12 @@ export interface ApiEmbeddingOptions {
   batchSize?: number;
   /** Pause between requests in ms (see batchPause). */
   batchDelayMs?: number;
+  /** Retries a rate-limited or 5xx request gets (see DEFAULT_EMBED_MAX_RETRIES). */
+  maxRetries?: number;
+  /** Where the backoff announces itself; without one the waits are silent. */
+  logger?: Logger;
+  /** Injectable jitter source (tests). Defaults to Math.random. */
+  random?: () => number;
 }
 
 /** OpenAI/Gemini embeddings (opt-in; data leaves the machine). */
@@ -302,15 +390,69 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
     return out;
   }
 
+  /**
+   * One request, retried through the backoff both providers share.
+   *
+   * `send` is called afresh per attempt (a Response body is consumed once, and a retry is a
+   * new request, not a replayed one). Everything about *when* to try again lives here, so
+   * the two provider bodies below stay a URL, a header and a payload shape.
+   *
+   * What is NOT retried is as deliberate as what is: see `retryableEmbedStatus`. A network
+   * error is, because a dropped connection mid-build is the same transient event as a 503
+   * and the alternative is losing an hours-long build to one flaky second.
+   */
+  private async request(label: string, send: () => Promise<Response>): Promise<Response> {
+    const retries = Math.max(0, this.opts.maxRetries ?? DEFAULT_EMBED_MAX_RETRIES);
+    const random = this.opts.random ?? Math.random;
+    let waited = 0;
+    for (let attempt = 1; ; attempt++) {
+      let res: Response | undefined;
+      let networkError: unknown;
+      try {
+        res = await send();
+        if (res.ok) return res;
+      } catch (e) {
+        networkError = e;
+      }
+      const status = res?.status;
+      const fatal = res !== undefined && !retryableEmbedStatus(res.status);
+      const wait = embedBackoffMs(attempt, parseRetryAfter(res?.headers.get('retry-after')), random);
+      const spent = waited + wait;
+      if (fatal || attempt > retries || spent > EMBED_RETRY_TOTAL_MS) {
+        if (networkError) throw networkError;
+        // The same first sentence this has always thrown, so the one-line embedder label
+        // ("openai requested; OpenAI embeddings failed (429)") reads exactly as before and
+        // anything matching on it keeps working. The remedy is a second sentence.
+        const gaveUp = attempt > 1 ? ` Gave up after ${attempt} attempts over ${seconds(waited)}.` : '';
+        const advice = status === 429 ? ` ${RATE_LIMIT_HINT}` : '';
+        throw new Error(`${label} embeddings failed (${status}).${gaveUp}${advice}`);
+      }
+      // Info rather than warn: a wait that the build then recovers from is progress being
+      // reported, not a problem. It has to be visible all the same, because from the
+      // outside an embedding pass that pauses for 16 seconds is indistinguishable from one
+      // that has hung.
+      const cause = networkError
+        ? `could not be reached (${networkError instanceof Error ? networkError.message : String(networkError)})`
+        : `answered ${status}`;
+      const hint = status === 429 && attempt === 1 ? ` ${RATE_LIMIT_HINT}` : '';
+      this.opts.logger?.info(
+        `${label} ${cause}; waiting ${seconds(wait)} before retry ${attempt} of ${retries}.${hint}`,
+      );
+      await batchPause(wait);
+      waited = spent;
+    }
+  }
+
   /** One request. Providers reject an oversized batch whole, hence the caller's batching. */
   private async embedBatch(texts: string[]): Promise<number[][]> {
     if (this.kind === 'openai') {
-      const res = await fetch('https://api.openai.com/v1/embeddings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify({ model: this.model, input: texts }),
-      });
-      if (!res.ok) throw new Error(`OpenAI embeddings failed (${res.status}).`);
+      const res = await this.request('OpenAI', () =>
+        fetch('https://api.openai.com/v1/embeddings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
+          body: JSON.stringify({ model: this.model, input: texts }),
+        }),
+      );
       const json = (await res.json()) as any;
       return json.data.map((d: any) => d.embedding);
     }
@@ -318,17 +460,15 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
     // the part of a request that gets logged — by proxies, by error causes, by anything
     // that prints which endpoint failed — and Google accepts x-goog-api-key everywhere
     // ?key= works.
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${this.model}:batchEmbedContents`,
-      {
+    const res = await this.request('Gemini', () =>
+      fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.model}:batchEmbedContents`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': this.apiKey },
         body: JSON.stringify({
           requests: texts.map((t) => ({ model: `models/${this.model}`, content: { parts: [{ text: t }] } })),
         }),
-      },
+      }),
     );
-    if (!res.ok) throw new Error(`Gemini embeddings failed (${res.status}).`);
     const json = (await res.json()) as any;
     return json.embeddings.map((e: any) => e.values);
   }
@@ -359,6 +499,8 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
     model: config.embeddingModel,
     batchSize: config.embedBatchSize,
     batchDelayMs: config.embedBatchDelayMs,
+    maxRetries: config.embedMaxRetries,
+    ...(logger ? { logger } : {}),
   };
   switch (config.embeddings) {
     case 'off':
