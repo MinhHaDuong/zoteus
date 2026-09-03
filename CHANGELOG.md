@@ -69,7 +69,7 @@ All notable changes to Zoteus are documented here. The format is based on
   above `fp32` does and for a sharper reason: two poolings of one model are as different a
   vector space as two models are, and unlike two models they share a dimension, so the width
   check that catches a foreign vector cannot see this one. `local:<model>#cls` is what the
-  six `cls` model families in the table now stamp, over eleven ids counting each mirror.
+  ten `cls` model families in the table now stamp, over seventeen ids counting each mirror.
 
   Every model the table pools the default way keeps the identity it always had, the default
   model included, so an index built with one of those is untouched. The exception is an index

@@ -767,7 +767,7 @@ read at load time either: it is published in `1_Pooling/config.json` on the mode
 repository, which the ONNX mirrors the pipeline loads (`Xenova/*`, `onnx-community/*`) do not
 republish. So Zoteus carries a curated table (`MODEL_POOLING` in `embeddings.ts`, each row naming
 the repository its value was read from): `mean` for MiniLM, the E5 family and the
-paraphrase-multilingual models, `cls` for the granite, gte, arctic-embed and bge-m3 models, and
+paraphrase-multilingual models, `cls` for the granite, gte, arctic-embed, bge and mxbai models, and
 `mean` for any model the table does not list, which is exactly what every model got before the
 table existed. The table is a record of what each model was trained with, not a list of models
 this project recommends: naming one there says its pooling was read, nothing more.

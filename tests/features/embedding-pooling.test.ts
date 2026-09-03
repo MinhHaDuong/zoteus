@@ -63,6 +63,23 @@ describe('the pooling table', () => {
     }
   });
 
+  it('lists the models issue #51 named as the live exposure, English-only and cls-pooled', () => {
+    // BAAI/bge-small and -base, mxbai-embed-large and arctic-embed-s: the models #51 flagged
+    // as reachable now that a model can be named at all, verified against each source
+    // repository's own 1_Pooling/config.json. mxbai and arctic-embed-s publish their own ONNX
+    // graph, so each has one id rather than a mirror pair.
+    for (const id of [
+      'Xenova/bge-small-en-v1.5',
+      'BAAI/bge-small-en-v1.5',
+      'Xenova/bge-base-en-v1.5',
+      'BAAI/bge-base-en-v1.5',
+      'mixedbread-ai/mxbai-embed-large-v1',
+      'Snowflake/snowflake-arctic-embed-s',
+    ]) {
+      expect(poolingFor(id), id).toBe('cls');
+    }
+  });
+
   it('keeps the historical mean for a model it does not know, rather than refusing it', () => {
     expect(MODEL_POOLING['some-org/a-model-published-yesterday']).toBeUndefined();
     expect(poolingFor('some-org/a-model-published-yesterday')).toBe('mean');

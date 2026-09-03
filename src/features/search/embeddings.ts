@@ -208,6 +208,20 @@ export const MODEL_POOLING: Readonly<Record<string, PoolingMode>> = {
   'onnx-community/bge-m3-ONNX': 'cls',
   'Xenova/bge-m3': 'cls',
   'BAAI/bge-m3': 'cls',
+  // BAAI/bge-small-en-v1.5 and -base-en-v1.5: pooling_mode_cls_token true, every other mode
+  // false, on each. English only -- named in issue #51 as the live exposure once a model
+  // could be named at all.
+  'Xenova/bge-small-en-v1.5': 'cls',
+  'BAAI/bge-small-en-v1.5': 'cls',
+  'Xenova/bge-base-en-v1.5': 'cls',
+  'BAAI/bge-base-en-v1.5': 'cls',
+  // mixedbread-ai/mxbai-embed-large-v1: pooling_mode_cls_token true, every other mode false.
+  // Publishes its own ONNX graph, the way Snowflake does, so there is one id rather than a
+  // mirror pair.
+  'mixedbread-ai/mxbai-embed-large-v1': 'cls',
+  // Snowflake/snowflake-arctic-embed-s: pooling_mode_cls_token true, every other mode false,
+  // read the same way as the m/l checkpoints above.
+  'Snowflake/snowflake-arctic-embed-s': 'cls',
 };
 
 /**
