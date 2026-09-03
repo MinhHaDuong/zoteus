@@ -63,17 +63,22 @@ All notable changes to Zoteus are documented here. The format is based on
   default model's vectors were byte-compared before and after. `ZOTEUS_EMBEDDING_POOLING`
   (`auto`, `mean`, `cls`) is the escape hatch for a mirrored or renamed checkpoint the table
   cannot speak for, in the same position `ZOTEUS_EMBEDDING_PREFIXES` occupies for the
-  prefixes, and with the same warning: set wrong, it degrades retrieval silently.
+  prefixes.
 
   A pooling that is not the default **joins the embedder identity**, exactly as a precision
   above `fp32` does and for a sharper reason: two poolings of one model are as different a
   vector space as two models are, and unlike two models they share a dimension, so the width
   check that catches a foreign vector cannot see this one. `local:<model>#cls` is what the
-  nine `cls` models now stamp. Every mean-pooled model, the default included, keeps the
-  identity it always had, so no index built before this release is disturbed. An index built
-  with one of those models under 1.13.0, which is the only window in which that was possible,
-  is dropped with the notice the server already emits instead of being left to this
-  paragraph.
+  six `cls` model families in the table now stamp, over eleven ids counting each mirror.
+
+  Every model the table pools the default way keeps the identity it always had, the default
+  model included, so an index built with one of those is untouched. The exception is an index
+  built with one of the `cls` models under 1.13.0, the only window in which that was possible:
+  it holds mean-pooled vectors under an identity without the suffix, so it is dropped with the
+  notice the server already emits and one `zotero_index action:"build"` re-embeds it.
+  `ZOTEUS_EMBEDDING_POOLING=mean` reproduces the old identity for anyone who would rather
+  defer that. Setting the override is therefore not free either: it makes a different vector
+  space and costs the vectors that were there.
 
 ## [1.13.0] - 2026-09-03
 

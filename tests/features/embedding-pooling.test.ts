@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../../src/config.js';
+import { MemorySearchIndex } from '../../src/features/search/index-manager.js';
 import {
   DEFAULT_LOCAL_MODEL,
   DEFAULT_POOLING,
@@ -265,5 +266,77 @@ describe('ZOTEUS_EMBEDDING_POOLING as a setting', () => {
     expect(local.warnings.join(' ')).not.toMatch(/ZOTEUS_EMBEDDING_POOLING/);
     const unset = loadConfig({ ZOTEUS_EMBEDDINGS: 'openai' } as any);
     expect(unset.warnings.join(' ')).not.toMatch(/ZOTEUS_EMBEDDING_POOLING/);
+  });
+});
+
+describe('what the identity is for', () => {
+  // Asserting the string is not asserting the behaviour. These drive the real index
+  // through the path the suffix exists to trigger: vectors built under one pooling,
+  // reopened under the other. With the suffix removed from embedderIdentity they pass
+  // silently, which is the defect this whole change is about.
+  const CLS_MODEL = 'onnx-community/gte-multilingual-base';
+
+  const items = [
+    { key: 'A', title: 'transformers for retrieval', abstractNote: 'dense passage retrieval' },
+    { key: 'B', title: 'a history of typography', abstractNote: 'movable type in Europe' },
+  ] as any[];
+
+  // A stand-in for the local provider: it is the identity fields that matter here, not
+  // the arithmetic, and a real model would make this a network test.
+  function embedder(pooling: 'mean' | 'cls') {
+    return {
+      name: 'local',
+      model: CLS_MODEL,
+      pooling,
+      async embed(texts: string[]) {
+        return texts.map((t) => [t.length % 7, (t.length % 5) + 1, 1]);
+      },
+    } as any;
+  }
+
+  async function builtWith(pooling: 'mean' | 'cls') {
+    const index = new MemorySearchIndex({ embedder: embedder(pooling), configured: 'local' });
+    await index.build(items);
+    return JSON.parse(JSON.stringify(index.toJSON()));
+  }
+
+  function opened(pooling: 'mean' | 'cls') {
+    return new MemorySearchIndex({
+      embedder: embedder(pooling),
+      configured: 'local',
+      logger: silentLogger,
+    });
+  }
+
+  it('stamps the pooling it embedded with into the saved index', async () => {
+    expect((await builtWith('mean')).embedderId).toBe(`local:${CLS_MODEL}`);
+    expect((await builtWith('cls')).embedderId).toBe(`local:${CLS_MODEL}#cls`);
+  });
+
+  it('drops vectors pooled the other way, which is the whole point of the suffix', async () => {
+    // The 1.13.0 case: an index of this model built before the table existed holds
+    // mean-pooled vectors, and this server now embeds it with cls.
+    const saved = await builtWith('mean');
+    expect(saved.vectors.length).toBeGreaterThan(0);
+
+    const index = opened('cls');
+    index.loadFromJSON(saved);
+    const status = index.buildStatus();
+
+    expect(status.vectors).toBe(0);
+    expect(status.vectorsStaleReason).toContain(`local:${CLS_MODEL}`);
+    expect(status.vectorsStaleReason).toContain(`local:${CLS_MODEL}#cls`);
+    // The notice must not claim the models differ: here they are the same model.
+    expect(status.vectorsStaleReason).not.toContain('different models');
+    // Keyword search is untouched, as it is for any other stale-vector cause.
+    expect(status.documents).toBeGreaterThan(0);
+  });
+
+  it('keeps them when the pooling agrees, so no untouched index is restamped', async () => {
+    const saved = await builtWith('mean');
+    const index = opened('mean');
+    index.loadFromJSON(saved);
+    expect(index.buildStatus().vectors).toBe(saved.vectors.length);
+    expect(index.buildStatus().vectorsStaleReason).toBeUndefined();
   });
 });

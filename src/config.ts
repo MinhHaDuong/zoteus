@@ -370,7 +370,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
   ) {
     warnings.push(
       `ZOTEUS_EMBEDDING_DTYPE applies to on-device embeddings only and is ignored under ` +
-        `ZOTEUS_EMBEDDINGS=${parsed.ZOTEUS_EMBEDDINGS}; an API provider chooses its own precision`,
+        `ZOTEUS_EMBEDDINGS=${parsed.ZOTEUS_EMBEDDINGS}; precision is an argument to the local pipeline`,
     );
   }
 

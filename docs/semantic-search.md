@@ -770,14 +770,23 @@ the repository its value was read from): `mean` for MiniLM, the E5 family and th
 paraphrase-multilingual models, `cls` for the granite, gte, arctic-embed and bge-m3 models, and
 `mean` for any model the table does not list, which is exactly what every model got before the
 table existed. The table is a record of what each model was trained with, not a list of models
-this project recommends: naming one there says its pooling was read, nothing more. `ZOTEUS_EMBEDDING_POOLING=mean` or `=cls` overrides the table for every model, for
-a mirrored or renamed checkpoint whose id the table cannot speak for; `auto` is the default. Set
-Set it wrong and retrieval degrades silently, so leave it unset unless you have read that
-file for your model. A pooling that is not the default joins the embedder identity, the way a
-precision above `fp32` does: `local:onnx-community/gte-multilingual-base#cls`. So the models
-this table moves are a different vector space and say so, while every mean-pooled model,
-the default included, keeps the identity it always had and no index built before this
-release is disturbed.
+this project recommends: naming one there says its pooling was read, nothing more.
+
+`ZOTEUS_EMBEDDING_POOLING=mean` or `=cls` overrides the table for every model, for a mirrored
+or renamed checkpoint whose id the table cannot speak for; `auto` is the default. A pooling
+that is not the default joins the embedder identity, the way a precision above `fp32` does:
+`local:onnx-community/gte-multilingual-base#cls`. So setting it is not free. It makes a
+different vector space, the stored vectors stop matching the identity, and they are dropped
+with a notice the next time the server opens the index. Leave it unset unless you have read
+that file for your model.
+
+Every model the table pools the default way, the default model included, keeps the identity it
+always had, so an index built with one of those is untouched. An index built with one of the
+`cls` models under 1.13.0 is the exception, and the only one: it holds mean-pooled vectors, its
+identity does not carry the `#cls` this server now embeds with, and it is dropped with that same
+notice. One `zotero_index action:"build"` re-embeds it. If you would rather defer that,
+`ZOTEUS_EMBEDDING_POOLING=mean` reproduces the identity the index already carries and it keeps
+working, at the retrieval quality it was built with.
 
 **Changing the model means rebuilding**, exactly as it does for an API provider: the identity
 stored beside the vectors becomes `local:Xenova/multilingual-e5-small`, the old vectors are

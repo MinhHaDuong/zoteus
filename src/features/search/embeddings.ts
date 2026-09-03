@@ -25,6 +25,13 @@ export interface EmbeddingProvider {
    * whose precision is the provider's business and never ours.
    */
   readonly dtype?: EmbeddingDtype;
+  /**
+   * How this provider folds a model's tokens into one vector, where that is ours to choose.
+   * Also part of the identity, and declared here rather than left to the concrete class:
+   * `embedderIdentity` reads it through this interface, so a provider that omitted it would
+   * compile and quietly stamp the unsuffixed string, which is the defect it exists to close.
+   */
+  readonly pooling?: PoolingMode;
   embed(texts: string[], kind?: EmbedKind): Promise<number[][]>;
 }
 
@@ -136,7 +143,7 @@ export type PoolingSetting = 'auto' | PoolingMode;
  * What every local vector ever built was pooled with, and what a model absent from
  * {@link MODEL_POOLING} still is. Right for the default MiniLM and for the E5 family, which
  * is to say for every model this project has recommended; wrong for about half of the
- * multilingual models whose `1_Pooling/config.json` I read, and unlike the E5 prefixes
+ * multilingual models whose `1_Pooling/config.json` was read for this table, and unlike the E5 prefixes
  * nothing in a model id says which half.
  */
 export const DEFAULT_POOLING: PoolingMode = 'mean';
@@ -158,9 +165,8 @@ export const DEFAULT_POOLING: PoolingMode = 'mean';
  * place. `cls` is the half a cross-lingual library pays for. Measured on a 257-passage, 68-query
  * cross-lingual set with pooling as the only variable, at fp32, mean pooling costs
  * `granite-embedding-97m-multilingual-r2` 27.5% of its MRR and 34.6% of its hit@1,
- * `gte-multilingual-base` and `arctic-embed-m-v2` between a tenth and an eighth of theirs,
- * on a cross-lingual set; docs/semantic-search.md carries the numbers and where they came
- * from. The `mean` rows are here so a reader can tell "known to be mean" from "unlisted, so
+ * `gte-multilingual-base` 12.7% and `arctic-embed-m-v2` 10.3% of theirs, on a cross-lingual
+ * set; docs/semantic-search.md carries the rest and where they came from. The `mean` rows are here so a reader can tell "known to be mean" from "unlisted, so
  * mean by default", which the code cannot otherwise distinguish.
  */
 export const MODEL_POOLING: Readonly<Record<string, PoolingMode>> = {
@@ -545,9 +551,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
 
   /**
    * How the pipeline folds this model's tokens into one vector (see {@link MODEL_POOLING}).
-   * Like the prefixes, decided by the model id with the setting as the override, and like
-   * them it stays out of the identity: the id already determines it, and the override is
-   * the user's own word in the same position ZOTEUS_EMBEDDING_PREFIXES occupies.
+   * Decided by the model id with the setting as the override, like the prefixes; unlike
+   * them it reaches the identity, because the two readings of one model are two vector
+   * spaces of the same width and nothing downstream could otherwise tell them apart. See
+   * {@link embedderIdentity}, where anything but the default is suffixed.
    */
   get pooling(): PoolingMode {
     return poolingFor(this.model, this.opts.pooling ?? 'auto');
@@ -618,11 +625,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       const input = prefix ? batch.map((t) => prefix + t) : batch;
       // The pooling is the model's, not this call site's: the literal `mean` that stood
       // here was right for MiniLM and E5 and silently wrong for every CLS-pooled model
-      // ZOTEUS_EMBEDDING_MODEL can name. Normalization stays unconditional, and can: the
-      // ranking is a true cosine (vector-store.ts divides by both norms) and the SQLite
-      // path takes mean-centred sign bits, so scaling a vector by a positive number moves
-      // neither. A model that publishes no Normalize module is therefore not mis-served
-      // here the way a CLS model was.
+      // ZOTEUS_EMBEDDING_MODEL can name. Normalization stays unconditional, and the reason
+      // is not that scale cannot matter: the SQLite codes are sign bits taken after a corpus
+      // mean is subtracted, and subtracting a constant is precisely what a rescaling does not
+      // survive. It is that this line is the only place vectors are produced, so index and
+      // query are scaled alike and the corpus mean is measured on the same scale it is
+      // subtracted from. Cosine is scale-free besides. A model that publishes no Normalize
+      // module is therefore not mis-served here the way a CLS model was.
       const tensor = await extractor(input, { pooling: this.pooling, normalize: true });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
