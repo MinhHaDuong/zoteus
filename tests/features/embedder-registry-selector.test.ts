@@ -74,11 +74,31 @@ describe('curated local embedder selector', () => {
       .toBe('multilingual-e5-small-q8');
   });
 
-  it('fails an unknown local id before probing the optional runtime', () => {
-    const cfg = loadConfig({
-      ZOTEUS_EMBEDDINGS: 'local',
-      ZOTEUS_EMBEDDING_MODEL: 'not-a-row',
-    } as any);
-    expect(() => createEmbeddingProvider(cfg)).toThrow(/unknown local embedder entry/i);
-  });
+  it.each(['not-a-row', 'Xenova/all-MiniLM-L6-v2'])(
+    'degrades an unknown or leftover local id %s before probing the optional runtime',
+    (entryId) => {
+      const cfg = loadConfig({
+        ZOTEUS_EMBEDDINGS: 'local',
+        ZOTEUS_EMBEDDING_MODEL: entryId,
+      } as any);
+      const selection = createEmbeddingProvider(cfg);
+      expect(selection).toMatchObject({
+        provider: null,
+        configured: 'local',
+        unavailable: expect.stringMatching(/unknown local embedder entry/i),
+      });
+      expect(selection.unavailable).toMatch(/keyword.*still works/i);
+      expect(selection.unavailable).toContain(entryId);
+      const status = new MemorySearchIndex({
+        embedder: selection.provider,
+        configured: selection.configured,
+        unavailable: selection.unavailable,
+      }).status();
+      expect(status).toMatchObject({
+        embedderActive: false,
+        embedderConfigured: 'local',
+        embedderReason: expect.stringContaining(entryId),
+      });
+    },
+  );
 });

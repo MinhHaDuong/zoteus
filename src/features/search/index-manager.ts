@@ -1935,6 +1935,18 @@ export abstract class SearchIndexBase implements SearchIndex {
     const mode = opts.mode ?? 'auto';
     const pool = limit * 3;
 
+    // Keep the contract at the index seam as well as in the MCP tool. Other callers use
+    // SearchIndex directly, and stale vectors plus no validated query embedder otherwise
+    // produce a plausible empty answer in semantic-only mode.
+    if (mode === 'semantic' && !this.embedderActive) {
+      throw new Error(
+        `Semantic-only search cannot run because the embedder is not active: ${this.embedderReason ?? 'unavailable'}.`,
+      );
+    }
+    if (mode === 'semantic' && !this.counts().vectors) {
+      throw new Error('Semantic-only search cannot run because the index holds no vectors.');
+    }
+
     const keyword: RankedId[] = mode === 'semantic' ? [] : this.keywordSearch(q, pool);
     let vector: RankedId[] = [];
     if (mode !== 'keyword' && this.opts.embedder && this.counts().vectors) {
@@ -1953,6 +1965,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         }
       } catch (e) {
         this.noteEmbedFailure(e);
+        if (mode === 'semantic') throw e;
       }
     }
 

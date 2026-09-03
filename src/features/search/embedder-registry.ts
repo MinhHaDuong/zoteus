@@ -25,6 +25,13 @@ import { createHash } from 'node:crypto';
 
 export const EMBEDDER_REGISTRY_VERSION = 1;
 
+/**
+ * Compatibility version serialized into vector fingerprints. This is deliberately
+ * independent of {@link EMBEDDER_REGISTRY_VERSION}: changing how registry records are
+ * represented must not invalidate vectors when their vector-affecting fields are unchanged.
+ */
+export const EMBEDDER_FINGERPRINT_VERSION = 1;
+
 /** Pooling strategies @huggingface/transformers exposes for feature extraction. */
 export type EmbedderPooling = 'mean' | 'cls' | 'last_token';
 
@@ -63,18 +70,72 @@ export interface EmbedderEntry {
   readonly sources: Readonly<Record<string, string>>;
 }
 
-const VECTOR_FIELDS = [
-  'model',
-  'revision',
-  'dtype',
-  'graphFile',
-  'pooling',
-  'normalize',
-  'template',
-  'windowTokens',
-  'dimension',
-] as const;
-const ENTRY_FIELDS = ['id', ...VECTOR_FIELDS, 'sources'] as const;
+function fingerprintField<K extends keyof EmbedderEntry>(
+  field: K,
+  project: (entry: EmbedderEntry) => EmbedderEntry[K],
+): readonly [K, (entry: EmbedderEntry) => EmbedderEntry[K]] {
+  return Object.freeze([field, project] as const);
+}
+
+/**
+ * The one ordered authority for vector identity version 1. Tuple order and projected key
+ * names are serialized, so changing either requires a new fingerprint compatibility
+ * version. Structured values must be projected explicitly rather than inheriting object
+ * insertion order from a caller.
+ */
+export const FINGERPRINT_PROJECTION_V1 = Object.freeze([
+  fingerprintField('model', (entry) => entry.model),
+  fingerprintField('revision', (entry) => entry.revision),
+  fingerprintField('dtype', (entry) => entry.dtype),
+  fingerprintField('graphFile', (entry) => entry.graphFile),
+  fingerprintField('pooling', (entry) => entry.pooling),
+  fingerprintField('normalize', (entry) => entry.normalize),
+  fingerprintField('template', (entry) => ({
+    query: entry.template.query,
+    passage: entry.template.passage,
+  })),
+  fingerprintField('windowTokens', (entry) => entry.windowTokens),
+  fingerprintField('dimension', (entry) => entry.dimension),
+] as const);
+
+type FingerprintedEntryField = (typeof FINGERPRINT_PROJECTION_V1)[number][0];
+
+/** Fields of the record that are executed and therefore projected into vector identity. */
+export const APPLIED_FIELDS = Object.freeze(
+  FINGERPRINT_PROJECTION_V1.map(([field]) => field),
+) as readonly FingerprintedEntryField[];
+
+/** Fields the record declares that nothing consumes yet. Kept explicit for the guard test. */
+export const DECLARED_ONLY_FIELDS = [] as const satisfies readonly (keyof EmbedderEntry)[];
+
+/** Fields that describe the record rather than the vectors it produces. */
+export const ENTRY_METADATA_FIELDS = ['id', 'sources'] as const satisfies readonly (
+  keyof EmbedderEntry
+)[];
+
+type ClassifiedEntryField =
+  | FingerprintedEntryField
+  | (typeof DECLARED_ONLY_FIELDS)[number]
+  | (typeof ENTRY_METADATA_FIELDS)[number];
+type AssertNever<T extends never> = T;
+
+/** Compile-time tripwire: a new record field must be projected or explicitly classified. */
+export type UnclassifiedEmbedderEntryFields = AssertNever<
+  Exclude<keyof EmbedderEntry, ClassifiedEntryField>
+>;
+
+/** Compile-time tripwire: reclassification must first remove the old classification. */
+export type MultiplyClassifiedEmbedderEntryFields = AssertNever<
+  | Extract<FingerprintedEntryField, (typeof ENTRY_METADATA_FIELDS)[number]>
+  | Extract<FingerprintedEntryField, (typeof DECLARED_ONLY_FIELDS)[number]>
+  | Extract<(typeof ENTRY_METADATA_FIELDS)[number], (typeof DECLARED_ONLY_FIELDS)[number]>
+>;
+
+const ENTRY_FIELDS = Object.freeze([
+  ...APPLIED_FIELDS,
+  ...DECLARED_ONLY_FIELDS,
+  ...ENTRY_METADATA_FIELDS,
+]);
 const DTYPES: readonly EmbedderDtype[] = [
   'fp32',
   'fp16',
@@ -100,16 +161,12 @@ const GRAPH_BY_DTYPE: Readonly<Record<EmbedderDtype, string>> = {
 /** Stable identity of every choice that can move or reinterpret a vector. */
 export function entryFingerprint(entry: EmbedderEntry): string {
   const vectorShape = {
-    version: EMBEDDER_REGISTRY_VERSION,
-    model: entry.model,
-    revision: entry.revision,
-    dtype: entry.dtype,
-    graphFile: entry.graphFile,
-    pooling: entry.pooling,
-    normalize: entry.normalize,
-    template: { query: entry.template.query, passage: entry.template.passage },
-    windowTokens: entry.windowTokens,
-    dimension: entry.dimension,
+    // Keep the serialized field name and value stable: incumbent indexes already carry
+    // the digest of this exact payload.
+    version: EMBEDDER_FINGERPRINT_VERSION,
+    ...Object.fromEntries(
+      FINGERPRINT_PROJECTION_V1.map(([field, project]) => [field, project(entry)]),
+    ),
   };
   return createHash('sha256').update(JSON.stringify(vectorShape)).digest('hex');
 }
@@ -161,7 +218,7 @@ export function parseEmbedderEntry(value: unknown): EmbedderEntry {
   }
   if (!row.sources || typeof row.sources !== 'object' || Array.isArray(row.sources))
     throw new Error('Embedder entry sources must be an object.');
-  for (const field of VECTOR_FIELDS) {
+  for (const field of [...APPLIED_FIELDS, ...DECLARED_ONLY_FIELDS]) {
     if (
       typeof (row.sources as Record<string, unknown>)[field] !== 'string' ||
       !(row.sources as Record<string, string>)[field]
@@ -188,15 +245,6 @@ export function parseEmbedderEntry(value: unknown): EmbedderEntry {
     sources: frozenSources,
   }) as EmbedderEntry;
 }
-
-/** Fields of the record the loader reads today. */
-export const APPLIED_FIELDS = VECTOR_FIELDS;
-
-/** Fields the record declares that nothing consumes yet. Kept explicit for the guard test. */
-export const DECLARED_ONLY_FIELDS = [] as const;
-
-/** Fields that describe the record rather than the embedder. */
-export const ENTRY_METADATA_FIELDS = ['id', 'sources'] as const;
 
 /**
  * The incumbent local embedder: the chain zoteus has run since hybrid search landed.
@@ -241,12 +289,63 @@ export const INCUMBENT_LOCAL_ENTRY: EmbedderEntry = parseEmbedderEntry({
   },
 });
 
-type Candidate = Pick<
+type FamilyProvenance = Pick<
   EmbedderEntry,
   'id' | 'model' | 'revision' | 'pooling' | 'normalize' | 'template' | 'windowTokens' | 'dimension'
 >;
 
-const CANDIDATES: readonly Candidate[] = [
+/** Public study snapshot from which the six measured family records were transcribed. */
+export const EMBEDDER_STUDY_REVISION = 'aa9d82f0692208ce1e8b72e57094bd2d533900ea';
+const EMBEDDER_STUDY_MODELS =
+  `https://github.com/MinhHaDuong/search-works-for-zotero/blob/${EMBEDDER_STUDY_REVISION}` +
+  '/bench/models.json';
+
+function studyField(candidate: FamilyProvenance, field: string): string {
+  return `${EMBEDDER_STUDY_MODELS}#models[id=${candidate.id}].${field}`;
+}
+
+function pinnedModel(candidate: FamilyProvenance): string {
+  return `https://huggingface.co/${candidate.model}/tree/${candidate.revision}`;
+}
+
+function pinnedModelFile(candidate: FamilyProvenance, path: string, field?: string): string {
+  return (
+    `https://huggingface.co/${candidate.model}/blob/${candidate.revision}/${path}` +
+    (field ? `#${field}` : '')
+  );
+}
+
+/** Field-specific immutable evidence for one measured family and graph dtype. */
+function measuredSources(
+  candidate: FamilyProvenance,
+  dtype: (typeof MEASURED_DTYPES)[number],
+): Readonly<Record<FingerprintedEntryField, string>> {
+  const graphFile = GRAPH_BY_DTYPE[dtype];
+  const graph = pinnedModelFile(candidate, graphFile);
+  return Object.freeze({
+    model: `model: ${studyField(candidate, 'hf_repo')}; ${pinnedModel(candidate)}`,
+    revision: `revision: ${studyField(candidate, 'hf_revision')}; ${pinnedModel(candidate)}`,
+    dtype:
+      `dtype: ${graph}; https://unpkg.com/@huggingface/transformers@4.2.0/` +
+      `src/utils/dtypes.js#DEFAULT_DTYPE_SUFFIX_MAPPING[${dtype}]`,
+    graphFile: `graphFile: ${graph}`,
+    pooling:
+      `pooling: ${studyField(candidate, 'pooling')}; ` +
+      studyField(candidate, 'pooling_source'),
+    normalize:
+      `normalize: ${studyField(candidate, 'normalize')}; ` +
+      studyField(candidate, 'normalize_source'),
+    template:
+      `template: ${studyField(candidate, 'input_template.query')}; ` +
+      studyField(candidate, 'input_template.passage'),
+    // Deliberately not models.json#max_seq: registry windows are the tokenizer's actual
+    // truncation setting, not the architecture's positional capacity.
+    windowTokens: `windowTokens: ${pinnedModelFile(candidate, 'tokenizer_config.json', 'model_max_length')}`,
+    dimension: `dimension: ${pinnedModelFile(candidate, 'config.json', 'hidden_size')}`,
+  });
+}
+
+const FAMILY_PROVENANCE: readonly FamilyProvenance[] = [
   {
     id: 'granite-97m-multilingual-r2',
     model: 'onnx-community/granite-embedding-97m-multilingual-r2-ONNX',
@@ -310,18 +409,14 @@ const CANDIDATES: readonly Candidate[] = [
 ];
 
 const MEASURED_DTYPES = ['fp32', 'q8', 'uint8'] as const;
-const measuredEntries = CANDIDATES.flatMap((candidate) =>
+const measuredEntries = FAMILY_PROVENANCE.flatMap((candidate) =>
   MEASURED_DTYPES.map((dtype) =>
     parseEmbedderEntry({
       ...candidate,
       id: `${candidate.id}-${dtype}`,
       dtype,
       graphFile: GRAPH_BY_DTYPE[dtype],
-      sources: Object.fromEntries(VECTOR_FIELDS.map((field) => [field,
-        field === 'windowTokens'
-          ? 'tokenizer_config.json model_max_length in the cached repository revision, verified with Transformers.js 4.2.0'
-          : 'bench/models.json and the model repository configuration used by the measured CPU cell',
-      ])),
+      sources: measuredSources(candidate, dtype),
     }),
   ),
 ).filter((entry) => entry.id !== 'granite-97m-multilingual-r2-q8');
@@ -334,14 +429,19 @@ export const EMBEDDER_ENTRIES: Readonly<Record<string, EmbedderEntry>> = Object.
   ]),
 );
 
+export class UnknownLocalEmbedderEntryError extends Error {
+  constructor(readonly entryId: string) {
+    super(
+      `Unknown local embedder entry "${entryId}". Choose one of: ${Object.keys(EMBEDDER_ENTRIES).join(', ')}.`,
+    );
+    this.name = 'UnknownLocalEmbedderEntryError';
+  }
+}
+
 /** Resolve a user-facing entry id. A raw model repository is intentionally not accepted. */
 export function selectEmbedderEntry(id?: string): EmbedderEntry {
   if (!id) return INCUMBENT_LOCAL_ENTRY;
   const entry = EMBEDDER_ENTRIES[id];
-  if (!entry) {
-    throw new Error(
-      `Unknown local embedder entry "${id}". Choose one of: ${Object.keys(EMBEDDER_ENTRIES).join(', ')}.`,
-    );
-  }
+  if (!entry) throw new UnknownLocalEmbedderEntryError(id);
   return entry;
 }

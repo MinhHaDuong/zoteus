@@ -19,6 +19,7 @@ import type { SearchIndex } from './features/search/backend.js';
 import type { Ledger } from './features/search/conductor/ledger.js';
 import { conductorLedgerPath, openConductorLedger } from './features/search/conductor/store.js';
 import { createEmbeddingProvider } from './features/search/embeddings.js';
+import { validateEmbeddingSelection } from './features/search/embedder-validation.js';
 import { ScholarGraph } from './features/scholar/graph.js';
 import { registerAllTools, type ToolContext, type ToolContextSource, type ToolDefinition } from './registry/registry.js';
 import { registerResources } from './resources/index.js';
@@ -97,10 +98,14 @@ export async function buildContext(config: ZoteusConfig, overrides: ContextOverr
   const schema = new SchemaService({ web });
   const styles = new StyleResolver();
   const translation = new TranslationServerClient(config.translationServerUrl, fetcher);
-  // Preflighted at startup so a configured-but-unrunnable embedder (the classic case: a
-  // desktop bundle that cannot carry @huggingface/transformers) is reported as inactive
-  // from the first status call, rather than discovered as a silently empty vector set.
-  const embedding = createEmbeddingProvider(config, logger);
+  // Resolve and validate before the index is opened. Besides making a missing runtime
+  // visible from the first status call, this prevents a stale index from being queried by
+  // a local vector chain that has not passed on this exact machine and provider.
+  const embedding = await validateEmbeddingSelection(
+    createEmbeddingProvider(config, logger),
+    config.dataDir,
+    logger,
+  );
   const searchIndexPath = join(
     config.dataDir,
     overrides.zoteroUserId !== undefined ? `search-index-${overrides.zoteroUserId}.json` : 'search-index.json',

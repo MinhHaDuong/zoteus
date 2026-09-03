@@ -6,12 +6,14 @@ import type { Logger } from '../../lib/logger.js';
 import {
   INCUMBENT_LOCAL_ENTRY,
   LEGACY_INCUMBENT_FINGERPRINT,
+  UnknownLocalEmbedderEntryError,
   entryFingerprint,
   parseEmbedderEntry,
   selectEmbedderEntry,
   type EmbedderEntry,
 } from './embedder-registry.js';
 import { DEFAULT_EMBED_BATCH_SIZE } from './limits.js';
+import type { EmbedderRuntimeShape } from './embedder-validation.js';
 
 export interface EmbeddingProvider {
   readonly name: string;
@@ -24,6 +26,9 @@ export interface EmbeddingProvider {
 
 /** npm package that provides the on-device model runtime (optional, not bundled; see below). */
 export const TRANSFORMERS_MODULE = '@huggingface/transformers';
+
+/** The concrete device supplied to the loader; validation records its CPU provider. */
+export const LOCAL_EXECUTION_DEVICE = 'cpu' as const;
 
 /** API-provider defaults. On the local path ZOTEUS_EMBEDDING_MODEL selects a registry entry. */
 export const DEFAULT_API_MODELS: Record<'openai' | 'gemini', string> = {
@@ -211,6 +216,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   /** Texts handed to the transformers pipeline in a single call. */
   static readonly BATCH_SIZE = DEFAULT_EMBED_BATCH_SIZE;
   private extractor: any;
+  private transformers: any;
   readonly entry: EmbedderEntry;
   readonly model: string;
   readonly entryId: string;
@@ -230,6 +236,8 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       batchSize?: number;
       /** Pause between batches in ms (see batchPause). */
       batchDelayMs?: number;
+      /** Explicit environment for an injected extractor (tests and transport adapters). */
+      validationRuntime?: EmbedderRuntimeShape;
     } = {},
   ) {
     if (typeof entry === 'string') {
@@ -242,12 +250,71 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     this.legacyIdentity = this.vectorFingerprint === LEGACY_INCUMBENT_FINGERPRINT;
   }
 
+  /** Import the exact runtime module once, without loading model weights. */
+  private async ensureTransformers(): Promise<any> {
+    if (this.transformers) return this.transformers;
+    const specifier = resolveTransformers(this.opts.transformersPath);
+    if (!specifier)
+      throw new Error(
+        missingTransformersHint({
+          dist: this.opts.dist,
+          transformersPath: this.opts.transformersPath,
+        }),
+      );
+    try {
+      this.transformers = await import(specifier);
+    } catch (e) {
+      // Resolved but unloadable: almost always a native onnxruntime binary that does not
+      // match this platform/Node ABI. Say that, rather than "not installed", and say
+      // WHICH file was loaded, under which Node.
+      throw new Error(
+        `${TRANSFORMERS_MODULE} resolved but failed to load (${e instanceof Error ? e.message : String(e)}). ` +
+          `Loaded from ${modulePath(specifier)}${searchedFrom(this.opts.transformersPath)}, running Node ` +
+          `${process.version} on ${process.platform}-${process.arch}. ` +
+          'Reinstall it for this platform and Node version, or set ZOTEUS_EMBEDDINGS=off for keyword-only search.',
+      );
+    }
+    const env = this.transformers.env ?? this.transformers.default?.env;
+    if (env && this.opts.modelCacheDir) env.cacheDir = this.opts.modelCacheDir;
+    return this.transformers;
+  }
+
+  /** Exact environment tuple that owns a cached compatibility PASS. */
+  async validationRuntimeShape(): Promise<EmbedderRuntimeShape> {
+    if (this.loadExtractor) {
+      if (!this.opts.validationRuntime) {
+        throw new Error('An injected local extractor must declare its validation runtime.');
+      }
+      return this.opts.validationRuntime;
+    }
+    const transformers = await this.ensureTransformers();
+    const env = transformers.env ?? transformers.default?.env;
+    const backendVersions = Object.fromEntries(
+      Object.entries(env?.backends?.onnx?.versions ?? {}).filter(
+        (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0,
+      ),
+    );
+    return {
+      engineVersion: typeof env?.version === 'string' ? env.version : '',
+      backendVersions,
+      runtime: process.versions.electron ? 'electron' : 'node',
+      nodeVersion: process.versions.node,
+      ...(process.versions.electron ? { electronVersion: process.versions.electron } : {}),
+      operatingSystem: process.platform,
+      architecture: process.arch,
+      // The loader below receives this same concrete value. A future positive device
+      // probe must change both together and record its result rather than "auto".
+      executionProvider: LOCAL_EXECUTION_DEVICE,
+    };
+  }
+
   /** Options that select the actual graph/runtime chain. Exposed for characterization tests. */
   get loaderOptions(): {
     revision: string;
     dtype: EmbedderEntry['dtype'];
     subfolder: string;
     model_file_name: string;
+    device: typeof LOCAL_EXECUTION_DEVICE;
   } {
     const [subfolder, filename] = this.entry.graphFile.split('/');
     const suffix = GRAPH_SUFFIX_BY_DTYPE[this.entry.dtype];
@@ -256,6 +323,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       dtype: this.entry.dtype,
       subfolder: subfolder!,
       model_file_name: filename!.slice(0, -suffix.length - '.onnx'.length),
+      device: LOCAL_EXECUTION_DEVICE,
     };
   }
 
@@ -266,32 +334,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       this.configureTokenizerWindow(this.extractor);
       return this.extractor;
     }
-    const specifier = resolveTransformers(this.opts.transformersPath);
-    if (!specifier)
-      throw new Error(
-        missingTransformersHint({
-          dist: this.opts.dist,
-          transformersPath: this.opts.transformersPath,
-        }),
-      );
-    let transformers: any;
-    try {
-      transformers = await import(specifier);
-    } catch (e) {
-      // Resolved but unloadable: almost always a native onnxruntime binary that does not
-      // match this platform/Node ABI. Say that, rather than "not installed", and say
-      // WHICH file was loaded, under which Node. That is the whole diagnosis for the
-      // desktop failure in #38: the extension runs its own built-in Node, so a package
-      // installed under a version manager (or left behind by an nvm switch) resolves
-      // perfectly and then fails on a binary compiled for a different runtime. Without
-      // the path and the version, the two halves of that sentence are invisible.
-      throw new Error(
-        `${TRANSFORMERS_MODULE} resolved but failed to load (${e instanceof Error ? e.message : String(e)}). ` +
-          `Loaded from ${modulePath(specifier)}${searchedFrom(this.opts.transformersPath)}, running Node ` +
-          `${process.version} on ${process.platform}-${process.arch}. ` +
-          'Reinstall it for this platform and Node version, or set ZOTEUS_EMBEDDINGS=off for keyword-only search.',
-      );
-    }
+    const transformers = await this.ensureTransformers();
     // The package ships both an ESM and a CJS build; a resolved CJS entry arrives under `default`.
     const pipeline = transformers.pipeline ?? transformers.default?.pipeline;
     if (typeof pipeline !== 'function') {
@@ -304,8 +347,6 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     // and for a bundled desktop install pointed at a global module via
     // ZOTEUS_TRANSFORMERS_PATH, outlives the extension too. Deleting the data directory
     // is supposed to be the whole uninstall, and the weights are its largest artifact.
-    const env = transformers.env ?? transformers.default?.env;
-    if (env && this.opts.modelCacheDir) env.cacheDir = this.opts.modelCacheDir;
     this.extractor = await pipeline('feature-extraction', this.model, this.loaderOptions);
     if (!this.extractor.tokenizer) {
       throw new Error(`Local embedder ${this.entry.id} loaded without an addressable tokenizer.`);
@@ -347,20 +388,19 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
    * per text), yielding to the event loop between batches so long builds stay
    * responsive and interruptible. Returns exactly one vector per input text.
    */
-  async embed(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<number[][]> {
+  private async embedPrepared(texts: string[], normalize: boolean): Promise<number[][]> {
     if (texts.length === 0) return [];
     const extractor = await this.ensure();
     const size = Math.max(1, this.opts.batchSize ?? LocalEmbeddingProvider.BATCH_SIZE);
     const out: number[][] = [];
     for (let i = 0; i < texts.length; i += size) {
-      const prefix = this.entry.template[role];
-      const batch = texts.slice(i, i + size).map((text) => `${prefix}${text}`);
+      const batch = texts.slice(i, i + size);
       // Pooling and normalization are not call-site taste: they are properties of the
       // model, published in its own configuration, and a wrong pooling mode produces
       // vectors that load and rank and are quietly worse. They come from the entry.
       const tensor = await extractor(batch, {
         pooling: this.entry.pooling,
-        normalize: this.entry.normalize,
+        normalize,
       });
       const data = tensor.data as Float32Array;
       const dims: number[] | undefined = tensor.dims;
@@ -382,6 +422,19 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       if (i + size < texts.length) await batchPause(this.opts.batchDelayMs);
     }
     return out;
+  }
+
+  /** Validation-only bypass: callers supply the complete, already-templated strings. */
+  async embedPreparedForValidation(texts: string[], normalize: boolean): Promise<number[][]> {
+    return this.embedPrepared(texts, normalize);
+  }
+
+  async embed(texts: string[], role: 'query' | 'passage' = 'passage'): Promise<number[][]> {
+    const prefix = this.entry.template[role];
+    return this.embedPrepared(
+      texts.map((text) => `${prefix}${text}`),
+      this.entry.normalize,
+    );
   }
 }
 
@@ -516,8 +569,19 @@ export function createEmbeddingProvider(config: ZoteusConfig, logger?: Logger): 
     case 'local':
     default: {
       // On the local path this setting names a complete curated entry, never a raw HF repo.
-      // Resolve it before probing or touching the index so a typo cannot degrade silently.
-      const entry = selectEmbedderEntry(config.embeddingModel);
+      // Resolve it before probing or touching the index. A typo or a legacy raw model name
+      // is explicit in status, but must not prevent the keyword-only server from starting.
+      let entry: EmbedderEntry;
+      try {
+        entry = selectEmbedderEntry(config.embeddingModel);
+      } catch (error) {
+        if (!(error instanceof UnknownLocalEmbedderEntryError)) throw error;
+        const unavailable =
+          `${error.message} No vectors are produced; keyword (BM25) search still works. ` +
+          'Set ZOTEUS_EMBEDDING_MODEL to a listed entry id, or unset it for the default.';
+        logger?.warn(`${unavailable} Using keyword-only search.`);
+        return { provider: null, configured: 'local', unavailable };
+      }
       if (!resolveTransformers(config.transformersPath)) {
         logger?.warn(
           `ZOTEUS_EMBEDDINGS=local but ${TRANSFORMERS_MODULE} is not installed` +

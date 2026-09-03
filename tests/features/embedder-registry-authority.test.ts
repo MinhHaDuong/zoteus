@@ -1,29 +1,51 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  APPLIED_FIELDS,
+  EMBEDDER_ENTRIES,
+  EMBEDDER_FINGERPRINT_VERSION,
+  EMBEDDER_REGISTRY_VERSION,
+  EMBEDDER_STUDY_REVISION,
+  FINGERPRINT_PROJECTION_V1,
   INCUMBENT_LOCAL_ENTRY,
+  LEGACY_INCUMBENT_FINGERPRINT,
   entryFingerprint,
   parseEmbedderEntry,
   type EmbedderEntry,
 } from '../../src/features/search/embedder-registry.js';
 import { LocalEmbeddingProvider, embedderIdentity } from '../../src/features/search/embeddings.js';
 
-function changed<K extends keyof EmbedderEntry>(key: K, value: EmbedderEntry[K]): EmbedderEntry {
-  return { ...INCUMBENT_LOCAL_ENTRY, [key]: value };
+function perturbProjectedField(field: (typeof APPLIED_FIELDS)[number]): EmbedderEntry {
+  const value: unknown = INCUMBENT_LOCAL_ENTRY[field];
+  const changed =
+    typeof value === 'string'
+      ? `${value}-changed`
+      : typeof value === 'number'
+        ? value + 1
+        : typeof value === 'boolean'
+          ? !value
+          : {
+              query: `${INCUMBENT_LOCAL_ENTRY.template.query}changed: `,
+              passage: INCUMBENT_LOCAL_ENTRY.template.passage,
+            };
+  return { ...INCUMBENT_LOCAL_ENTRY, [field]: changed } as EmbedderEntry;
 }
 
 describe('authoritative embedder records', () => {
-  it.each([
-    ['model', 'example/model'],
-    ['revision', 'deadbeef'],
-    ['dtype', 'q8'],
-    ['graphFile', 'onnx/model_quantized.onnx'],
-    ['pooling', 'cls'],
-    ['normalize', false],
-    ['template', { query: 'query: ', passage: 'passage: ' }],
-    ['windowTokens', 128],
-    ['dimension', 768],
-  ] as const)('changes the fingerprint when %s changes', (key, value) => {
-    expect(entryFingerprint(changed(key as any, value as any))).not.toBe(
+  it.each(FINGERPRINT_PROJECTION_V1.map(([field]) => field))(
+    'changes the fingerprint when projected field %s changes',
+    (field) => {
+      expect(entryFingerprint(perturbProjectedField(field))).not.toBe(
+        entryFingerprint(INCUMBENT_LOCAL_ENTRY),
+      );
+    },
+  );
+
+  it('canonicalizes template query and passage order in the projection', () => {
+    const reordered = {
+      passage: INCUMBENT_LOCAL_ENTRY.template.passage,
+      query: INCUMBENT_LOCAL_ENTRY.template.query,
+    };
+    expect(entryFingerprint({ ...INCUMBENT_LOCAL_ENTRY, template: reordered })).toBe(
       entryFingerprint(INCUMBENT_LOCAL_ENTRY),
     );
   });
@@ -36,6 +58,79 @@ describe('authoritative embedder records', () => {
         sources: { changed: 'yes' },
       }),
     ).toBe(entryFingerprint(INCUMBENT_LOCAL_ENTRY));
+  });
+
+  it('keeps record-schema evolution outside the stable vector fingerprint', () => {
+    const registryV1 = { schemaVersion: EMBEDDER_REGISTRY_VERSION, entry: INCUMBENT_LOCAL_ENTRY };
+    const registryV2 = { ...registryV1, schemaVersion: EMBEDDER_REGISTRY_VERSION + 1 };
+    expect(entryFingerprint(registryV2.entry)).toBe(entryFingerprint(registryV1.entry));
+    expect(EMBEDDER_FINGERPRINT_VERSION).toBe(1);
+    expect(LEGACY_INCUMBENT_FINGERPRINT).toBe(
+      '098eda2e37ba648b3a022a2a87f37f343b46b24812c24a73317b4e709971ee50',
+    );
+    expect(entryFingerprint(INCUMBENT_LOCAL_ENTRY)).toBe(LEGACY_INCUMBENT_FINGERPRINT);
+  });
+
+  it('gives every measured entry immutable, pinned, field-specific provenance', () => {
+    const measured = Object.values(EMBEDDER_ENTRIES).filter(
+      (entry) => entry !== INCUMBENT_LOCAL_ENTRY,
+    );
+    expect(measured).toHaveLength(17);
+    expect(EMBEDDER_STUDY_REVISION).toBe('aa9d82f0692208ce1e8b72e57094bd2d533900ea');
+
+    for (const entry of measured) {
+      const familyId = entry.id.replace(/-(?:fp32|q8|uint8)$/, '');
+      const sources = APPLIED_FIELDS.map((field) => entry.sources[field]);
+      expect(new Set(sources).size, `${entry.id} reuses a catch-all source`).toBe(sources.length);
+      expect(Object.isFrozen(entry.sources)).toBe(true);
+
+      for (const field of APPLIED_FIELDS) {
+        const source = entry.sources[field]!;
+        expect(source, `${entry.id}.${field} has a bare source`).toMatch(
+          new RegExp(`^${field}: https://`),
+        );
+        expect(source).not.toContain('bench/models.json and the model repository');
+        const urls = source.match(/https:\/\/[^;\s]+/g) ?? [];
+        expect(urls.length, `${entry.id}.${field} has no public locator`).toBeGreaterThan(0);
+        for (const url of urls) {
+          expect(
+            url.includes(EMBEDDER_STUDY_REVISION) ||
+              url.includes(entry.revision) ||
+              url.includes('@huggingface/transformers@4.2.0'),
+            `${entry.id}.${field} has an unpinned locator: ${url}`,
+          ).toBe(true);
+        }
+      }
+
+      const study =
+        `https://github.com/MinhHaDuong/search-works-for-zotero/blob/${EMBEDDER_STUDY_REVISION}` +
+        `/bench/models.json#models[id=${familyId}]`;
+      const model = `https://huggingface.co/${entry.model}/tree/${entry.revision}`;
+      const file = (path: string, field?: string): string =>
+        `https://huggingface.co/${entry.model}/blob/${entry.revision}/${path}` +
+        (field ? `#${field}` : '');
+
+      expect(entry.sources.model).toContain(`${study}.hf_repo`);
+      expect(entry.sources.model).toContain(model);
+      expect(entry.sources.revision).toContain(`${study}.hf_revision`);
+      expect(entry.sources.revision).toContain(model);
+      expect(entry.sources.graphFile).toContain(file(entry.graphFile));
+      expect(entry.sources.dtype).toContain(file(entry.graphFile));
+      expect(entry.sources.dtype).toContain(
+        `https://unpkg.com/@huggingface/transformers@4.2.0/src/utils/dtypes.js#DEFAULT_DTYPE_SUFFIX_MAPPING[${entry.dtype}]`,
+      );
+      expect(entry.sources.windowTokens).toContain(
+        file('tokenizer_config.json', 'model_max_length'),
+      );
+      expect(entry.sources.windowTokens).not.toContain('max_seq');
+      expect(entry.sources.dimension).toContain(file('config.json', 'hidden_size'));
+      expect(entry.sources.pooling).toContain(`${study}.pooling`);
+      expect(entry.sources.pooling).toContain(`${study}.pooling_source`);
+      expect(entry.sources.normalize).toContain(`${study}.normalize`);
+      expect(entry.sources.normalize).toContain(`${study}.normalize_source`);
+      expect(entry.sources.template).toContain(`${study}.input_template.query`);
+      expect(entry.sources.template).toContain(`${study}.input_template.passage`);
+    }
   });
 
   it('keeps the incumbent persisted identity unchanged', () => {
@@ -96,6 +191,7 @@ describe('authoritative embedder records', () => {
       dtype: 'q8',
       subfolder: 'onnx',
       model_file_name: 'model',
+      device: 'cpu',
     });
     expect(extractor.tokenizer.model_max_length).toBe(17);
   });
