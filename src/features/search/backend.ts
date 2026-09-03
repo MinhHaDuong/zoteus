@@ -333,6 +333,52 @@ export interface IndexBuildStatus extends SearchIndexStatus {
    * desktop hosts discard, so the slowdown had no visible cause at all.
    */
   localApiDegradedAt?: string;
+  /**
+   * Passages held for keyword search that carry no vector, when an embedder is configured
+   * and something should have given them one. Present only when it is non-zero.
+   *
+   * The measure of a half-embedded index, and the number that used to have nowhere to be
+   * reported: an embedder that failed partway through a build left tens of thousands of
+   * these, and status said only "embedder=none", which reads as an index with no vectors
+   * at all rather than one with most of them (#48). It is also what tells a caller the
+   * remedy is `action:"build"` (which resumes and buys exactly these) rather than
+   * `action:"refresh"` (which would pay for every vector again).
+   */
+  passagesWithoutVectors?: number;
+  /**
+   * The arithmetic that decides whether an API embedding provider will rate-limit this
+   * build, reported because it is the one thing a user cannot work out from the outside.
+   *
+   * #48 is exactly this sum going wrong unseen: a 10k-item library at the default pacing
+   * rode at 1,000,000 tokens/min, precisely OpenAI's Tier 2 ceiling, so every build 429'd
+   * somewhere between 53k and 84k vectors and nothing in the tool output ever mentioned a
+   * rate. Present only for an API provider, since a local pipeline has no such limit.
+   */
+  embedRate?: EmbedRate;
+}
+
+/** Rate arithmetic for a build embedding through an API provider (see IndexBuildStatus). */
+export interface EmbedRate {
+  /** Passages per request: ZOTEUS_EMBED_BATCH_SIZE. */
+  batchSize: number;
+  /** Pause between requests in ms: ZOTEUS_EMBED_BATCH_DELAY_MS. */
+  delayMs: number;
+  /**
+   * Estimated tokens in one request, at four characters per token over the chunk size this
+   * build is producing (1200 characters for body passages, 512 for metadata ones). An
+   * estimate, not a count: the provider tokenizes, and this side would have to ship a
+   * tokenizer per model to do better. It is the number the provider's per-request cap is
+   * compared against (OpenAI rejects a request above 300,000 tokens outright).
+   */
+  tokensPerRequest: number;
+  /**
+   * Tokens per minute this build has actually sustained, measured over the time spent
+   * inside the provider plus the configured pauses. Absent until enough has been embedded
+   * to mean anything. Unlike the estimate above this is observed, which matters because
+   * the rate at delay 0 is set by how fast the provider answers and nothing on this side
+   * can predict it.
+   */
+  tokensPerMinute?: number;
 }
 
 /** One page of library items plus the library-wide total (for progress). */

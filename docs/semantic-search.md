@@ -673,7 +673,7 @@ large download.
 
 ### Tuning API embeddings
 
-Three variables tune whichever provider is active, and all three default to today's
+Four variables tune whichever provider is active, and all four default to today's
 behaviour:
 
 | Variable | Default | What it changes |
@@ -681,6 +681,7 @@ behaviour:
 | `ZOTEUS_EMBEDDING_MODEL` | provider default | The model the active provider embeds with: `text-embedding-3-small` (openai), `text-embedding-004` (gemini), `Xenova/all-MiniLM-L6-v2` (local, see [Choosing a local model](#choosing-a-local-model)). |
 | `ZOTEUS_EMBED_BATCH_SIZE` | `32` | Passages per embedding call — one API request, or one local pipeline call. |
 | `ZOTEUS_EMBED_BATCH_DELAY_MS` | `0` | Pause between those calls. `0` only yields to the event loop; a positive value sleeps. |
+| `ZOTEUS_EMBED_MAX_RETRIES` | `5` | Retries a rate-limited (`429`), timed-out or `5xx` embedding request gets before the build gives up. `0` restores the old behaviour, where one transient failure ended the job. |
 
 The last two are what a large build is tuned with. An embeddings request is rejected as a
 whole when it carries more tokens than the provider accepts (OpenAI answers `400` above
@@ -696,6 +697,43 @@ ZOTEUS_EMBEDDING_MODEL=text-embedding-3-large
 ZOTEUS_EMBED_BATCH_SIZE=16
 ZOTEUS_EMBED_BATCH_DELAY_MS=200
 ```
+
+### When a build gets rate-limited
+
+A rate-limited request no longer ends the build. On a `429`, a `5xx`, a timeout or a
+dropped connection, the request waits and tries again: 1s, 2s, 4s, 8s, 16s, plus a little
+jitter, honouring the provider's `Retry-After` when it sends one, capped at 60 seconds per
+wait and about three minutes of waiting per request. `ZOTEUS_EMBED_MAX_RETRIES` sets how
+many attempts that is. A `400` is never retried: that is the oversized-batch answer above,
+and the batch would be exactly as oversized next time.
+
+**A build that still ends short keeps everything it indexed, and the next one continues
+it.** Run `zotero_index action:"build"` again: the items already crawled are not re-fetched,
+the PDF bodies already read are not re-read, and the passages already embedded are not
+re-embedded. Only the passages carrying no vector are bought, and `action:"status"` says how
+many those are (`passagesWithoutVectors`). Use `action:"build"`, not `action:"refresh"`:
+refresh is the one that starts the whole crawl over and pays for every vector a second time.
+
+**Pacing it up front.** `zotero_index action:"status"` reports `embedRate` for an API
+provider: the batch size, the pause, the estimated tokens per request, and the tokens per
+minute the build is actually sustaining. The server log prints the same line when the
+full-text pass starts. What makes the rate hard to guess is that at `ZOTEUS_EMBED_BATCH_DELAY_MS=0`
+it is set entirely by how fast the provider answers, and on a large full-text build that
+lands at roughly a provider's ceiling regardless of tier: a 10,428-item library measured
+about 1,000,000 tokens/min against OpenAI's Tier 2 limit of exactly 1,000,000 tokens/min for
+`text-embedding-3-small`, and 429'd on six builds in a row ([#48](https://github.com/oscardvs/zoteus/issues/48)).
+These settings carried that same library through in one uninterrupted 45-minute run, at
+about 400K tokens/min and roughly 21M tokens (about $0.42) in total:
+
+```bash
+ZOTEUS_EMBED_BATCH_SIZE=256
+ZOTEUS_EMBED_BATCH_DELAY_MS=8000
+```
+
+The default delay stays `0`, because backoff makes a standing pause unnecessary for the
+libraries that never approach a limit, and no single pause is right for both a Tier 1
+account and a Tier 5 one. Set it when a build tells you it is riding the ceiling, or set it
+up front on a full-text build of several thousand items.
 
 **Changing the model means rebuilding the index.** Vectors from two models share neither
 dimension nor vector space, so comparing them produces scores that look plausible and mean

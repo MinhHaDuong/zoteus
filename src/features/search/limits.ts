@@ -22,6 +22,20 @@ export const DEFAULT_INDEX_MAX_ITEMS = 5000;
 export const DEFAULT_EMBED_BATCH_SIZE = 32;
 
 /**
+ * Retries an embedding request gets after a rate limit or a server-side failure, before the
+ * provider's error is finally thrown. `ZOTEUS_EMBED_MAX_RETRIES` overrides it; the wait
+ * schedule it feeds lives in `embeddings.ts`.
+ *
+ * Five is chosen against that schedule rather than picked round: with the per-wait cap it
+ * spends at most about two minutes waiting, which is long enough to ride out the bursts a
+ * build produces when it sits near a tokens-per-minute ceiling, and short enough that a
+ * provider which is genuinely down fails the job rather than hanging it. The whole point is
+ * that a build costing hours of crawling and real money in embeddings must not be ended by
+ * one transient 429 (#48).
+ */
+export const DEFAULT_EMBED_MAX_RETRIES = 5;
+
+/**
  * Concurrent attachment full-text fetches during an index build, chosen by the API that is
  * serving the crawl. One number cannot be right for both, because the two paths fail in
  * opposite directions.

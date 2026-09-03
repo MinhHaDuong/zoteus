@@ -194,6 +194,7 @@ interface Statements {
   itemTitle: StatementSync;
   setVector: StatementSync;
   selectPassage: StatementSync;
+  unembedded: StatementSync;
   keyword: StatementSync;
   vectors: StatementSync;
   vectorWidth: StatementSync;
@@ -786,6 +787,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
       itemTitle: db.prepare('SELECT title AS t FROM items WHERE item_key = ?'),
       setVector: db.prepare('UPDATE passages SET vector = ? WHERE id = ?'),
       selectPassage: db.prepare('SELECT id, item_key, title, text, source FROM passages WHERE id = ?'),
+      // Unindexed on purpose: on a healthy index it stops at the first row and on a
+      // half-embedded one every scanned row is a row it wants, so an index on a column
+      // that is NULL for a moment during one build would cost every build to maintain.
+      unembedded: db.prepare(
+        'SELECT id, item_key, title, text, source FROM passages WHERE vector IS NULL ORDER BY pid LIMIT ?',
+      ),
       // Deliberately never selects `vector`: a keyword query must not pull vectors into JS.
       keyword: db.prepare(`
         SELECT p.id AS id, bm25(passages_fts) AS rank
@@ -1129,6 +1136,19 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // would otherwise be a statement per passage to delete nothing.
     if (this.hasCodes) this.stmts.deletePassageCode.run(id);
     this.invalidateCodes();
+  }
+
+  protected passagesMissingVectors(limit: number): ChunkRecord[] {
+    try {
+      return (this.stmts.unembedded.all(limit) as unknown as PassageRow[]).map((row) => {
+        const rec: ChunkRecord = { id: row.id, itemKey: row.item_key, title: row.title, text: row.text };
+        if (row.source === 'fulltext' || row.source === 'note' || row.source === 'annotation') rec.source = row.source;
+        return rec;
+      });
+    } catch (e) {
+      if (isCorruptionError(e)) throw this.noteCorruption(e);
+      throw e;
+    }
   }
 
   protected clearVectors(): void {

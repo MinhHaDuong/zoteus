@@ -10,7 +10,7 @@ import {
   SATURATED_FULLTEXT_CONCURRENCY,
 } from './limits.js';
 import { Semaphore } from '../../lib/semaphore.js';
-import { progressLine } from './build.js';
+import { embedRateLine, progressLine } from './build.js';
 import { describeLibraryToken } from './backend.js';
 import { saveIndex } from './persistence.js';
 import type {
@@ -21,6 +21,7 @@ import type {
   OwnWordsEntry,
   IncrementalBuildOptions,
   IncrementalUpdateOptions,
+  EmbedRate,
   IndexBuildStatus,
   IndexCounts,
   IndexSnapshot,
@@ -71,6 +72,9 @@ export type {
 export const FULLTEXT_CHUNK_SIZE = 1200;
 export const FULLTEXT_CHUNK_OVERLAP = 150;
 
+/** The chunker's own default, named here so the rate arithmetic can quote it. */
+export const METADATA_CHUNK_SIZE = 512;
+
 /** One sentence for the status fields that have room only to say the index is unusable. */
 export const UNREADABLE_STORE = 'the search index cannot be read';
 
@@ -80,6 +84,29 @@ export const UNREADABLE_STORE = 'the search index cannot be read';
  * the same granularity and one commit covers a comparable amount of work.
  */
 const PAGE_GROUP = 100;
+
+/**
+ * Passages a resumed build pulls out of the store per vector-backfill round. Bounded so a
+ * build that has to embed 30,000 orphaned passages never holds 30,000 passage texts at
+ * once; large enough that the round trip to the store is amortized over several embedding
+ * batches at the default batch size of 32.
+ */
+const VECTOR_BACKFILL_GROUP = 500;
+
+/**
+ * Characters per token, for the rate arithmetic on `IndexBuildStatus.embedRate`. The rule
+ * of thumb every provider publishes for English prose; a real count would need this side to
+ * ship a tokenizer per model, and the answer is being compared against limits quoted in
+ * round millions, so the third significant figure buys nothing.
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * Characters embedded before the observed tokens-per-minute figure is reported at all. Below
+ * it the measurement is one or two requests' latency, which says more about the first
+ * connection than about the rate this build will sustain.
+ */
+const RATE_SAMPLE_CHARS = 200_000;
 
 function itemText(d: any): string {
   const creators = (d.creators ?? []).map((c: any) => c.lastName ?? c.name).filter(Boolean).join(' ');
@@ -345,6 +372,17 @@ export abstract class SearchIndexBase implements SearchIndex {
    * to show for it, so the loss was discovered on the next startup (#10).
    */
   private persistError: string | undefined = undefined;
+  /**
+   * The pacing this job is embedding at, and what it has actually achieved: enough to
+   * answer "will this build be rate-limited?", which is the question #48 turned out to be.
+   * `embedChars` and `embedMs` cover the time inside the provider plus the configured
+   * pauses, i.e. the wall clock the embedding pass owns, so their ratio is the sustained
+   * rate rather than a peak.
+   */
+  private embedBatchInUse: number | undefined = undefined;
+  private embedDelayInUse = 0;
+  private embedChars = 0;
+  private embedMs = 0;
 
   constructor(protected readonly opts: SearchIndexOptions) {}
 
@@ -418,6 +456,21 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected adoptVector(_rec: ChunkRecord): boolean {
     return false;
   }
+  /**
+   * Up to `limit` committed passages that carry no vector, so a resumed build can buy the
+   * embeddings an interrupted one never got to.
+   *
+   * A page rather than the whole set, and deliberately: after a provider failure partway
+   * through a full-text build there can be tens of thousands of these, and materializing
+   * them all would hold every passage's text in memory at once. The caller loops until the
+   * store answers with none.
+   *
+   * `pendingPassages` on the checkpoint does not cover this. That names the handful an
+   * interruption caught between `putPassage` and the embedding call; this is the far larger
+   * set an embedder that DIED mid-build left behind, which until #48 nothing ever came back
+   * for, because the failed build cleared its own checkpoint and the next one started over.
+   */
+  protected abstract passagesMissingVectors(limit: number): ChunkRecord[];
   /** Discard every stored vector, keeping the passages. */
   protected abstract clearVectors(): void;
   /**
@@ -566,6 +619,30 @@ export abstract class SearchIndexBase implements SearchIndex {
     }
   }
 
+  /**
+   * The rate arithmetic for this job, or undefined when it does not apply: no API provider
+   * (a local pipeline answers to no tokens-per-minute limit), or nothing embedded yet.
+   */
+  private embedRate(): EmbedRate | undefined {
+    const name = this.opts.embedder?.name;
+    if (name !== 'openai' && name !== 'gemini') return undefined;
+    const batchSize = this.embedBatchInUse;
+    if (!batchSize) return undefined;
+    // The chunk size this job is actually producing: body passages are more than twice the
+    // size of metadata ones, so quoting one figure for both would be wrong by that much on
+    // whichever build it did not describe.
+    const chunk = this.fulltextEnabled ? FULLTEXT_CHUNK_SIZE : METADATA_CHUNK_SIZE;
+    const rate: EmbedRate = {
+      batchSize,
+      delayMs: this.embedDelayInUse,
+      tokensPerRequest: Math.round((batchSize * chunk) / CHARS_PER_TOKEN),
+    };
+    if (this.embedChars >= RATE_SAMPLE_CHARS && this.embedMs > 0) {
+      rate.tokensPerMinute = Math.round((this.embedChars / CHARS_PER_TOKEN / this.embedMs) * 60_000);
+    }
+    return rate;
+  }
+
   /** Record the first provider failure so status, not just the log, can report it. */
   private noteEmbedFailure(e: unknown): void {
     if (this.embedderError) return;
@@ -598,6 +675,16 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.localApiDegradedAt !== undefined) {
       s.localApiDegradedAt = new Date(this.localApiDegradedAt).toISOString();
     }
+    // Only with a provider in hand: with ZOTEUS_EMBEDDINGS=off, or a key that is unset,
+    // every passage lacks a vector by design and reporting a shortfall would be a fiction.
+    // Withheld too when the vectors were dropped as another model's, since that has its own
+    // notice naming its own remedy and two would be one too many.
+    if (this.embedderId && !this.vectorsStale) {
+      const missing = base.documents - base.vectors;
+      if (missing > 0) s.passagesWithoutVectors = missing;
+    }
+    const rate = this.embedRate();
+    if (rate) s.embedRate = rate;
     if (this.fault) {
       s.state = 'error';
       s.lastError = UNREADABLE_STORE;
@@ -808,6 +895,12 @@ export abstract class SearchIndexBase implements SearchIndex {
     // look degraded for as long as the index lives.
     this.localApiDegradedAt = undefined;
     this.itemsRemoved = 0;
+    // This job reports its own rate, like everything else here: the pacing of the last
+    // build says nothing about whether this one will be throttled.
+    this.embedBatchInUse = undefined;
+    this.embedDelayInUse = 0;
+    this.embedChars = 0;
+    this.embedMs = 0;
     this.phase = 'metadata';
     this.fulltextItemsScanned = 0;
     this.fulltextItemsTotal = 0;
@@ -825,6 +918,8 @@ export abstract class SearchIndexBase implements SearchIndex {
      * not by passages, so finding the resume point never walks the index.
      */
     let known: Set<string> | undefined;
+    /** Passages this run embedded on behalf of the interrupted one (see backfillVectors). */
+    let backfilled = 0;
     if (resume) {
       // The store is kept exactly as it is, so what it holds keeps answering queries
       // throughout, and the counters it was committed with come back with it.
@@ -917,7 +1012,14 @@ export abstract class SearchIndexBase implements SearchIndex {
         ? 'The library had moved on since, so the crawl walked the whole library again to be sure of covering it, ' +
           'but nothing already indexed was re-chunked or re-embedded.'
         : `The crawl picked up at item ${resume!.crawlOffset}, so nothing already indexed was re-fetched or re-embedded.`;
-      const resumed = `This build RESUMED an interrupted one: ${this.resumedFrom} items were already indexed. ${how}`;
+      // Said outright because it is the expensive part and the part that used to be
+      // repeated: an embedder that failed mid-build leaves passages committed without
+      // vectors, and buying only those is the whole difference between a resume and a
+      // rebuild on a library whose full-text pass costs tens of dollars (#48).
+      const filled = backfilled
+        ? ` ${backfilled} passage(s) the interrupted build committed without vectors were embedded here, and only those.`
+        : '';
+      const resumed = `This build RESUMED an interrupted one: ${this.resumedFrom} items were already indexed. ${how}${filled}`;
       this.updateNotice = opts.note ? `${opts.note} ${resumed}` : resumed;
     };
     if (resume) noteResumed();
@@ -980,6 +1082,46 @@ export abstract class SearchIndexBase implements SearchIndex {
     };
     const embedPending = (force: boolean): Promise<void> =>
       this.embedPending(pending, token, embedBatchSize, embedBatchDelayMs, force);
+
+    /**
+     * Embed the committed passages that carry no vector, a page at a time.
+     *
+     * A page rather than one list, because after a provider failure partway through a
+     * full-text build there can be tens of thousands, and holding every passage's text in
+     * memory at once would trade one failure mode for another. The loop ends when the store
+     * answers with none, when the embedder dies again (`hasEmbedder` goes false and there
+     * is nothing more to be bought), or when a round fails to reduce the shortfall, which
+     * is the guard against asking forever for rows nothing can fill.
+     */
+    const backfillVectors = async (): Promise<number> => {
+      if (!this.hasEmbedder) return 0;
+      const shortfall = (): number => {
+        const c = this.counts();
+        return c.documents - c.vectors;
+      };
+      let remaining = shortfall();
+      let embedded = 0;
+      while (remaining > 0 && this.hasEmbedder && !token.cancelled) {
+        const batch = this.passagesMissingVectors(VECTOR_BACKFILL_GROUP);
+        if (!batch.length) break;
+        if (!embedded) {
+          this.opts.logger?.info(
+            `index build: embedding ${remaining} passage(s) an interrupted build committed without vectors.`,
+          );
+        }
+        for (const rec of batch) pending.push(rec);
+        await embedPending(true);
+        const left = shortfall();
+        if (left >= remaining) break;
+        embedded += remaining - left;
+        remaining = left;
+        itemsSinceLog += batch.length;
+        itemsSincePersist += batch.length;
+        maybeLog();
+        await maybePersist();
+      }
+      return embedded;
+    };
 
     try {
       // The passages the interrupted run had written but not yet embedded, re-queued
@@ -1081,6 +1223,13 @@ export abstract class SearchIndexBase implements SearchIndex {
         this.phase = 'fulltext';
         this.fulltextItemsTotal = worklist.length;
         forceLog();
+        // Said once, at the start of the pass that does the spending, because this is the
+        // pass where an API provider's tokens-per-minute limit decides whether the build
+        // finishes. The metadata pass is over in minutes and never reaches a rate that
+        // matters; the body crawl runs for hours at whatever pace these two dials set, and
+        // until #48 nothing anywhere printed what that pace was.
+        const plan = this.embedRate();
+        if (plan) this.opts.logger?.info(`index build: embedding through ${this.opts.embedder!.name} at ${embedRateLine(plan)}.`);
         // Items whose attachments Zotero has no extracted text for are dropped here rather
         // than awaited one by one: on a library where a minority of items have PDFs that is
         // most of the worklist, and each would otherwise cost a round trip to learn nothing.
@@ -1131,6 +1280,14 @@ export abstract class SearchIndexBase implements SearchIndex {
         }
       }
 
+      // The last thing a resumed build does, and the half of #48 the checkpoint alone does
+      // not fix. An embedder that died mid-build left thousands of passages committed,
+      // keyword-searchable and vector-less; the crawl above steps over their items by key
+      // and the full-text pass steps over them with `hasFulltext`, precisely because they
+      // ARE indexed. Only this comes back for them, and only for the embedding: no page is
+      // re-fetched, no PDF is re-read, no passage is re-chunked.
+      if (resume && !token.cancelled) backfilled = await backfillVectors();
+
       this.builtFromVersion = this.itemsFetched;
       // A cancelled crawl covers an unknown prefix of the library, so it gets no stamp: an
       // update against one would treat every item it never reached as unchanged forever.
@@ -1144,7 +1301,14 @@ export abstract class SearchIndexBase implements SearchIndex {
       // nothing — the items whose attachments were never crawled are unchanged in Zotero,
       // so they appear in no delta, ever. Their body text would be missing permanently and
       // nothing would say so, because `fulltextEnabled` is true and `fulltextReason` unset.
-      if (!token.cancelled && crawlVersion && !fulltextPassFailed) {
+      //
+      // An embedder that failed is withheld from the stamp on the same grounds. The index
+      // is complete on text and incomplete on vectors, and a stamp would let the next
+      // action:"update" run a `?since=V` delta that finds nothing to do: the passages
+      // missing vectors belong to items Zotero has not touched, so they appear in no delta,
+      // ever, and the index would sit half-embedded for good. Without the stamp the update
+      // falls back to a build, and that build resumes and finishes the embedding (#48).
+      if (!token.cancelled && crawlVersion && !fulltextPassFailed && !this.embedderError) {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.versionBackend;
       }
@@ -1156,7 +1320,13 @@ export abstract class SearchIndexBase implements SearchIndex {
       }
       // A finished build has nothing left to resume; a stopped one is the whole point of
       // keeping this, and its checkpoint has to reach disk in the same write as its rows.
-      if (token.cancelled) noteCheckpoint();
+      //
+      // A build the embedder died in counts as unfinished, and dropping its checkpoint is
+      // exactly how #48 turned six transient 429s into six full rebuilds: the pass carried
+      // on writing passages BM25-only, reached the end, reported `done`, and cleared the
+      // one record that would have let the next build pick up the un-embedded remainder.
+      // It kept everything except the ability to continue.
+      if (token.cancelled || this.embedderError) noteCheckpoint();
       else this.checkpoint = undefined;
       // Before the persist, so the codes derived from these vectors are committed by the
       // same transaction that makes the vectors durable. A cancelled build gets them too:
@@ -1742,14 +1912,24 @@ export abstract class SearchIndexBase implements SearchIndex {
       pending.length = 0;
       return;
     }
+    // Recorded per drain rather than per build, so `embedRate` describes the pacing in
+    // force right now even on a job whose caller changed it between passes.
+    this.embedBatchInUse = batchSize;
+    this.embedDelayInUse = delayMs;
     while (pending.length >= (force ? 1 : batchSize)) {
       if (token.cancelled) return;
       const batch = pending.splice(0, Math.min(batchSize, pending.length));
+      const startedAt = Date.now();
       try {
         const vecs = await this.opts.embedder!.embed(batch.map((r) => r.text), 'passage');
         batch.forEach((r, i) => {
           if (vecs[i]) this.putVector(r.id, vecs[i]!);
         });
+        // Only a request that produced vectors counts towards the rate: one that spent two
+        // minutes backing off and then failed measures the provider's refusal, not this
+        // build's throughput.
+        this.embedChars += batch.reduce((n, r) => n + r.text.length, 0);
+        this.embedMs += Date.now() - startedAt + delayMs;
       } catch (e) {
         // hasEmbedder goes false from here, which both stops this loop and makes every
         // later status report say why the index has no vectors.
@@ -2068,6 +2248,16 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   protected putVector(id: string, vector: number[]): void {
     this.vectors.add(id, vector);
+  }
+
+  protected passagesMissingVectors(limit: number): ChunkRecord[] {
+    const out: ChunkRecord[] = [];
+    for (const [id, rec] of this.chunks) {
+      if (this.vectors.has(id)) continue;
+      out.push(rec);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   protected clearVectors(): void {

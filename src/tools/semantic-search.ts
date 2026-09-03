@@ -8,6 +8,7 @@ import {
   persistNotice,
   progressLine,
   staleVectorsNotice,
+  unembeddedNotice,
   startIndexBuild,
   truncationNotice,
 } from '../features/search/build.js';
@@ -118,7 +119,7 @@ const semanticSearch: ToolDefinition = {
       (hits.length
         ? `Top ${hits.length} match(es) for "${args.q}" (${ctx.search.embedderName}).`
         : `No matches for "${args.q}".`) +
-      (args.mode === 'keyword' ? '' : embedderNotice(after) + staleVectorsNotice(after)) +
+      (args.mode === 'keyword' ? '' : embedderNotice(after) + staleVectorsNotice(after) + unembeddedNotice(after)) +
       fulltextNotice(after) +
       // Same reasoning: a search that cannot see the reader's own notes must say so where
       // the empty result is read, not only in zotero_index status.
@@ -136,6 +137,9 @@ const semanticSearch: ToolDefinition = {
         embedderActive: after.embedderActive,
         ...(after.embedderReason ? { embedderReason: after.embedderReason } : {}),
         ...(after.vectorsStaleReason ? { vectorsStaleReason: after.vectorsStaleReason } : {}),
+        // The size of the gap between what is searchable by keyword and what is rankable by
+        // meaning, so "no matches" over a half-embedded index is not read as an empty library.
+        ...(after.passagesWithoutVectors ? { passagesWithoutVectors: after.passagesWithoutVectors } : {}),
         fulltextEnabled: after.fulltextEnabled,
         ...(after.fulltextReason ? { fulltextReason: after.fulltextReason } : {}),
         ownWordsEnabled: after.ownWordsEnabled,
