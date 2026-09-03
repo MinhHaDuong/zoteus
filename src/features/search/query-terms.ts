@@ -26,8 +26,9 @@
  * `the`, `of the` — and search has always answered those with nothing, instantly. Three or
  * more are a phrase, and a phrase the user typed is worth running even though every word of
  * it is common. Measured, the bare query `the` costs 0 ms and returns nothing where running
- * it costs 750 ms and returns ten unrelated documents, and the fold makes that path
- * reachable from real words in other languages: `thé` is French for tea and lands on `the`.
+ * it costs 750 ms and returns ten unrelated documents. (An accented word no longer folds
+ * onto a common one — `thé`, French for tea, used to land on `the` and is its own term
+ * now — so this path is reached by genuinely common words, which is what it was for.)
  */
 
 /** Whether a term is common enough in this index to be worth dropping from a query. */
@@ -56,3 +57,11 @@ export function pruneTerms(terms: string[], prunable: TermPredicate): string[] {
   // have, with nothing, for free.
   return terms.length >= MIN_PHRASE_TERMS ? terms : kept;
 }
+
+/**
+ * Most accented spellings one expanded query term may carry, highest document frequency
+ * first (see the SQLite backend's expandTerm and the memory backend's search). Bounds
+ * the expanded query against a corpus seeded with crafted spellings; comfortably above
+ * the widest real group measured (15, the Vietnamese syllables under `to`).
+ */
+export const MAX_ACCENT_VARIANTS = 24;

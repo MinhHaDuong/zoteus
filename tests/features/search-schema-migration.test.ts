@@ -12,10 +12,12 @@ import type { SchemaMigration } from '../../src/features/search/sqlite-index.js'
  *
  * Until this existed the stamp had exactly two accepted states — no tables, or this
  * build's own version — and everything else was moved aside and rebuilt from zero,
- * re-embedding included. That has never fired for anyone, because the stamp has been 1
- * since the SQLite backend landed, which is the entire point: the next bump is the
- * expensive one, and it costs a 255k-passage library five and a half hours of local
- * embedding (or a hosted provider's bill) for what is usually an added column.
+ * re-embedding included. The ladder was built before the first bump, which is the entire
+ * point: without it, that bump would have cost a 255k-passage library five and a half
+ * hours of local embedding (or a hosted provider's bill). The first real rung has now
+ * shipped — the keep-diacritics re-tokenization, stamped 2 and pinned by the cases at
+ * the end of this file; the ADD_COLUMN-style rungs above them are generic machinery
+ * fixtures, not shipped migrations.
  *
  * These cases play the part of the build that makes that bump, through the schemaVersion /
  * migrations options, and pin both halves of the answer: a database at an older version of
@@ -100,7 +102,7 @@ function sidelined(dbPath: string): string[] {
 
 /** The shape of a routine bump: a column nothing already stored has to be re-derived for. */
 const ADD_COLUMN: SchemaMigration = {
-  to: 2,
+  to: 3,
   what: 'added passages.language',
   up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT'),
 };
@@ -118,10 +120,10 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     const embeddedByBuild = embedder.texts;
 
     // The next build: same file, one version further on, with the rung that gets there.
-    const second = await openIndex(path, { embedder, schemaVersion: 2, migrations: [ADD_COLUMN] });
+    const second = await openIndex(path, { embedder, schemaVersion: 3, migrations: [ADD_COLUMN] });
     try {
       expect(sidelined(path)).toHaveLength(0);
-      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
       // The rows themselves are untouched: same passages, same vectors, still searchable.
       const after = second.status();
       expect(after.documents).toBe(before.documents);
@@ -132,7 +134,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
       expect(columns.n).toBe(1);
       // Nothing was re-embedded to get here.
       expect(embedder.texts).toBe(embeddedByBuild);
-      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 1 to 2/);
+      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 2 to 3/);
     } finally {
       await second.close();
     }
@@ -147,13 +149,13 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
 
     const ran: number[] = [];
     const ladder: SchemaMigration[] = [
-      { to: 2, what: 'added passages.language', up: (db) => { ran.push(2); db.exec('ALTER TABLE passages ADD COLUMN language TEXT'); } },
-      { to: 3, what: 'indexed passages.language', up: (db) => { ran.push(3); db.exec('CREATE INDEX passages_language ON passages(language)'); } },
+      { to: 3, what: 'added passages.language', up: (db) => { ran.push(3); db.exec('ALTER TABLE passages ADD COLUMN language TEXT'); } },
+      { to: 4, what: 'indexed passages.language', up: (db) => { ran.push(4); db.exec('CREATE INDEX passages_language ON passages(language)'); } },
     ];
-    const second = await openIndex(path, { schemaVersion: 3, migrations: ladder });
+    const second = await openIndex(path, { schemaVersion: 4, migrations: ladder });
     try {
-      expect(ran).toEqual([2, 3]);
-      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
+      expect(ran).toEqual([3, 4]);
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('4');
       expect(second.status().documents).toBeGreaterThan(0);
     } finally {
       await second.close();
@@ -169,8 +171,8 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
 
     // Version 3 exists, version 2 does not: nothing accounts for what version 2's rows
     // were, so stepping over it would be a guess rather than a migration.
-    const gapped: SchemaMigration[] = [{ to: 3, what: 'added a column', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }];
-    const second = await openIndex(path, { schemaVersion: 3, migrations: gapped });
+    const gapped: SchemaMigration[] = [{ to: 4, what: 'added a column', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }];
+    const second = await openIndex(path, { schemaVersion: 4, migrations: gapped });
     try {
       expect(sidelined(path)).toHaveLength(1);
       expect(second.status().documents).toBe(0);
@@ -179,7 +181,12 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     }
   });
 
-  sqliteIt('leaves the database exactly as it was when a rung throws, then sidelines it', async () => {
+  sqliteIt('refuses, and keeps the file, when a rung fails for a transient reason', async () => {
+    // The failure this guards against was executed, not argued: a `ulimit -f`-induced
+    // write error mid-ladder — same class as a full disk — used to be treated exactly
+    // like a foreign schema, and a proven-intact 87 MB database was renamed away while a
+    // fresh empty one silently took its place. A transient error is a database that
+    // failed to upgrade TODAY; only corruption is evidence to move the file aside.
     const path = tmpDbPath('migrate-failure');
     const first = await openIndex(path);
     await first.build(ITEMS);
@@ -189,7 +196,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
 
     const broken: SchemaMigration[] = [
       {
-        to: 2,
+        to: 3,
         what: 'added passages.language',
         up: (db) => {
           db.exec('ALTER TABLE passages ADD COLUMN language TEXT');
@@ -197,18 +204,48 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
         },
       },
     ];
-    const second = await openIndex(path, { schemaVersion: 2, migrations: broken });
+    await expect(openIndex(path, { schemaVersion: 3, migrations: broken })).rejects.toThrow(
+      /intact at schema version 2 but could not be upgraded to 3: rung failed halfway/,
+    );
+    // NOT sidelined: the original file sits untouched at its own path, at its old stamp,
+    // holding every row and without the half-applied column — the rung and the stamp
+    // share one transaction, and the refusal wrote nothing.
+    expect(sidelined(path)).toHaveLength(0);
+    expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
+    expect(readColumn(path, 'SELECT COUNT(*) AS n FROM passages').n).toBe(documents);
+    expect(readColumn(path, "SELECT COUNT(*) AS n FROM pragma_table_info('passages') WHERE name = 'language'").n).toBe(0);
+    // And the retry the refusal promised is real: the same database opens and migrates
+    // once the condition clears.
+    const repaired = await openIndex(path, {
+      schemaVersion: 3,
+      migrations: [{ to: 3, what: 'added passages.language', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }],
+    });
     try {
-      // The moved-aside file is the ORIGINAL: still at version 1, still holding its rows,
-      // and without the half-applied column — the rung and the stamp share one transaction.
-      const aside = sidelined(path);
-      expect(aside).toHaveLength(1);
-      expect(readColumn(aside[0], "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('1');
-      expect(readColumn(aside[0], 'SELECT COUNT(*) AS n FROM passages').n).toBe(documents);
-      expect(readColumn(aside[0], "SELECT COUNT(*) AS n FROM pragma_table_info('passages') WHERE name = 'language'").n).toBe(0);
-      // And the fresh index at the original path says why it is empty.
+      expect(repaired.status().documents).toBe(documents);
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
+    } finally {
+      await repaired.close();
+    }
+  });
+
+  sqliteIt('still sidelines when the rung failure IS corruption', async () => {
+    // The discriminating control for the refusal above: the same shape of failure, with a
+    // corruption sentence in it, must still move the file aside — a database whose pages
+    // are bad is evidence, not a retry candidate.
+    const path = tmpDbPath('migrate-corrupt');
+    const first = await openIndex(path);
+    await first.build(ITEMS);
+    await first.save();
+    await first.close();
+
+    const corrupting: SchemaMigration[] = [
+      { to: 3, what: 'added passages.language', up: () => { throw new Error('database disk image is malformed'); } },
+    ];
+    const second = await openIndex(path, { schemaVersion: 3, migrations: corrupting });
+    try {
+      expect(sidelined(path)).toHaveLength(1);
       expect(second.status().documents).toBe(0);
-      expect(second.buildStatus().storageNotice).toMatch(/could not be upgraded \(rung failed halfway\)/);
+      expect(second.buildStatus().storageNotice).toMatch(/could not be upgraded \(database disk image is malformed\)/);
     } finally {
       await second.close();
     }
@@ -222,7 +259,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     await first.close();
     stampSchemaVersion(path, '99');
 
-    const second = await openIndex(path, { schemaVersion: 2, migrations: [ADD_COLUMN] });
+    const second = await openIndex(path, { schemaVersion: 3, migrations: [ADD_COLUMN] });
     try {
       expect(sidelined(path)).toHaveLength(1);
       expect(readColumn(sidelined(path)[0], "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('99');
@@ -360,6 +397,97 @@ describe('a sideline hands its vectors to the rebuild that replaces it', () => {
       const notice = second.buildStatus().storageNotice ?? '';
       expect(notice).toMatch(new RegExp(`re-indexes ${documents} passage\\(s\\)`));
       expect(notice).toMatch(/no embedding/);
+    } finally {
+      await second.close();
+    }
+  });
+});
+
+describe('the rung that keeps diacritics re-indexes text and re-embeds nothing', () => {
+  /**
+   * Age a fresh index into what version 1 actually left on disk: the keyword index
+   * declared with `remove_diacritics 2`, holding the raw passage text rather than the
+   * augmented form. Everything else — rows, vectors, stamp — is what the build wrote.
+   *
+   * Built by hand rather than by checking out the old code, because what has to be
+   * migrated is a FILE, and the only honest fixture for a file format is the file.
+   */
+  function ageToVersionOne(dbPath: string): void {
+    const db = new DatabaseSync(dbPath);
+    db.exec('DROP TABLE IF EXISTS passages_fts');
+    db.exec(`
+      CREATE VIRTUAL TABLE passages_fts USING fts5(
+        text,
+        content='passages',
+        content_rowid='pid',
+        tokenize='unicode61 remove_diacritics 2'
+      );
+    `);
+    const insert = db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)');
+    for (const row of db.prepare('SELECT pid, text FROM passages').all() as Array<{ pid: number; text: string }>) {
+      insert.run(row.pid, row.text);
+    }
+    db.prepare("INSERT OR REPLACE INTO meta(key, value) VALUES ('schemaVersion', '1')").run();
+    db.close();
+  }
+
+  sqliteIt('migrates a version 1 index in place, without re-embedding a single passage', async () => {
+    const path = tmpDbPath('migrate-diacritics');
+    const embedder = new CountingEmbedder();
+    const first = await openIndex(path, { embedder });
+    await first.build(ITEMS);
+    await first.save();
+    const before = first.status();
+    await first.close();
+    const embeddedByBuild = embedder.texts;
+    expect(before.vectors).toBeGreaterThan(0);
+
+    ageToVersionOne(path);
+
+    const second = await openIndex(path, { embedder });
+    try {
+      // Migrated, not sidelined: the whole point of a rung is that the file survives.
+      expect(sidelined(path)).toHaveLength(0);
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
+      const after = second.status();
+      expect(after.documents).toBe(before.documents);
+      expect(after.vectors).toBe(before.vectors);
+      // The claim this rung exists to make, and the expensive one to get wrong.
+      expect(embedder.texts).toBe(embeddedByBuild);
+      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 1 to 2/);
+    } finally {
+      await second.close();
+    }
+  });
+
+  sqliteIt('and the re-indexed text answers with the new tokenizer, not the old one', async () => {
+    const path = tmpDbPath('migrate-diacritics-answers');
+    const first = await openIndex(path, { embedder: new CountingEmbedder() });
+    await first.build([
+      // Two accented passages against one bare one, so the accented spelling dominates
+      // and the unaccented query expands (the gate compares document frequencies).
+      { key: 'V1', data: { itemType: 'book', title: 'Bao cao', abstractNote: 'năm 2020 phát triển bền vững' } },
+      { key: 'V2', data: { itemType: 'book', title: 'Ke hoach', abstractNote: 'năm 2021 chính sách năng lượng' } },
+      // The contrast, without which neither assertion below could fail: a document holding
+      // the bare spelling. On a `remove_diacritics 2` index the two are one token and the
+      // accented query returns both.
+      { key: 'EN', data: { itemType: 'book', title: 'Nam river', abstractNote: 'nam river basin hydrology' } },
+    ]);
+    await first.save();
+    await first.close();
+
+    ageToVersionOne(path);
+
+    const second = await openIndex(path, { embedder: new CountingEmbedder() });
+    try {
+      // Before the rung this query was answered by a `remove_diacritics 2` index, where the
+      // accented and unaccented spellings are one token and this could not discriminate.
+      // After it, the accented query is exact and the unaccented one still reaches the
+      // documents through query expansion over the map the rung derived.
+      const exact = await second.query('n\u0103m', { limit: 5, mode: 'keyword' });
+      expect([...new Set(exact.map((h) => h.itemKey))].sort()).toEqual(['V1', 'V2']);
+      const loose = await second.query('nam', { limit: 5, mode: 'keyword' });
+      expect([...new Set(loose.map((h) => h.itemKey))].sort()).toEqual(['EN', 'V1', 'V2']);
     } finally {
       await second.close();
     }

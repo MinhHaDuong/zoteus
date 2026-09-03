@@ -472,20 +472,52 @@ about 5.4 GB of heap to parse and OOMs stock Node. Measured on the same 7540-ite
 | JSON (`memory`) | 337 s | 5370 MB | 370-500 ms | re-parses the whole file |
 | SQLite (`sqlite`) | 46.6 s | 162 MB | 1-76 ms | opens the file |
 
-The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 2`,
+The SQLite backend stores passages in an **FTS5** table (`unicode61 remove_diacritics 0`,
 ranked with `bm25()`) and vectors as per-passage `BLOB`s, so a keyword search reads only
 the rows it ranks and never materializes the library. The semantic path used to be the one
 that grew with the library, because it read every vector; it now reads a binary code per
 vector instead and fetches the float32 vectors of a few hundred candidates. See
 [Two-stage vector search](#two-stage-vector-search).
 
-**Diacritics.** Searches are diacritics-insensitive in both directions and on both
-backends: `Bronte` finds `Brontë` and `Brontë` finds `Bronte`. The document side of the
-FTS5 index is folded by SQLite (`remove_diacritics 2`); the query side is folded in JS by
-`tokenize.ts`, which is also what the JSON backend tokenizes with, so the two agree by
-construction. The JS fold deliberately reproduces `unicode61` and no more — `ø œ æ ł đ ð
-þ ß` are letters to unicode61 rather than accented forms, so they are letters here too,
-and `søren` does not answer to `soren`.
+**Diacritics.** An unaccented search finds accented words: `Bronte` finds `Brontë`, and
+`theorie` finds `théorie`, on both backends. An accented search is answered exactly:
+`Brontë` finds documents that spell it `Brontë`.
+
+The index holds each word exactly as it was written — the FTS5 table is declared
+`remove_diacritics 0` and nothing strips marks on the way in. The tolerant direction is
+paid on the **query** side instead: an unaccented query term is expanded to the accented
+spellings the library's vocabulary actually holds (`theorie` runs as
+`theorie OR théorie`), through a small folded-form → spellings map each backend derives
+from its own vocabulary. Because nothing extra is indexed, document length, term
+frequency and idf are what the text says they are, and ranking is untouched for every
+query that needs no expansion.
+
+Expansion is optional (`ZOTEUS_ACCENT_EXPANSION`, on by default): it compensates the
+recall that keeping diacritics in the index removed for unaccented queries, and setting
+it to `false` opts into strict as-typed exactness — a query-time switch only, so flipping
+it never needs a rebuild.
+
+Expansion is **dominance-gated**: a term expands only when the accented spellings
+outweigh the typed one in this library (by document frequency, compared at derivation
+time). `theorie` expands because the library overwhelmingly writes `théorie`; `trong`
+does not, because the library holds it 25 771 times as typed and its accented siblings
+(`trọng`, `trồng`, …) are different, rarer words whose high idf would otherwise outrank
+what the user asked for. The gate is corpus-derived — there is no threshold to tune.
+
+It used to strip marks from everything on both sides, and that is a different thing from
+being insensitive to them. In a library holding more than one language it merges
+vocabulary rather than normalizing spelling: Vietnamese `án`, `bé`, `thể` and `thế` all
+land on English `an`, `be` and `the`, and a tone mark in Vietnamese is part of the word,
+not an accent on it — `ma má mà mả mã mạ` are six words. Once merged into a token that
+common, they could not be searched for at all.
+
+The remaining asymmetry is deliberate: an accented query does **not** find a document that
+spells the word without its accents. Expansion runs one way only, because expanding `thể`
+toward `the` is exactly the merge above.
+
+Marks are stripped (for the expansion map's keys) the way `unicode61` strips them and no
+further — `ø œ æ ł đ ð þ ß` are letters to it rather than accented forms, so they are
+letters here too, and `søren` does not answer to `soren`.
 
 **Common words.** Some words are too common in a library to rank on — searching them
 walks a long posting list to separate almost nothing — so they are dropped from the query

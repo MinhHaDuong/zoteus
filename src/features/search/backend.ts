@@ -487,6 +487,15 @@ export interface SearchIndexOptions {
   configured?: string;
   /** Why the request produced no provider at all, known at construction time. */
   unavailable?: string;
+  /**
+   * Query-side accent expansion (ZOTEUS_ACCENT_EXPANSION, default true): an unaccented
+   * query term also matches the accented spellings that dominate the library's
+   * vocabulary. Expansion compensates the recall that keeping diacritics in the index
+   * removed for unaccented queries; false opts into strict as-typed exactness. Gates the
+   * query step only — what is indexed, the migration and the variants-map derivation are
+   * unchanged either way, so flipping it never needs a rebuild.
+   */
+  accentExpansion?: boolean;
 }
 
 /** The JSON artifact the legacy backend writes, and the SQLite backend imports. */

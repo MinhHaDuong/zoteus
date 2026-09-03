@@ -6,7 +6,33 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- **The keyword index keeps diacritics.** It used to strip them from every token on both
+  sides (`remove_diacritics 2`), which in a multilingual library merges distinct words
+  rather than normalizing spelling: Vietnamese `án`, `bé`, `thể` and `thế` all landed on
+  English `an`, `be` and `the` and could not be searched for at all. Each word is now
+  indexed exactly as written (`remove_diacritics 0`), an accented query is answered
+  exactly, and an unaccented query still reaches accented documents by expanding to the
+  accented spellings the library's vocabulary holds (`theorie` runs as
+  `theorie OR théorie`) — but only where those spellings dominate the typed one in this
+  library, so a common word is never dragged toward its rare accented siblings. Nothing
+  extra is indexed, so ranking is untouched for queries that need no expansion.
+  Expansion is optional (`ZOTEUS_ACCENT_EXPANSION`, default `true`): it compensates the
+  recall that keeping diacritics removed for unaccented queries, and disabling it opts
+  into strict as-typed exactness, at query time only — no rebuild either way. Search semantics change accordingly: `thé` no longer answers as
+  `the`, and `soren` still does not answer to `søren` (`ø` is a letter, not an accent).
+  **Existing SQLite indexes are migrated in place** on first open (schema 1 → 2: the
+  keyword table is re-tokenized; no vectors are re-computed and nothing re-reads Zotero).
+  A migrated index cannot be opened by an older build — downgrading sidelines it and
+  starts an empty one, so the library would need a rebuild there.
+
 ### Fixed
+- **A migration that failed for a transient reason discarded an intact index.** Any
+  error inside the schema-upgrade ladder — a full disk as much as a corrupt page — used
+  to be treated as a foreign schema: the database was moved aside and a fresh empty one
+  silently took its place. A non-corruption failure now leaves the file untouched at its
+  old version and search refuses with the reason; the upgrade is retried on the next
+  open. Only corruption still sidelines the file.
 - **A query made mostly of common words returned a confident wrong answer instead of an
   honest one.** `tokenize()` dropped 29 English function words from every query, and
   `to be or not to be` is all of them except `not` — so the search that ran was a

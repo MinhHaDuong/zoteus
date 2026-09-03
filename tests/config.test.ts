@@ -20,6 +20,9 @@ describe('loadConfig', () => {
     // Two-stage vector search is on by default: it is what keeps a semantic query on a
     // large index from scanning every vector (#30).
     expect(cfg.indexAnn).toBe(true);
+    // Accent expansion is on by default: it compensates the recall that keeping
+    // diacritics in the index removed for unaccented queries.
+    expect(cfg.accentExpansion).toBe(true);
     expect(cfg.indexAnnOversample).toBe(16);
     expect(cfg.indexAnnMinCandidates).toBe(500);
     expect(cfg.allowDelete).toBe(false);
@@ -43,6 +46,7 @@ describe('loadConfig', () => {
       ZOTEUS_EMBED_BATCH_SIZE: '16',
       ZOTEUS_EMBED_BATCH_DELAY_MS: '500',
       ZOTEUS_INDEX_ANN: 'false',
+      ZOTEUS_ACCENT_EXPANSION: 'false',
       ZOTEUS_INDEX_ANN_OVERSAMPLE: '32',
       ZOTEUS_INDEX_ANN_MIN_CANDIDATES: '2000',
       ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: '3',
@@ -60,6 +64,7 @@ describe('loadConfig', () => {
     expect(cfg.embedBatchSize).toBe(16);
     expect(cfg.embedBatchDelayMs).toBe(500);
     expect(cfg.indexAnn).toBe(false);
+    expect(cfg.accentExpansion).toBe(false);
     expect(cfg.indexAnnOversample).toBe(32);
     expect(cfg.indexAnnMinCandidates).toBe(2000);
     expect(cfg.indexFulltextConcurrency).toBe(3);

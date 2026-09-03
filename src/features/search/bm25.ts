@@ -1,5 +1,5 @@
-import { pruneTerms } from './query-terms.js';
-import { isStopword, tokenize } from './tokenize.js';
+import { MAX_ACCENT_VARIANTS, pruneTerms } from './query-terms.js';
+import { accentKey, isStopword, tokenize } from './tokenize.js';
 
 interface Doc {
   id: string;
@@ -22,6 +22,14 @@ export interface BM25Hit {
 export class BM25Index {
   private readonly docs = new Map<string, Doc>();
   private readonly df = new Map<string, number>();
+  /**
+   * folded form → the accented spellings currently in the vocabulary, so an unaccented
+   * query term can be expanded to the variants the index actually holds — the same
+   * asymmetric expansion the SQLite backend runs through its `accent_variants` table
+   * (see `expandTerm` there for the direction and why). Maintained beside `df`, and
+   * pruned with it, so a deleted document's spellings do not stay searchable.
+   */
+  private readonly variants = new Map<string, Set<string>>();
   private totalLength = 0;
 
   constructor(
@@ -40,7 +48,15 @@ export class BM25Index {
     const tokens = tokenize(text);
     const tf = new Map<string, number>();
     for (const t of tokens) tf.set(t, (tf.get(t) ?? 0) + 1);
-    for (const term of tf.keys()) this.df.set(term, (this.df.get(term) ?? 0) + 1);
+    for (const term of tf.keys()) {
+      this.df.set(term, (this.df.get(term) ?? 0) + 1);
+      const folded = accentKey(term);
+      if (folded !== term && folded.length > 1) {
+        let set = this.variants.get(folded);
+        if (!set) this.variants.set(folded, (set = new Set()));
+        set.add(term);
+      }
+    }
     this.docs.set(id, { id, length: tokens.length, tf });
     this.totalLength += tokens.length;
   }
@@ -52,16 +68,43 @@ export class BM25Index {
     for (const term of doc.tf.keys()) {
       const n = (this.df.get(term) ?? 0) - 1;
       if (n > 0) this.df.set(term, n);
-      else this.df.delete(term);
+      else {
+        this.df.delete(term);
+        // Its last occurrence is gone, so the spelling leaves the expansion map too.
+        const folded = accentKey(term);
+        const set = this.variants.get(folded);
+        if (set?.delete(term) && set.size === 0) this.variants.delete(folded);
+      }
     }
     this.totalLength -= doc.length;
     this.docs.delete(id);
     return true;
   }
 
-  search(query: string, topK = 10): BM25Hit[] {
+  search(query: string, topK = 10, accentExpansion = true): BM25Hit[] {
     if (this.docs.size === 0) return [];
-    const qTerms = pruneTerms([...new Set(tokenize(query))], isStopword);
+    const pruned = pruneTerms([...new Set(tokenize(query))], isStopword);
+    // The same asymmetric, dominance-gated expansion as the SQLite backend's
+    // `expandTerm` (the direction and the gate are explained there): an unaccented term
+    // also scores the accented spellings the vocabulary holds — but only when those
+    // spellings outweigh the typed one in this corpus. An accented term runs as typed.
+    // `accentExpansion` is a query-time argument, not index state, because that is all
+    // it gates: with it off (ZOTEUS_ACCENT_EXPANSION=false) every term runs as typed.
+    const qTerms = [
+      ...new Set(
+        pruned.flatMap((t) => {
+          if (!accentExpansion) return [t];
+          if (accentKey(t) !== t) return [t];
+          const vs = [...(this.variants.get(t) ?? [])];
+          if (!vs.length) return [t];
+          const variantsDf = vs.reduce((s, v) => s + (this.df.get(v) ?? 0), 0);
+          if (variantsDf <= (this.df.get(t) ?? 0)) return [t];
+          // Same cap as the SQLite backend's MAX_ACCENT_VARIANTS, best spellings first.
+          const kept = vs.sort((a, b) => (this.df.get(b) ?? 0) - (this.df.get(a) ?? 0)).slice(0, MAX_ACCENT_VARIANTS);
+          return [t, ...kept];
+        }),
+      ),
+    ];
     const avgdl = this.totalLength / this.docs.size;
     const N = this.docs.size;
 

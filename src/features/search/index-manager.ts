@@ -2,7 +2,7 @@ import { BM25Index } from './bm25.js';
 import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
 import { pruneTerms } from './query-terms.js';
-import { isStopword, normalizeForSearch, tokenize } from './tokenize.js';
+import { accentKey, isStopword, normalizeForSearch, tokenize } from './tokenize.js';
 import { batchPause, embedderIdentity } from './embeddings.js';
 import {
   DEFAULT_EMBED_BATCH_SIZE,
@@ -149,21 +149,32 @@ function rrf(lists: Array<Array<{ id: string }>>, k = 60): Array<{ id: string; s
 
 /** Build a readable, query-centred snippet trimmed to word boundaries. */
 export function makeSnippet(text: string, query: string, max = 240): string {
-  // NFC first: the fold below is length-preserving on precomposed text, so folded
-  // offsets carry straight over — on decomposed text every stripped mark shifts them,
-  // and a passage with a few hundred marks before the hit (ordinary NFD Vietnamese at
-  // full-text chunk size) would push the match clean out of the returned window.
-  // Canonical composition changes no character the reader sees.
+  // NFC changes no character the reader sees, and it is what the token comparison below
+  // normalizes to.
   const clean = text.replace(/\s+/g, ' ').trim().normalize('NFC');
   if (clean.length <= max) return clean;
-  // Folded, not merely lowercased, because the terms being looked for are folded: an
-  // accented query would otherwise never find its own passage and every snippet would
-  // start at character 0.
-  const folded = normalizeForSearch(clean);
+  // Walk the passage's own tokens and normalize each one, rather than normalizing the whole
+  // passage and searching inside the result. The offset then comes from `clean` itself and
+  // needs no assumption at all about whether normalizing preserved length.
+  //
+  // An earlier version did assume that — "stripping a mark from precomposed text is
+  // length-preserving" — and it is false twice over. `foldMarks` shortens any base+mark pair
+  // that has no precomposed form (`n̈` is two codepoints and folds to one), and lowercasing
+  // can lengthen (`İ` becomes `i` plus a combining dot). Either way the position found in
+  // one string was being sliced out of another, and the snippet came back centred hundreds
+  // of characters from the match, without it.
+  //
+  // The stripped form is compared too, because query expansion lets an unaccented query
+  // reach an accented document: a passage spelling `théorie` answers a query for
+  // `theorie`, and the snippet must be able to find what the search found.
+  const wanted = new Set(pruneTerms(tokenize(query), isStopword));
   let pos = -1;
-  for (const t of pruneTerms(tokenize(query), isStopword)) {
-    const i = folded.indexOf(t);
-    if (i >= 0 && (pos < 0 || i < pos)) pos = i;
+  for (const m of clean.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const token = normalizeForSearch(m[0]);
+    if (wanted.has(token) || wanted.has(accentKey(token))) {
+      pos = m.index;
+      break;
+    }
   }
   let start = pos < 0 ? 0 : Math.max(0, pos - Math.floor(max / 3));
   if (start > 0) {
@@ -2076,7 +2087,7 @@ export class MemorySearchIndex extends SearchIndexBase {
   }
 
   protected keywordSearch(q: string, topK: number): RankedId[] {
-    return this.bm25.search(q, topK);
+    return this.bm25.search(q, topK, this.opts.accentExpansion ?? true);
   }
 
   protected vectorSearch(query: number[], topK: number): RankedId[] {
