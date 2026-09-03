@@ -42,6 +42,7 @@
     "lint": "eslint . --ext .ts",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "gen:codex": "tsx scripts/generate-codex.ts",
     "inspector": "npx @modelcontextprotocol/inspector npx tsx src/index.ts",
     "prepublishOnly": "npm run build"

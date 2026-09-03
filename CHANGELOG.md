@@ -194,6 +194,40 @@ All notable changes to Zoteus are documented here. The format is based on
   vector codes: a vocabulary scan that fails for a transient reason leaves the map as it
   was and costs unaccented queries their expansion, where it used to stop the server from
   starting at all.
+- **`npm run typecheck` was green on 15.7k lines of tests it never compiled (#49).** The
+  build project is the only project this repo had, and it is shaped for emit: `rootDir:
+  "src"`, `include: ["src/**/*"]`, `exclude: [..., "tests"]`. So the gate that CONTRIBUTING
+  asks every contributor to keep green, and that runs in CI and on the deploy path, saw
+  none of the test suite: 100 files and 15,754 lines at v1.12.0. Vitest did not cover the
+  gap either, because under its SSR transform a missing export arrives as `undefined`
+  instead of throwing at import time: a test that imports a symbol a rename deleted passes
+  the compiler and the runner both, and only fails if the symbol is actually called. A
+  renamed type, or a symbol read but never invoked, could have stayed broken
+  indefinitely. There is now a second project, `tsconfig.test.json`, extending the first
+  with `rootDir: "."`, emit off and `tests/` included, behind `npm run typecheck:tests`;
+  it is a blocking step in `ci.yml` and `deploy.yml` from this release, and CONTRIBUTING
+  names it in the gate. The two scripts stay separate on purpose. Widening the build
+  project to reach the tests would have meant giving up its `rootDir`, and `npm run build`
+  would then scatter `.js`, `.d.ts` and `.js.map` files next to the test sources.
+- **The 89 real type errors that gate was hiding are fixed (#49).** Nineteen test files,
+  none of them wrong at run time: the suite passed identically before and after. Five were
+  genuine drift, fixtures explicitly annotated `: Capabilities` or `: ToolContext` that
+  were never updated when `localGroupIds`, `reopenSearchIndex`, `fetcher` and
+  `searchIndexPath` joined those types. The rest were untyped JSON bodies off `res.json()`,
+  which is `unknown`, and `vi.fn` mocks declared with no parameters and then read back by
+  argument index, where `mock.calls[0][2]` is a compile error against an inferred
+  zero-length tuple. `noUncheckedIndexedAccess` is off in the test project and only there.
+  Under it the suite reports 204 errors instead of 89, and 115 of those are index accesses
+  like `text.split(' ')[0]` inside an assertion, where an undefined index throwing *is* the
+  check being made; answering all 115 with `!` would have added noise and no safety.
+  `src/` keeps the flag on.
+- **`toJSON`/`loadFromJSON` stay off the `SearchIndex` interface (#49).** Six tests read
+  them through a factory annotated `: SearchIndex`, which does not declare them, and the
+  tempting fix was to widen the interface. That would have forced the SQLite backend, which
+  writes rows and has no snapshot to hand back, to stub two methods it cannot mean. The
+  narrow contract already exists and is already named: `JsonIndex` in
+  `features/search/persistence.ts`. So the test factories now return `MemorySearchIndex`,
+  the concrete JSON backend they were constructing all along, and no runtime type moved.
 
 ## [1.12.0] - 2026-08-31
 

@@ -19,7 +19,8 @@ Zoteus targets **Node >= 20.19** and is written in TypeScript (NodeNext ESM).
 |---|---|
 | Run the test suite | `npm test` |
 | Watch tests | `npm run test:watch` |
-| Type-check | `npm run typecheck` |
+| Type-check `src/` | `npm run typecheck` |
+| Type-check the tests | `npm run typecheck:tests` |
 | Lint | `npm run lint` |
 | Format | `npm run format` |
 | Build | `npm run build` |
@@ -30,7 +31,7 @@ Zoteus targets **Node >= 20.19** and is written in TypeScript (NodeNext ESM).
 
 - **Tests first.** Zoteus is developed test-first with Vitest. New behavior should land with a test that fails before your change and passes after. Don't commit red tests.
 - **ESM imports.** This is a NodeNext ESM project — **relative imports must end in `.js`** (e.g. `import { foo } from './foo.js'`), even though the source is `.ts`.
-- **Keep the gate green.** Before opening a PR, run `npm run typecheck && npm run lint && npm test` and make sure all three pass.
+- **Keep the gate green.** Before opening a PR, run `npm run typecheck && npm run typecheck:tests && npm run lint && npm test` and make sure all four pass. `npm run typecheck` covers `src/` only, because the build project has to keep its `rootDir`/emit contract; `npm run typecheck:tests` compiles `src/` and `tests/` together under `tsconfig.test.json`, and it is blocking in CI.
 - **Tool design.** Zoteus favors a small set of consolidated, well-described `zotero_*` tools with structured output over thin one-to-one endpoint mirrors. New tools should fit that philosophy.
 - **Safety.** Writes are versioned and reversible by default; destructive operations stay opt-in and confirmation-gated. Preserve those invariants.
 
@@ -38,7 +39,7 @@ Zoteus targets **Node >= 20.19** and is written in TypeScript (NodeNext ESM).
 
 1. Fork and create a topic branch.
 2. Make your change with accompanying tests and docs.
-3. Ensure `npm run typecheck && npm run lint && npm test` are all green.
+3. Ensure `npm run typecheck && npm run typecheck:tests && npm run lint && npm test` are all green.
 4. Open a PR describing the change and the motivation. Keep commits focused; conventional-commit style (`fix:`, `feat:`, `docs:`…) is appreciated.
 
 ## Reporting bugs / security

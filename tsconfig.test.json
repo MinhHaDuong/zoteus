@@ -1,0 +1,27 @@
+// The type-check project for the test suite (see issue #49).
+//
+// tsconfig.json is the BUILD project: rootDir "src", emit on, tests excluded. That
+// contract is what `npm run build` needs, so it stays exactly as it is. The cost is
+// that `npm run typecheck` compiles zero of the test files, and a test that imports a
+// symbol which no longer exists passes both the compiler and Vitest (a missing export
+// is `undefined` under the SSR transform, not an import-time throw). This project
+// closes that gap: same strictness, rootDir at the repo root, emit off, tests in.
+//
+// noUncheckedIndexedAccess is off HERE and only here. Under it the suite reports 204
+// errors, 115 of them index accesses like `text.split(' ')[0]` inside an assertion,
+// where an undefined index throwing IS the check the test is making. Answering all 115
+// with `!` would add noise without adding safety, and would make the flag mean
+// something different in tests than it means in src. The remaining 89 were real enough
+// to fix, and are fixed. src keeps the flag on: it compiles under tsconfig.json too,
+// where the setting is inherited unchanged.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "noUncheckedIndexedAccess": false
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
