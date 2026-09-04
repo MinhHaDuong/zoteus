@@ -104,7 +104,7 @@ function sidelined(dbPath: string): string[] {
 
 /** The shape of a routine bump: a column nothing already stored has to be re-derived for. */
 const ADD_COLUMN: SchemaMigration = {
-  to: 3,
+  to: 4,
   what: 'added passages.language',
   up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT'),
 };
@@ -122,10 +122,10 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     const embeddedByBuild = embedder.texts;
 
     // The next build: same file, one version further on, with the rung that gets there.
-    const second = await openIndex(path, { embedder, schemaVersion: 3, migrations: [ADD_COLUMN] });
+    const second = await openIndex(path, { embedder, schemaVersion: 4, migrations: [ADD_COLUMN] });
     try {
       expect(sidelined(path)).toHaveLength(0);
-      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('4');
       // The rows themselves are untouched: same passages, same vectors, still searchable.
       const after = second.status();
       expect(after.documents).toBe(before.documents);
@@ -136,7 +136,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
       expect(columns.n).toBe(1);
       // Nothing was re-embedded to get here.
       expect(embedder.texts).toBe(embeddedByBuild);
-      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 2 to 3/);
+      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 3 to 4/);
     } finally {
       await second.close();
     }
@@ -151,13 +151,13 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
 
     const ran: number[] = [];
     const ladder: SchemaMigration[] = [
-      { to: 3, what: 'added passages.language', up: (db) => { ran.push(3); db.exec('ALTER TABLE passages ADD COLUMN language TEXT'); } },
-      { to: 4, what: 'indexed passages.language', up: (db) => { ran.push(4); db.exec('CREATE INDEX passages_language ON passages(language)'); } },
+      { to: 4, what: 'added passages.language', up: (db) => { ran.push(4); db.exec('ALTER TABLE passages ADD COLUMN language TEXT'); } },
+      { to: 5, what: 'indexed passages.language', up: (db) => { ran.push(5); db.exec('CREATE INDEX passages_language ON passages(language)'); } },
     ];
-    const second = await openIndex(path, { schemaVersion: 4, migrations: ladder });
+    const second = await openIndex(path, { schemaVersion: 5, migrations: ladder });
     try {
-      expect(ran).toEqual([3, 4]);
-      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('4');
+      expect(ran).toEqual([4, 5]);
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('5');
       expect(second.status().documents).toBeGreaterThan(0);
     } finally {
       await second.close();
@@ -171,10 +171,10 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     await first.save();
     await first.close();
 
-    // Version 3 exists, version 2 does not: nothing accounts for what version 2's rows
+    // Version 4 exists, version 3 does not: nothing accounts for what version 3's rows
     // were, so stepping over it would be a guess rather than a migration.
-    const gapped: SchemaMigration[] = [{ to: 4, what: 'added a column', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }];
-    const second = await openIndex(path, { schemaVersion: 4, migrations: gapped });
+    const gapped: SchemaMigration[] = [{ to: 5, what: 'added a column', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }];
+    const second = await openIndex(path, { schemaVersion: 5, migrations: gapped });
     try {
       expect(sidelined(path)).toHaveLength(1);
       expect(second.status().documents).toBe(0);
@@ -198,7 +198,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
 
     const broken: SchemaMigration[] = [
       {
-        to: 3,
+        to: 4,
         what: 'added passages.language',
         up: (db) => {
           db.exec('ALTER TABLE passages ADD COLUMN language TEXT');
@@ -206,25 +206,25 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
         },
       },
     ];
-    await expect(openIndex(path, { schemaVersion: 3, migrations: broken })).rejects.toThrow(
-      /intact at schema version 2 but could not be upgraded to 3: rung failed halfway/,
+    await expect(openIndex(path, { schemaVersion: 4, migrations: broken })).rejects.toThrow(
+      /intact at schema version 3 but could not be upgraded to 4: rung failed halfway/,
     );
     // NOT sidelined: the original file sits untouched at its own path, at its old stamp,
     // holding every row and without the half-applied column — the rung and the stamp
     // share one transaction, and the refusal wrote nothing.
     expect(sidelined(path)).toHaveLength(0);
-    expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
+    expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
     expect(readColumn(path, 'SELECT COUNT(*) AS n FROM passages').n).toBe(documents);
     expect(readColumn(path, "SELECT COUNT(*) AS n FROM pragma_table_info('passages') WHERE name = 'language'").n).toBe(0);
     // And the retry the refusal promised is real: the same database opens and migrates
     // once the condition clears.
     const repaired = await openIndex(path, {
-      schemaVersion: 3,
-      migrations: [{ to: 3, what: 'added passages.language', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }],
+      schemaVersion: 4,
+      migrations: [{ to: 4, what: 'added passages.language', up: (db) => db.exec('ALTER TABLE passages ADD COLUMN language TEXT') }],
     });
     try {
       expect(repaired.status().documents).toBe(documents);
-      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('4');
     } finally {
       await repaired.close();
     }
@@ -247,7 +247,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
 
     const broken: SchemaMigration[] = [
       {
-        to: 3,
+        to: 4,
         what: 'added passages.language',
         up: (db) => {
           db.exec('ALTER TABLE passages ADD COLUMN language TEXT');
@@ -255,7 +255,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
         },
       },
     ];
-    const refusal = await openIndex(path, { schemaVersion: 3, migrations: broken }).then(
+    const refusal = await openIndex(path, { schemaVersion: 4, migrations: broken }).then(
       () => {
         throw new Error('the open was expected to refuse');
       },
@@ -277,11 +277,11 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
       },
     };
     await expect(repairSearchIndex(ctx as unknown as ToolContext)).rejects.toThrow(
-      /could not be upgraded to 3/,
+      /could not be upgraded to 4/,
     );
     expect(existsSync(path)).toBe(true);
     expect(readColumn(path, 'SELECT COUNT(*) AS n FROM passages').n).toBe(documents);
-    expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
+    expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
   });
 
   sqliteIt('still sidelines when the rung failure IS corruption', async () => {
@@ -295,9 +295,9 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     await first.close();
 
     const corrupting: SchemaMigration[] = [
-      { to: 3, what: 'added passages.language', up: () => { throw new Error('database disk image is malformed'); } },
+      { to: 4, what: 'added passages.language', up: () => { throw new Error('database disk image is malformed'); } },
     ];
-    const second = await openIndex(path, { schemaVersion: 3, migrations: corrupting });
+    const second = await openIndex(path, { schemaVersion: 4, migrations: corrupting });
     try {
       expect(sidelined(path)).toHaveLength(1);
       expect(second.status().documents).toBe(0);
@@ -315,7 +315,7 @@ describe('a SCHEMA_VERSION bump migrates the index it finds', () => {
     await first.close();
     stampSchemaVersion(path, '99');
 
-    const second = await openIndex(path, { schemaVersion: 3, migrations: [ADD_COLUMN] });
+    const second = await openIndex(path, { schemaVersion: 4, migrations: [ADD_COLUMN] });
     try {
       expect(sidelined(path)).toHaveLength(1);
       expect(readColumn(sidelined(path)[0], "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('99');
@@ -504,13 +504,13 @@ describe('the rung that keeps diacritics re-indexes text and re-embeds nothing',
     try {
       // Migrated, not sidelined: the whole point of a rung is that the file survives.
       expect(sidelined(path)).toHaveLength(0);
-      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('2');
+      expect(readColumn(path, "SELECT value AS v FROM meta WHERE key = 'schemaVersion'").v).toBe('3');
       const after = second.status();
       expect(after.documents).toBe(before.documents);
       expect(after.vectors).toBe(before.vectors);
       // The claim this rung exists to make, and the expensive one to get wrong.
       expect(embedder.texts).toBe(embeddedByBuild);
-      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 1 to 2/);
+      expect(second.buildStatus().storageNotice).toMatch(/upgraded in place from schema version 1 to 3/);
     } finally {
       await second.close();
     }

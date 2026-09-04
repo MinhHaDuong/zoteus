@@ -29,6 +29,7 @@ import type {
   IndexSnapshot,
   RankedId,
   SearchIndexOptions,
+  WorkCounters,
 } from './backend.js';
 
 /**
@@ -60,7 +61,34 @@ export const MAX_MIGRATION_BYTES = 200 * 1024 * 1024;
  * charged its owner a full re-embed (hours, and real API spend) for a cache the server
  * can rebuild from what is already on disk.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+
+/**
+ * The two SQL identifiers the durable work-counter table and its bump statement share with
+ * `createSchema()` and the migration rung below. `trigger_kind` rather than `trigger`: SQLite
+ * accepts `trigger` as a bare column name, but naming it after the reserved word it shadows
+ * (CREATE TRIGGER) earns nothing and confuses a reader of the DDL for free.
+ */
+const WORK_COUNTERS_DDL = `
+  CREATE TABLE IF NOT EXISTS work_counters (
+    stage TEXT NOT NULL,
+    trigger_kind TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (stage, trigger_kind, outcome)
+  );
+`;
+
+/**
+ * Phase 1's single, honest, coarse trigger value (ticket 0642). SPEC.md §5.2.8's full
+ * vocabulary distinguishes `new`/`edit`/`re-extract`/`resync`/`key-bump`/`prefix-stale`/
+ * `retry`/`delete`; this build classifies none of them yet, so every embed-stage `done`
+ * bump is recorded under this one name rather than a fabricated finer trigger nothing here
+ * has the per-item key comparison to actually derive. R22's own grading (`_pause_verdict`)
+ * only asks whether ANY `done` counter advanced and reads no trigger, so this is enough for
+ * that clause without pretending to be the whole design.
+ */
+const EMBED_TRIGGER = 'build';
 
 /**
  * How the keyword index tokenizes, in one place because the migration rung has to declare
@@ -201,6 +229,16 @@ export const SCHEMA_MIGRATIONS: SchemaMigration[] = [
       deriveAccentVariants(db);
     },
   },
+  {
+    to: 3,
+    what:
+      'adds a durable work_counters table (SPEC.md §5.2.8), for the embed stage\'s "done" ' +
+      'outcome — counts committed vectors, not passages, so it starts at zero on an ' +
+      'upgraded database rather than guessing a history the old file never recorded',
+    up(db) {
+      db.exec(WORK_COUNTERS_DDL);
+    },
+  },
 ];
 
 /**
@@ -328,6 +366,8 @@ interface Statements {
   vectorByPid: StatementSync;
   uncodedPids: StatementSync;
   sampleVectors: StatementSync;
+  bumpWorkCounter: StatementSync;
+  readWorkCounters: StatementSync;
 }
 
 /**
@@ -368,6 +408,14 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private ownWordsKeys = new Set<string>();
   /** Vector scans performed. A keyword-only query must never cause one (#10). */
   private vectorScans = 0;
+  /**
+   * Vectors `putVector` has newly committed since the last `flush()`, awaiting the
+   * `work.embed.build.done` bump `flush()` folds into the same transaction as the commit
+   * that makes them durable. Reset to 0 the moment that bump is written — never before,
+   * so a `flush()` that throws between the two leaves this counting the same vectors again
+   * rather than silently dropping them from the ledger.
+   */
+  private embedDoneSinceFlush = 0;
   private readonly file: string;
   private readonly migrateFrom: string | undefined;
   private readonly maxMigrationBytes: number;
@@ -968,6 +1016,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
         PRIMARY KEY (folded, term)
       ) WITHOUT ROWID;
     `);
+    // Same DDL the schema-3 migration rung runs for an upgraded database, run here too so a
+    // freshly created one gets the table without going through the ladder at all — `IF NOT
+    // EXISTS` makes the two paths idempotent with each other.
+    this.handle.exec(WORK_COUNTERS_DDL);
     this.handle
       .prepare('INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)')
       .run('schemaVersion', String(this.schemaVersion));
@@ -1055,6 +1107,15 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // Every stride-th vector, for the mean. `pid % 1 = 0` selects all of them, which is
       // what a corpus smaller than the sample gets.
       sampleVectors: db.prepare('SELECT vector FROM passages WHERE vector IS NOT NULL AND pid % ? = 0'),
+      // The whole of Phase 0's transactional bump helper (ticket 0642): one upsert, run
+      // inside whatever transaction is already open when the caller executes it — never a
+      // BEGIN/COMMIT of its own, which is what lets `flush()` fold it into the same commit
+      // as the vector writes it counts.
+      bumpWorkCounter: db.prepare(`
+        INSERT INTO work_counters(stage, trigger_kind, outcome, count) VALUES (?, ?, ?, ?)
+        ON CONFLICT(stage, trigger_kind, outcome) DO UPDATE SET count = count + excluded.count
+      `),
+      readWorkCounters: db.prepare('SELECT stage, trigger_kind, outcome, count FROM work_counters'),
     };
   }
 
@@ -1368,8 +1429,14 @@ export class SqliteSearchIndex extends SearchIndexBase {
   protected putVector(id: string, vector: number[]): void {
     this.begin();
     const blob = Buffer.from(Float32Array.from(vector).buffer);
-    // Each passage is embedded once per build, so a changed row is a new vector.
-    if (Number(this.stmts.setVector.run(blob, id).changes) > 0) this.c.vectors++;
+    // Each passage is embedded once per build, so a changed row is a new vector. Tallied
+    // here, in memory, and folded into `work_counters` by `flush()` — inside the SAME
+    // transaction `begin()` just opened (or is already holding open), never as a write of
+    // its own. See `embedDoneSinceFlush`.
+    if (Number(this.stmts.setVector.run(blob, id).changes) > 0) {
+      this.c.vectors++;
+      this.embedDoneSinceFlush++;
+    }
     // A code describes the vector it was taken from, so a new vector retires it. Skipped
     // while the database holds no code at all, which is the whole of a fresh build: it
     // would otherwise be a statement per passage to delete nothing.
@@ -2015,7 +2082,58 @@ export class SqliteSearchIndex extends SearchIndexBase {
     if (!this.db) return;
     this.begin();
     this.writeMeta();
+    // The load-bearing line for ticket 0642: the counter bump runs inside the SAME
+    // transaction `begin()` opened for the vector writes `putVector` already made (or, on
+    // a flush with nothing new, opened for nothing and about to commit nothing) — and
+    // `commit()` right below is the one write that makes both durable together. A process
+    // killed between `putVector` and here loses the vectors AND the count (nothing was
+    // committed); one killed between here and `commit()` cannot exist, because there is no
+    // await between them — this function is synchronous. Reset to 0 only after the
+    // statement that persists it has run, so a `commit()` that itself throws (e.g. a full
+    // disk) leaves the tally intact for the next flush to retry rather than discarding it.
+    if (this.embedDoneSinceFlush > 0) {
+      this.bumpWorkCounter('embed', EMBED_TRIGGER, 'done', this.embedDoneSinceFlush);
+      this.embedDoneSinceFlush = 0;
+    }
     this.commit();
+  }
+
+  /**
+   * Add `by` to one `work.<stage>.<trigger>.<outcome>` counter (SPEC.md §5.2.8), inside
+   * whatever transaction is already open on this connection. Never opens or commits one of
+   * its own — every caller is responsible for wrapping it in the transaction that also
+   * writes whatever it is counting, which is the entire durability property this ticket
+   * exists to provide over `metrics.ts`'s in-memory registry.
+   */
+  private bumpWorkCounter(stage: string, trigger: string, outcome: string, by: number): void {
+    this.stmts.bumpWorkCounter.run(stage, trigger, outcome, by);
+  }
+
+  /**
+   * The `work` object `status()` reports, read fresh from `work_counters` on every call —
+   * never from an in-memory tally — which is what lets a brand-new connection to the same
+   * file see exactly what a prior process (or this one, before a restart) actually
+   * committed. `undefined` when the table holds no row at all: a database migrated up to
+   * schema 3 but never asked to embed anything since carries the table but nothing in it,
+   * and that is honestly "reports no counters" rather than an all-zero object that would
+   * read as having looked and found nothing to count.
+   */
+  protected override workCounters(): WorkCounters | undefined {
+    if (!this.db) return undefined;
+    const rows = this.stmts.readWorkCounters.all() as Array<{
+      stage: string;
+      trigger_kind: string;
+      outcome: string;
+      count: number;
+    }>;
+    if (rows.length === 0) return undefined;
+    const tree: WorkCounters = {};
+    for (const row of rows) {
+      const byStage = (tree[row.stage] ??= {});
+      const byTrigger = (byStage[row.trigger_kind] ??= {});
+      byTrigger[row.outcome] = row.count;
+    }
+    return tree;
   }
 
   /** Commit the build's open transaction: this is what makes the last passages durable. */

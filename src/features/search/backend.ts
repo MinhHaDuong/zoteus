@@ -131,6 +131,21 @@ export interface IndexCounts {
   ownWordsPassages: number;
 }
 
+/**
+ * Durable, per-stage/per-trigger/per-outcome counts of work this store has actually
+ * completed, keyed `work[stage][trigger][outcome]` (SPEC.md §5.2.8). `done` means
+ * recomputed; a phase this build does not yet classify by trigger reports one coarse,
+ * honestly-named value (currently `"build"`) rather than a fabricated finer one.
+ *
+ * Absent entirely on a backend that keeps no durable counters (the in-memory store, or a
+ * SQLite store whose table exists but has never recorded a completion) — see
+ * `SearchIndexBase.workCounters()`. Never derived from an in-memory tally alone: every
+ * number here was read back from the row a completed write committed, in the same
+ * transaction as that write, which is what lets it answer "did this survive a restart"
+ * rather than merely "did this happen since the process started".
+ */
+export type WorkCounters = Record<string, Record<string, Record<string, number>>>;
+
 export interface SearchIndexStatus {
   documents: number;
   vectors: number;
@@ -220,6 +235,13 @@ export interface SearchIndexStatus {
    * `assertLibrary` guards on.
    */
   library?: string;
+  /**
+   * Durable completed-work counters (SPEC.md §5.2.8), when this store keeps them. Read
+   * fresh from the store's own table on every status call — never cached across a restart
+   * — so its presence and its values are exactly what a new connection to the same file
+   * would see. See `WorkCounters`.
+   */
+  work?: WorkCounters;
 }
 
 /**

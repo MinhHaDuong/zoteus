@@ -36,6 +36,7 @@ import type {
   SearchIndexStatus,
   StorageBackend,
   VersionBackend,
+  WorkCounters,
 } from './backend.js';
 
 // The contract and its types live in backend.ts (two implementations share them); they are
@@ -63,6 +64,7 @@ export type {
   SearchIndexStatus,
   StorageBackend,
   VersionBackend,
+  WorkCounters,
 } from './backend.js';
 
 /**
@@ -410,6 +412,16 @@ export abstract class SearchIndexBase implements SearchIndex {
   abstract readonly storage: StorageBackend;
   /** Live sizes of the store. Must not walk the passages: status() is called per progress tick. */
   protected abstract counts(): IndexCounts;
+  /**
+   * Durable completed-work counters (SPEC.md §5.2.8), or undefined when this store keeps
+   * none. The default answers undefined — the in-memory backend has nothing durable to
+   * report, and reporting an in-memory tally here would claim a survives-a-restart
+   * property it does not have, exactly the confusion ticket 0642 exists to avoid. Only
+   * `SqliteSearchIndex` overrides this, reading its own `work_counters` table.
+   */
+  protected workCounters(): WorkCounters | undefined {
+    return undefined;
+  }
   /** Drop every passage and vector. */
   protected abstract clearStore(): void;
   /** Register an indexed item. Called for every item, including ones with no text at all. */
@@ -786,6 +798,8 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.storeNotice) s.storageNotice = this.storeNotice;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
     if (this.ownWordsUnavailable) s.ownWordsReason = this.ownWordsUnavailable;
+    const work = this.workCounters();
+    if (work) s.work = work;
     return s;
   }
 
