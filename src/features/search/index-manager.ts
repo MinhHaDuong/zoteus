@@ -270,6 +270,7 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected checkpoint: BuildCheckpoint | undefined = undefined;
   /** Durable operator hold. Unlike requestStop(), this survives restarts and idle periods. */
   protected paused = false;
+  protected pauseTransition: Promise<void> | undefined;
   /**
    * Canonical identity of the library whose rows this store holds (canonicalLibraryToken;
    * undefined until a stamped build writes rows, or for indexes persisted before the
@@ -709,14 +710,33 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   async setPaused(paused: boolean): Promise<void> {
     this.refuseIfFaulted();
+    if (this.pauseTransition) throw new Error('An index pause/resume transition is already in progress.');
+    if (this.paused === paused) return;
     const previous = this.paused;
-    this.paused = paused;
+    // A hold takes effect before its write so no work can enter during persistence. A
+    // resume does the inverse: keep the live hold until the clear is safely on disk.
+    if (paused) this.paused = true;
+    const transition = (async () => {
+      try {
+        await this.persistPaused(paused);
+        this.paused = paused;
+      } catch (e) {
+        this.paused = previous;
+        throw e;
+      }
+    })();
+    this.pauseTransition = transition;
     try {
-      await this.save();
-    } catch (e) {
-      this.paused = previous;
-      throw e;
+      await transition;
+    } finally {
+      if (this.pauseTransition === transition) this.pauseTransition = undefined;
     }
+  }
+
+  /** Persist a requested pause value without requiring it to be live first. */
+  protected async persistPaused(paused: boolean): Promise<void> {
+    if (paused !== this.paused) throw new Error('This index backend cannot persist a pending resume.');
+    await this.save();
   }
 
   private refuseIfPaused(): void {
@@ -2390,6 +2410,17 @@ export class MemorySearchIndex extends SearchIndexBase {
     await saveIndex({ toJSON: () => snapshot, loadFromJSON() {} }, this.path);
   }
 
+  private async enqueueSnapshot(snapshot: IndexSnapshot): Promise<void> {
+    const write = this.saveTail.then(() => this.writeSnapshot(snapshot));
+    // A failed write rejects its own caller but must not poison every later save.
+    this.saveTail = write.catch(() => {});
+    await write;
+  }
+
+  protected override async persistPaused(paused: boolean): Promise<void> {
+    await this.enqueueSnapshot({ ...this.toJSON(), paused });
+  }
+
   async save(): Promise<void> {
     // Refusing here is not tidiness, it is the difference between a bad read and lost
     // data. `loadFromJSON` resets before it parses, so an artifact that failed to load
@@ -2398,14 +2429,16 @@ export class MemorySearchIndex extends SearchIndexBase {
     // reporting on. Faulted means: touch the artifact only to replace it deliberately.
     this.refuseIfFaulted();
     if (!this.path) return;
+    // A build already winding down may save while resume is being persisted. Let that
+    // transition settle before capturing its snapshot, or it could queue the old held
+    // value after a successful clear (or the transient clear after a failed one).
+    const pauseTransition = this.pauseTransition;
+    if (pauseTransition) await pauseTransition.catch(() => {});
     // Capture now, not when the queued write gets its turn. A later setter may roll its
     // in-memory value back after a failed write; no earlier save may publish that transient
     // value merely because it observed mutable `this` late.
     const snapshot = this.toJSON();
-    const write = this.saveTail.then(() => this.writeSnapshot(snapshot));
-    // A failed write rejects its own caller but must not poison every later save.
-    this.saveTail = write.catch(() => {});
-    await write;
+    await this.enqueueSnapshot(snapshot);
   }
 
   /** Nothing to release: the store is this object. */

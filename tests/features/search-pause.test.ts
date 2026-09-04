@@ -24,7 +24,7 @@ class GatedMemorySearchIndex extends MemorySearchIndex {
 
   constructor(
     private readonly testPath: string,
-    private readonly failSecond = false,
+    private readonly failWrite = 0,
   ) {
     super({ embedder: null, logger: silentLogger, path: testPath });
   }
@@ -39,7 +39,7 @@ class GatedMemorySearchIndex extends MemorySearchIndex {
       this.releaseFirst();
       await this.firstWriteGate;
     }
-    if (write === 2 && this.failSecond) throw new Error('second write failed');
+    if (write === this.failWrite) throw new Error(`write ${write} failed`);
     await saveIndex({ toJSON: () => snapshot, loadFromJSON() {} }, this.testPath);
   }
 }
@@ -96,19 +96,62 @@ describe('durable index pause', () => {
     const seed = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
     await seed.setPaused(true);
 
-    const index = new GatedMemorySearchIndex(path, true);
+    const index = new GatedMemorySearchIndex(path, 2);
     expect(await loadIndex(index, path)).toBe(true);
     const older = index.save(); // captures paused:true, then waits before publishing it
     await index.firstWriteStarted;
     const failedResume = index.setPaused(false); // captures false, queues second, then fails
     index.release();
     await older;
-    await expect(failedResume).rejects.toThrow(/second write failed/);
+    await expect(failedResume).rejects.toThrow(/write 2 failed/);
     expect(index.isPaused).toBe(true); // setter rolled memory back
 
     const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
     expect(await loadIndex(reopened, path)).toBe(true);
     expect(reopened.isPaused).toBe(true); // disk agrees; the transient false never published
+  });
+
+  it('keeps the live hold while a failing resume is being persisted', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-resume-race-'));
+    const path = join(dir, 'search-index.json');
+    const seed = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    await seed.setPaused(true);
+
+    const index = new GatedMemorySearchIndex(path, 1);
+    expect(await loadIndex(index, path)).toBe(true);
+    const failedResume = index.setPaused(false);
+    await index.firstWriteStarted;
+    expect(index.isPaused).toBe(true);
+    await expect(index.buildIncremental(async () => ({ items: [], totalResults: 0 }))).rejects.toThrow(
+      /paused.*resume/i,
+    );
+    index.release();
+    await expect(failedResume).rejects.toThrow(/write 1 failed/);
+    expect(index.isPaused).toBe(true);
+
+    const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    expect(await loadIndex(reopened, path)).toBe(true);
+    expect(reopened.isPaused).toBe(true);
+  });
+
+  it('makes a concurrent ordinary save observe a completed resume', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-resume-save-'));
+    const path = join(dir, 'search-index.json');
+    const seed = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    await seed.setPaused(true);
+
+    const index = new GatedMemorySearchIndex(path);
+    expect(await loadIndex(index, path)).toBe(true);
+    const resume = index.setPaused(false);
+    await index.firstWriteStarted;
+    const concurrentSave = index.save();
+    index.release();
+    await Promise.all([resume, concurrentSave]);
+    expect(index.isPaused).toBe(false);
+
+    const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    expect(await loadIndex(reopened, path)).toBe(true);
+    expect(reopened.isPaused).toBe(false);
   });
 
   sqliteIt('persists the hold in SQLite while idle and clears it without a schema bump', async () => {

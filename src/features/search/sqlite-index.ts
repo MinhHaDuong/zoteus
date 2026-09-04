@@ -1107,7 +1107,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.reconcileVectorProvenance();
   }
 
-  private writeMeta(): void {
+  private writeMeta(paused = this.paused): void {
     const set = this.stmts.setMeta;
     set.run('builtFromVersion', String(this.builtFromVersion));
     set.run('itemsTotal', String(this.itemsTotal));
@@ -1121,7 +1121,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // place a value can be added without a schema version bump: an older build ignores a
     // key it does not know, so a database written here still opens there.
     set.run('checkpoint', this.checkpoint ? JSON.stringify(this.checkpoint) : '');
-    set.run('paused', String(this.paused));
+    set.run('paused', String(paused));
     set.run('library', this.library ?? '');
   }
 
@@ -2018,6 +2018,13 @@ export class SqliteSearchIndex extends SearchIndexBase {
     if (!this.db) return;
     this.begin();
     this.writeMeta();
+    this.commit();
+  }
+
+  protected override async persistPaused(paused: boolean): Promise<void> {
+    this.refuseIfFaulted();
+    this.begin();
+    this.writeMeta(paused);
     this.commit();
   }
 
