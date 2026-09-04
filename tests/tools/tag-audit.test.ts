@@ -4,8 +4,13 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import tagAudit from '../../src/tools/tag-audit.js';
 
-function ctx() {
+function ctx(over: Record<string, unknown> = {}) {
   return {
+    // A stdio-shaped caller: the operator owns the machine, so vocabulary_path is not
+    // confined to the data directory. See tests/lib/caller-path.test.ts for the confined case.
+    config: { dataDir: tmpdir() },
+    remoteCaller: false,
+    ...over,
     web: {
       listTags: vi.fn(async () => ({
         data: [
@@ -53,6 +58,16 @@ describe('zotero_tag_audit', () => {
   it('errors when neither vocabulary nor vocabulary_path is given', async () => {
     const res = await tagAudit.handler({}, ctx());
     expect(res.isError).toBe(true);
+  });
+
+  it('refuses a vocabulary_path outside the data directory when the caller is remote', async () => {
+    const res = await tagAudit.handler(
+      { vocabulary_path: '/etc/passwd' },
+      ctx({ config: { dataDir: join(tmpdir(), 'zoteus-data') }, remoteCaller: true }),
+    );
+    expect(res.isError).toBe(true);
+    const text = (res.content ?? []).map((c: { text: string }) => c.text).join('\n');
+    expect(text).toContain('vocabulary_path');
   });
 
   it('returns a friendly error when vocabulary_path is malformed JSON', async () => {

@@ -19,6 +19,7 @@ function harness(searchItems: () => Promise<unknown>) {
   const cloud = { userID: 19552201, username: 'oscardvs', access: { user: { write: true } } };
   const ctx: ToolContext = {
     config: { local: 'off', libraryType: 'user' } as any,
+    remoteCaller: false,
     capabilities: { cloud: cloud as any, localApi: false, localGroupIds: [] },
     router: {
       whoami: () => cloud,

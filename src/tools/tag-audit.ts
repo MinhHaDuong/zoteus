@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
+import { resolveCallerPath, CallerPathError } from '../lib/caller-path.js';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
@@ -77,7 +78,22 @@ const tagAudit: ToolDefinition = {
     if (args.vocabulary && args.vocabulary_path) return err('Provide only one of `vocabulary` or `vocabulary_path`.');
     if (args.vocabulary) vocab = args.vocabulary;
     else if (args.vocabulary_path) {
-      const raw = await readFile(args.vocabulary_path, 'utf8').catch(() => null);
+      let vocabPath: string;
+      try {
+        vocabPath = await resolveCallerPath(args.vocabulary_path, {
+          dataDir: ctx.config.dataDir,
+          confined: ctx.remoteCaller,
+          mode: 'read',
+          argName: 'vocabulary_path',
+          alternative: 'Pass the vocabulary inline with `vocabulary` instead.',
+        });
+      } catch (e) {
+        if (e instanceof CallerPathError) {
+          return { content: [{ type: 'text', text: e.message }], isError: true };
+        }
+        throw e;
+      }
+      const raw = await readFile(vocabPath, 'utf8').catch(() => null);
       if (raw == null) return err(`Could not read vocabulary file: ${args.vocabulary_path}`);
       let json: unknown;
       try {

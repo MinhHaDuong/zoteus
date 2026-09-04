@@ -23,12 +23,14 @@ The version-based delta the Zotero sync algorithm uses. Given `since` (a library
 ## `zotero_attachment`
 Upload, download, or inspect attachment files. File bytes go to/from **disk**, never through the conversation.
 - `upload` — store a file via the full 5-step Zotero File Storage protocol (compute md5/mtime → request authorization → upload bytes → register). Give `url` to have Zoteus fetch the file itself, or `file_path` for a file on the machine running Zoteus. Optional `parent_item`, `title`, `content_type`. Returns the new attachment key (and whether the file already existed in storage).
-- `download` — fetch an attachment's file to `save_path` (default under the Zoteus data dir); returns the path and byte count.
+- `download` — fetch an attachment's file to `save_path` (default under the Zoteus data dir); returns the path and byte count. A `save_path` you name will not silently replace a file that is already there: pass `overwrite: true` if that is what you want. The default location is exempt, being Zoteus's own cache for that attachment key.
 - `info` — return an attachment item's metadata.
 
 > Uploads/downloads use the cloud Web API and count against your Zotero file-storage quota. For a **key-free** store into the running desktop app, use `zotero_attach_file` instead.
 >
 > `file_path` is a path on the machine running **Zoteus**, not the machine you are chatting from. On a remote or hosted server those are different machines, so use `url` there.
+>
+> On a server with OAuth enabled, Zoteus **enforces** that rather than leaving it to the caller: `file_path`, `save_path` and `vocabulary_path` must resolve inside the data directory, and anything else is refused. A caller-supplied path on a shared instance addresses the operator's disk, which is where the token store and the server's own code live. A local stdio install is unaffected, since there the caller already owns the machine.
 
 ## `zotero_attach_file`
 Store a file as a stored attachment under an existing item. Give `parent` (the item key) and either `url` (Zoteus downloads it, then stores it) or `path` (a file on the machine running Zoteus); `filename` and `content_type` are inferred when omitted, `title` defaults to the filename. arXiv-style URLs carry no extension, so one is appended from the served content type. Returns the new attachment key.

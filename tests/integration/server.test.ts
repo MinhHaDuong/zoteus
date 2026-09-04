@@ -11,6 +11,7 @@ function fakeCtx(): ToolContext {
   const cloud = { userID: 19552201, username: 'oscardvs', access: { user: { write: true } } };
   return {
     config: { local: 'off', libraryType: 'user' } as any,
+    remoteCaller: false,
     capabilities: { cloud: cloud as any, localApi: false, localGroupIds: [] },
     router: {
       whoami: () => cloud,

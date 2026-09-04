@@ -32,6 +32,7 @@ function fakeCtx() {
   };
   const ctx: ToolContext = {
     config: { local: 'off', libraryType: 'user' } as any,
+    remoteCaller: false,
     capabilities: { cloud: cloud as any, localApi: false, localGroupIds: [] },
     router: { whoami: () => cloud, defaultLibrary: () => ({ type: 'user', id: 1 }) } as any,
     schema: {
