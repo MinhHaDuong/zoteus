@@ -2210,6 +2210,12 @@ export class MemorySearchIndex extends SearchIndexBase {
   private ownWordsItems = new Set<string>();
   private ownWordsPassages = 0;
   private readonly path: string | undefined;
+  /**
+   * JSON writes are atomic individually, but two overlapping writes can still rename out
+   * of order. Keep their invocation order so an older snapshot can never overwrite a
+   * newer durable state (notably a pause asserted while a build save is in flight).
+   */
+  private saveTail: Promise<void> = Promise.resolve();
 
   constructor(opts: MemorySearchIndexOptions) {
     super(opts);
@@ -2379,6 +2385,11 @@ export class MemorySearchIndex extends SearchIndexBase {
   }
 
   /** Atomically rewrite the JSON artifact. A no-op when this index has no file. */
+  protected async writeSnapshot(): Promise<void> {
+    if (!this.path) return;
+    await saveIndex(this, this.path);
+  }
+
   async save(): Promise<void> {
     // Refusing here is not tidiness, it is the difference between a bad read and lost
     // data. `loadFromJSON` resets before it parses, so an artifact that failed to load
@@ -2387,7 +2398,10 @@ export class MemorySearchIndex extends SearchIndexBase {
     // reporting on. Faulted means: touch the artifact only to replace it deliberately.
     this.refuseIfFaulted();
     if (!this.path) return;
-    await saveIndex(this, this.path);
+    const write = this.saveTail.then(() => this.writeSnapshot());
+    // A failed write rejects its own caller but must not poison every later save.
+    this.saveTail = write.catch(() => {});
+    await write;
   }
 
   /** Nothing to release: the store is this object. */

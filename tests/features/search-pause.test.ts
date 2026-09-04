@@ -5,9 +5,42 @@ import { join } from 'node:path';
 import { MemorySearchIndex } from '../../src/features/search/index-manager.js';
 import { createSearchIndex, nodeSqliteAvailable } from '../../src/features/search/factory.js';
 import { loadIndex } from '../../src/features/search/persistence.js';
+import { saveIndex } from '../../src/features/search/persistence.js';
+import type { IndexSnapshot } from '../../src/features/search/backend.js';
 
 const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 const sqliteIt = nodeSqliteAvailable() ? it : it.skip;
+
+class GatedMemorySearchIndex extends MemorySearchIndex {
+  private writes = 0;
+  private releaseFirst!: () => void;
+  readonly firstWriteStarted = new Promise<void>((resolve) => {
+    this.releaseFirst = resolve;
+  });
+  private unblockFirst!: () => void;
+  private readonly firstWriteGate = new Promise<void>((resolve) => {
+    this.unblockFirst = resolve;
+  });
+
+  constructor(private readonly testPath: string) {
+    super({ embedder: null, logger: silentLogger, path: testPath });
+  }
+
+  release(): void {
+    this.unblockFirst();
+  }
+
+  protected override async writeSnapshot(): Promise<void> {
+    // Capture before waiting: without the production save queue this stale false snapshot
+    // would rename after setPaused(true)'s newer write and erase the durable hold.
+    const snapshot: IndexSnapshot = this.toJSON();
+    if (++this.writes === 1) {
+      this.releaseFirst();
+      await this.firstWriteGate;
+    }
+    await saveIndex({ toJSON: () => snapshot, loadFromJSON() {} }, this.testPath);
+  }
+}
 
 describe('durable index pause', () => {
   it('holds background work without disabling queries', async () => {
@@ -31,11 +64,28 @@ describe('durable index pause', () => {
     const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
     expect(await loadIndex(reopened, path)).toBe(true);
     expect(reopened.isPaused).toBe(true);
-    await expect(reopened.buildIncremental(async () => ({ items: [] }))).rejects.toThrow(/paused.*resume/i);
+    await expect(reopened.buildIncremental(async () => ({ items: [], totalResults: 0 }))).rejects.toThrow(
+      /paused.*resume/i,
+    );
 
     const old = new MemorySearchIndex({ embedder: null, logger: silentLogger });
     old.loadFromJSON({ chunks: [], vectors: [], builtFromVersion: 0 });
     expect(old.isPaused).toBe(false);
+  });
+
+  it('orders an in-flight JSON save before a newer durable pause', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-overlap-'));
+    const path = join(dir, 'search-index.json');
+    const index = new GatedMemorySearchIndex(path);
+    const older = index.save();
+    await index.firstWriteStarted;
+    const pause = index.setPaused(true);
+    index.release();
+    await Promise.all([older, pause]);
+
+    const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    expect(await loadIndex(reopened, path)).toBe(true);
+    expect(reopened.isPaused).toBe(true);
   });
 
   sqliteIt('persists the hold in SQLite while idle and clears it without a schema bump', async () => {
