@@ -154,6 +154,30 @@ describe('durable index pause', () => {
     expect(reopened.isPaused).toBe(false);
   });
 
+  it('does not report the JSON backend closed before a pending resume is durable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-resume-close-'));
+    const path = join(dir, 'search-index.json');
+    const seed = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    await seed.setPaused(true);
+
+    const index = new GatedMemorySearchIndex(path);
+    expect(await loadIndex(index, path)).toBe(true);
+    const resume = index.setPaused(false);
+    await index.firstWriteStarted;
+    let closed = false;
+    const closing = index.close().then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    index.release();
+    await Promise.all([resume, closing]);
+
+    const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    expect(await loadIndex(reopened, path)).toBe(true);
+    expect(reopened.isPaused).toBe(false);
+  });
+
   sqliteIt('persists the hold in SQLite while idle and clears it without a schema bump', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-sqlite-'));
     const jsonPath = join(dir, 'search-index.json');

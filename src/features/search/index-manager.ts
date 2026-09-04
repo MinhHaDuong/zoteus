@@ -2441,8 +2441,12 @@ export class MemorySearchIndex extends SearchIndexBase {
     await this.enqueueSnapshot(snapshot);
   }
 
-  /** Nothing to release: the store is this object. */
-  async close(): Promise<void> {}
+  /** No handle to release, but do not report closed while a durable write is outstanding. */
+  async close(): Promise<void> {
+    const pauseTransition = this.pauseTransition;
+    if (pauseTransition) await pauseTransition.catch(() => {});
+    await this.saveTail.catch(() => {});
+  }
 
   toJSON(): IndexSnapshot {
     const snapshot: IndexSnapshot = {
