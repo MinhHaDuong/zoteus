@@ -2,8 +2,10 @@
 # Multi-stage build for the Zoteus MCP server (OAuth 2.1 remote).
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# --ignore-scripts: package.json has a `prepare` script (so a git-URL install
+# builds itself), and this layer deliberately has no tsconfig.json or src/ yet.
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY tsconfig.json ./
 COPY src ./src
 RUN npm run build
@@ -11,7 +13,7 @@ RUN npm run build
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
@@ -33,6 +35,7 @@ COPY package.json ./
 #   ZOTERO_OAUTH_CLIENT_KEY=...  ZOTERO_OAUTH_CLIENT_SECRET=...  (https://www.zotero.org/oauth/apps)
 #   ZOTEUS_OAUTH_STORE=file      ZOTEUS_OAUTH_TOKEN_SECRET=...   (openssl rand -base64 32)
 #   ZOTEUS_DATA_DIR=/data        + mount a volume at /data so the encrypted store + indexes persist
+
 VOLUME ["/data"]
 EXPOSE 3939
 ENTRYPOINT ["node", "dist/index.js", "--http", "--port", "3939", "--host", "0.0.0.0"]
