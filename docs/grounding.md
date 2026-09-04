@@ -113,7 +113,7 @@ Audit a Zotero library's tags against a controlled vocabulary with optional requ
 
 ### Vocabulary schema
 
-Supply inline as `vocabulary` (a JSON object) or as a JSON file path via `vocabulary_path`:
+Supply inline as `vocabulary` (a JSON object) or as a JSON file path via `vocabulary_path`. On a server with OAuth enabled, `vocabulary_path` must resolve inside the data directory (see [Files and sync](./files-and-sync.md)); pass the vocabulary inline instead:
 
 ```json
 {

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { resolveCallerPath, CallerPathError } from '../lib/caller-path.js';
+import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
@@ -24,11 +26,55 @@ const attachment: ToolDefinition = {
     content_type: z.string().optional(),
     item_key: z.string().optional().describe('Attachment item key (download/info).'),
     save_path: z.string().optional().describe('Where to write the downloaded file.'),
+    overwrite: z
+      .boolean()
+      .optional()
+      .describe('Allow `save_path` to replace a file that already exists (default false).'),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
-  annotations: { readOnlyHint: false, openWorldHint: true },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
   handler: async (args, ctx) => {
+    // Caller-supplied paths are resolved first, before any library or network work: on a
+    // shared deployment they address the operator's disk, not the caller's.
+    let uploadPath = args.file_path;
+    let savePath: string | undefined;
+    try {
+      if (uploadPath) {
+        uploadPath = await resolveCallerPath(uploadPath, {
+          dataDir: ctx.config.dataDir,
+          confined: ctx.remoteCaller,
+          mode: 'read',
+          argName: 'file_path',
+          alternative: 'Use `url` instead: Zoteus fetches the bytes itself, which works on every setup.',
+        });
+      }
+      if (args.save_path) {
+        savePath = await resolveCallerPath(args.save_path, {
+          dataDir: ctx.config.dataDir,
+          confined: ctx.remoteCaller,
+          mode: 'write',
+          argName: 'save_path',
+          alternative: 'Omit `save_path` to write to the default location under the data directory.',
+        });
+        // Only a caller-supplied path is protected: the default location is Zoteus's own
+        // cache for this attachment key, and re-downloading over it is the ordinary case.
+        if (!args.overwrite && existsSync(savePath)) {
+          return err(
+            `\`${savePath}\` already exists. Pass \`overwrite: true\` to replace it, or choose another \`save_path\`.`,
+          );
+        }
+      }
+    } catch (e) {
+      if (e instanceof CallerPathError) return err(e.message);
+      throw e;
+    }
+
     if (args.action === 'info') {
       if (!args.item_key) return err('`item_key` is required for info.');
       const library = args.library_id
@@ -73,7 +119,7 @@ const attachment: ToolDefinition = {
         );
       }
       const result = await uploadFile(ctx.web, lib, {
-        filePath: args.file_path,
+        filePath: uploadPath,
         parentItem: args.parent_item,
         title: args.title,
         contentType: args.content_type,
@@ -86,7 +132,7 @@ const attachment: ToolDefinition = {
 
     // download
     if (!args.item_key) return err('`item_key` is required for download.');
-    const savePath = args.save_path ?? join(ctx.config.dataDir, 'attachments', args.item_key);
+    savePath ??= join(ctx.config.dataDir, 'attachments', args.item_key);
     await mkdir(dirname(savePath), { recursive: true });
     const r = await downloadFile(ctx.web, lib, args.item_key, savePath);
     return ok(

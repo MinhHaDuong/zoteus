@@ -270,7 +270,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_READ_ONLY: bool(false),
         ZOTEUS_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
         ZOTEUS_LOG_FORMAT: z.enum(['text', 'json']).default('text'),
-        ZOTEUS_UPDATE_CHECK: bool(true),
+        ZOTEUS_UPDATE_CHECK: bool(false),
         ZOTEUS_DIST: z.string().min(1).optional(),
         ZOTEUS_ALLOW_INSECURE_HTTP: bool(false),
         ZOTEUS_METRICS_ENABLED: bool(false),

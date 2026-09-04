@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "zoteus",
   "display_name": "Zoteus: Zotero MCP",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "MCP server that gives Claude and other MCP clients access to a Zotero library: search, citations, adding items, safe writes, semantic search, and PDF passages.",
   "long_description": "Zoteus gives Claude complete, safe access to your Zotero library via the Web API v3 and the desktop local API: items, collections, tags, attachments, full-text, sync, groups, add-by-DOI/ISBN/PMID/arXiv, CSL bibliography formatting, hybrid semantic search, and an OpenAlex/Crossref scholarly graph.",
   "author": {
@@ -17,7 +17,10 @@
   },
   "keywords": ["zotero", "mcp", "citations", "bibliography", "research", "reference-manager"],
   "icon": "icon.png",
-  "privacy_policies": ["https://github.com/oscardvs/zoteus/blob/main/PRIVACY.md"],
+  "privacy_policies": [
+    "https://zoteus.com/privacy",
+    "https://github.com/oscardvs/zoteus/blob/main/PRIVACY.md"
+  ],
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -27,6 +30,7 @@
       "env": {
         "ZOTERO_API_KEY": "${user_config.api_key}",
         "ZOTEUS_LOCAL": "${user_config.local}",
+        "ZOTEUS_UPDATE_CHECK": "${user_config.update_check}",
         "ZOTEUS_EMBEDDINGS": "${user_config.embeddings}",
         "ZOTEUS_EMBEDDING_MODEL": "${user_config.embedding_model}",
         "ZOTEUS_EMBEDDING_DTYPE": "${user_config.embedding_dtype}",
@@ -113,6 +117,13 @@
       "type": "directory",
       "title": "Local embeddings path",
       "description": "Where to find @huggingface/transformers for on-device (local) embeddings. This bundle cannot ship it: the resolved dependency tree, onnxruntime's native binaries included, is about 700 MB. Do not use `npm i -g`: Claude Desktop runs Zoteus on its own built-in Node, so a global install under nvm (or any version manager) lands next to a Node this extension never executes, and switching versions later breaks the path. Install it in a folder of its own instead: `mkdir -p ~/.zoteus-deps && cd ~/.zoteus-deps && npm init -y && npm i @huggingface/transformers`, then pick that folder's node_modules here (for example /home/you/.zoteus-deps/node_modules). Leave empty to run keyword-only (BM25) search, or pick openai/gemini above.",
+      "required": false
+    },
+    "update_check": {
+      "type": "boolean",
+      "title": "Check for updates",
+      "description": "Once a day, ask GitHub whether a newer Zoteus release exists and mention it in zotero_whoami. A manually installed extension never auto-updates, so this is the only upgrade notice you get. Off by default: it is the one request Zoteus makes that you did not ask for. It sends no library content and no personal data.",
+      "default": false,
       "required": false
     }
   },

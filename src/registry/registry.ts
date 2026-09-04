@@ -44,6 +44,13 @@ export interface ToolContext {
    * operator context, stdio, and any no-auth deployment.
    */
   zoteroUserId?: number;
+  /**
+   * Whether the caller is someone other than the operator, i.e. any OAuth/HTTP deployment
+   * and every per-user context. Tools that take a filesystem path from the caller confine
+   * it to the data directory when this is set: on stdio the caller owns the machine, on a
+   * shared server a path would reach the operator's disk.
+   */
+  remoteCaller: boolean;
   /** Live process counters; absent outside the HTTP transport. */
   metrics?: Metrics;
   /** Durable usage log; absent unless the operator turned it on. */

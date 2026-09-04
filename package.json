@@ -1,6 +1,6 @@
 {
   "name": "@oscardvs/zoteus",
-  "version": "1.13.0",
+  "version": "1.14.0",
   "description": "MCP server that gives Claude and other MCP clients access to a Zotero library: search, citations, adding items, safe writes, semantic search, and PDF passages.",
   "keywords": [
     "zotero",
@@ -45,6 +45,7 @@
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "gen:codex": "tsx scripts/generate-codex.ts",
     "inspector": "npx @modelcontextprotocol/inspector npx tsx src/index.ts",
+    "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
   "mcpName": "io.github.oscardvs/zoteus",

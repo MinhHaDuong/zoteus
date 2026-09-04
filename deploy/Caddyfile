@@ -1,7 +1,7 @@
 # Public HTTPS origin → Zoteus. Caddy terminates TLS and PRESERVES the Host header
 # (default reverse_proxy behavior), which Zoteus's DNS-rebinding guard requires.
 # {$ZOTEUS_DOMAIN} comes from .env (e.g. zoteus.example.duckdns.org).
-# For a DuckDNS hostname, use the DNS-01 challenge — build a Caddy image with the
+# For a DuckDNS hostname, use the DNS-01 challenge: build a Caddy image with the
 # duckdns module, or use a custom cert. See docs/deployment.md.
 {$ZOTEUS_DOMAIN} {
 	encode zstd gzip
@@ -13,10 +13,16 @@
 	# /healthz and /readyz stay open: they say only that the process is up, and deploys
 	# check them.
 	#
+	# The trailing `*` is load-bearing and must not be "tidied" back to exact paths.
+	# Express routes non-strictly, so it serves /metrics/ from the same handler as
+	# /metrics, and an exact-path matcher lets that one trailing slash through: this
+	# was live on mcp.zoteus.com from 2026-09-03 until 2026-09-04, publishing
+	# zoteus_tool_calls_total to anyone who added a slash.
+	#
 	# handle blocks rather than a bare respond, because handle blocks are mutually
 	# exclusive and run in the order written, while bare directives are reordered by
 	# Caddy's own directive ranking.
-	@ops path /metrics /usage.json
+	@ops path /metrics* /usage.json*
 	handle @ops {
 		respond 404
 	}

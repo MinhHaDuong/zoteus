@@ -36,7 +36,7 @@ For normal use there is nothing to download from GitHub: your MCP client fetches
 | **Cursor / VS Code / Claude Desktop / Codex / Zed…** | `npx add-mcp @oscardvs/zoteus` |
 | **claude.ai (web)** | Add custom connector → your hosted URL (OAuth) |
 
-> **Updating a desktop-extension install:** manually installed extensions (`.mcpb`, or the older `.dxt`) do not auto-update. Zoteus checks GitHub releases once a day and tells you in-chat (via `zotero_whoami`) when a newer version exists; download the new `zoteus.mcpb` and reinstall it to upgrade. `npx` installs always run the latest published version.
+> **Updating a desktop-extension install:** manually installed extensions (`.mcpb`, or the older `.dxt`) do not auto-update. Turn on **Check for updates** in the extension settings (or set `ZOTEUS_UPDATE_CHECK=true`) and Zoteus asks GitHub once a day, then tells you in-chat via `zotero_whoami` when a newer version exists; download the new `zoteus.mcpb` and reinstall it to upgrade. The check is off by default. `npx` installs always run the latest published version.
 
 A cloud API key is optional. Add one for sync, group libraries, and writes when the desktop app is not running; reads and personal-library writes work without a key against a running Zotero.
 

@@ -144,7 +144,7 @@ GitHub Release for the tag (the `release` job in `deploy.yml` does this automati
 
 > **Updates (#6):** Claude only auto-updates extensions installed from the official
 > directory; a manually installed bundle stays on its version forever. Zoteus therefore
-> ships an in-server update check (`ZOTEUS_UPDATE_CHECK`, on by default): a daily cached
+> ships an in-server update check (`ZOTEUS_UPDATE_CHECK`, opt-in since 1.14.0): a daily cached
 > GET of the latest GitHub release, surfaced through `zotero_whoami` with a
 > download-and-reinstall hint when the manifest marks the install as `ZOTEUS_DIST=mcpb`
 > (or the legacy `dxt`).

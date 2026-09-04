@@ -23,7 +23,7 @@ const fulltext: ToolDefinition = {
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
-  annotations: { readOnlyHint: false, openWorldHint: true },
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     const readLib = args.library_id
       ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }

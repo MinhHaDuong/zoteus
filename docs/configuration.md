@@ -38,7 +38,7 @@ A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, 
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose `zotero_delete_items` (permanent delete). Trash is always available. |
 | `ZOTEUS_READ_ONLY` | `false` | Expose only non-mutating tools. Recommended for public/remote endpoints. |
 | `ZOTEUS_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` (stderr only — stdout carries the JSON-RPC stream). |
-| `ZOTEUS_UPDATE_CHECK` | `true` | Daily check of GitHub releases for a newer version; when one exists, `zotero_whoami` (and the stderr log) says so. Useful because manual installs such as the Claude desktop `.dxt` have no auto-update channel. The check is a single unauthenticated GET to the GitHub API, sends no user data, and caches the result for 24 h. Set `false` to disable. |
+| `ZOTEUS_UPDATE_CHECK` | `false` | Set `true` for a daily check of GitHub releases for a newer version; when one exists, `zotero_whoami` (and the stderr log) says so. Worth turning on for manual installs such as the Claude desktop `.mcpb`, which have no auto-update channel. The check is a single unauthenticated GET to the GitHub API, sends no user data, and caches the result for 24 h. It is **off by default** because it is the only request Zoteus makes that you did not ask for, and a local-first tool should not reach the network on its own initiative. |
 | `ZOTEUS_DIST` | — | Distribution-channel marker. The packaged desktop-extension manifest sets `mcpb` (older bundles set `dxt`) so the update notice tells users to download and reinstall the new bundle. Not usually set by hand. |
 
 ## Desktop extension settings (`.mcpb`)

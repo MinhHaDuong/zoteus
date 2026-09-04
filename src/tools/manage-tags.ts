@@ -20,7 +20,12 @@ const manageTags: ToolDefinition = {
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
-  annotations: { readOnlyHint: false, openWorldHint: true },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   handler: async (args, ctx) => {
     if (args.action === 'list') {
       const lib = ctx.router.defaultLibrary();

@@ -56,7 +56,7 @@ const indexTool: ToolDefinition = {
         `Cap on indexed full-text characters per item; 0 means no cap (default ${DEFAULT_FULLTEXT_MAX_CHARS}). Only used with fulltext.`,
       ),
   },
-  annotations: { readOnlyHint: false, openWorldHint: true },
+  annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     if (args.action === 'status') {
       const s = ctx.search.buildStatus();

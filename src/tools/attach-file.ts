@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveCallerPath, CallerPathError } from '../lib/caller-path.js';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
 import { ok, ensureLocalApi, isLocalWritesUnavailable, requireCloudLibrary } from '../registry/registry.js';
 import {
@@ -37,10 +38,25 @@ const attachFile: ToolDefinition = {
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional().describe('Group library to attach in; forces the cloud path.'),
   },
-  annotations: { readOnlyHint: false, openWorldHint: true },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   handler: async (args, ctx) => {
     if (!args.path && !args.url) {
       return err('Provide `path` or `url`.');
+    }
+    let localPath = args.path;
+    if (localPath) {
+      try {
+        localPath = await resolveCallerPath(localPath, {
+          dataDir: ctx.config.dataDir,
+          confined: ctx.remoteCaller,
+          mode: 'read',
+          argName: 'path',
+          alternative: 'Use `url` instead: Zoteus downloads the bytes itself, which works on every setup.',
+        });
+      } catch (e) {
+        if (e instanceof CallerPathError) return err(e.message);
+        throw e;
+      }
     }
     // Desktop first for the personal library: no cloud key, no quota, bytes never leave
     // the machine. Group libraries the app may not have are cloud-only either way.
@@ -55,7 +71,7 @@ const attachFile: ToolDefinition = {
     let source: Awaited<ReturnType<typeof readAttachmentSource>>;
     try {
       source = await readAttachmentSource(ctx, {
-        path: args.path,
+        path: localPath,
         url: args.url,
         filename: args.filename,
         contentType: args.content_type,
