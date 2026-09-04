@@ -99,7 +99,7 @@ const annotateTool: ToolDefinition = {
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
-  annotations: { readOnlyHint: false, openWorldHint: true },
+  annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   handler: async (args, ctx) => {
     const action = args.action ?? 'add';
 

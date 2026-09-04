@@ -37,7 +37,12 @@ const updateItem: ToolDefinition = {
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
-  annotations: { readOnlyHint: false, idempotentHint: true, openWorldHint: true },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
   handler: async (args, ctx) => {
     const lib = requireCloudLibrary(ctx, args);
     if (args.dry_run) {
