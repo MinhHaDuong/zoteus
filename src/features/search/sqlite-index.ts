@@ -2031,10 +2031,14 @@ export class SqliteSearchIndex extends SearchIndexBase {
   /** Commit the build's open transaction: this is what makes the last passages durable. */
   async save(): Promise<void> {
     this.refuseIfFaulted();
+    const pauseTransition = this.pauseTransition;
+    if (pauseTransition) await pauseTransition.catch(() => {});
     this.flush();
   }
 
   async close(): Promise<void> {
+    const pauseTransition = this.pauseTransition;
+    if (pauseTransition) await pauseTransition.catch(() => {});
     // Released whether or not this object ever opened a database of its own: the salvage
     // is a second handle on a second file, and a server that keeps it would keep a lock
     // on the very file it told the user they may delete.

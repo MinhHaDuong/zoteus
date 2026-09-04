@@ -171,4 +171,32 @@ describe('durable index pause', () => {
     expect(cleared.isPaused).toBe(false);
     await cleared.close();
   });
+
+  sqliteIt('does not let a concurrent SQLite save restore the hold after resume', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-sqlite-save-'));
+    const jsonPath = join(dir, 'search-index.json');
+    const index = await createSearchIndex({ backend: 'sqlite', jsonPath, embedder: null, logger: silentLogger });
+    await index.setPaused(true);
+    const resume = index.setPaused(false);
+    const concurrentSave = index.save();
+    await Promise.all([resume, concurrentSave]);
+    await index.close();
+
+    const reopened = await createSearchIndex({ backend: 'sqlite', jsonPath, embedder: null, logger: silentLogger });
+    expect(reopened.isPaused).toBe(false);
+    await reopened.close();
+  });
+
+  sqliteIt('does not let a concurrent SQLite close restore the hold after resume', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-sqlite-close-'));
+    const jsonPath = join(dir, 'search-index.json');
+    const index = await createSearchIndex({ backend: 'sqlite', jsonPath, embedder: null, logger: silentLogger });
+    await index.setPaused(true);
+    const resume = index.setPaused(false);
+    await Promise.all([resume, index.close()]);
+
+    const reopened = await createSearchIndex({ backend: 'sqlite', jsonPath, embedder: null, logger: silentLogger });
+    expect(reopened.isPaused).toBe(false);
+    await reopened.close();
+  });
 });
