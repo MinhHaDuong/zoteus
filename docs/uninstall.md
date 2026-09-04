@@ -69,10 +69,12 @@ add and edit items through the API like any other client, and removing it
 leaves those items where they are. Do not delete the directory as part of
 removing Zoteus.
 
-**Your API keys.** They live wherever you put them — a shell profile, your
-MCP client's configuration, a secret manager. Zoteus keeps no copy of its own,
-so nothing in this list reaches them. Revoke them yourself if you want them
-gone.
+**Your cloud API keys.** They live wherever you put them — a shell profile,
+your MCP client's configuration, a secret manager. Zoteus never writes them to
+disk, so nothing in this list reaches them. The only key Zoteus stores is the
+one Zotero grants it for the local API; it lives at
+`<ZOTEUS_DATA_DIR>/local-api-key.json`, and deleting the data directory in step
+3 removes it. Revoke cloud keys yourself if you want them gone.
 
 ## If you installed before v1.10.0
 
@@ -95,7 +97,7 @@ install you pointed at and delete it. A fresh install writes nothing there.
 Nothing should remain:
 
 ```sh
-ls "${ZOTEUS_DATA_DIR:-$HOME/.local/share/zoteus}"    # no such file or directory
+ls "${ZOTEUS_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/zoteus}"    # no such file or directory
 ```
 
 Reinstalling later rebuilds the index from your library. Nothing removed here
