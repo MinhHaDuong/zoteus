@@ -4,6 +4,14 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **A durable pause for index work.** `zotero_index action:"pause"` stops a running job and
+  persists a hold even when the index is idle; `build`, `refresh`, `update`, and the
+  semantic-search automatic build then refuse until `action:"resume"` explicitly clears
+  it. Queries remain available, and resume clears the hold without starting work by itself.
+
 ## [1.14.0] - 2026-09-04
 
 ### Added

@@ -268,6 +268,8 @@ export abstract class SearchIndexBase implements SearchIndex {
    * resume redoes to a single persistence interval (#24).
    */
   protected checkpoint: BuildCheckpoint | undefined = undefined;
+  /** Durable operator hold. Unlike requestStop(), this survives restarts and idle periods. */
+  protected paused = false;
   /**
    * Canonical identity of the library whose rows this store holds (canonicalLibraryToken;
    * undefined until a stamped build writes rows, or for indexes persisted before the
@@ -696,6 +698,32 @@ export abstract class SearchIndexBase implements SearchIndex {
     return this.buildState === 'building';
   }
 
+  get isPaused(): boolean {
+    return this.paused;
+  }
+
+  /**
+   * Change the durable hold independently of the running-job cancellation token. Setting
+   * it while idle is the important case: requestStop() deliberately has nothing to save
+   * then, whereas a user must still be able to prevent the next explicit build.
+   */
+  async setPaused(paused: boolean): Promise<void> {
+    this.refuseIfFaulted();
+    const previous = this.paused;
+    this.paused = paused;
+    try {
+      await this.save();
+    } catch (e) {
+      this.paused = previous;
+      throw e;
+    }
+  }
+
+  private refuseIfPaused(): void {
+    if (!this.paused) return;
+    throw new Error('Index work is paused. Call zotero_index action:"resume" before build, refresh, or update.');
+  }
+
   /** Full live status: index size + build progress. Backward compatible with status(). */
   buildStatus(): IndexBuildStatus {
     const base = this.status();
@@ -759,6 +787,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     const c = this.counts();
     const s: SearchIndexStatus = {
       documents: c.documents,
+      paused: this.paused,
       vectors: c.vectors,
       items: c.items,
       storage: this.storage,
@@ -817,6 +846,7 @@ export abstract class SearchIndexBase implements SearchIndex {
 
   async build(libraryItems: any[], opts: BuildOptions = {}): Promise<SearchIndexStatus> {
     this.refuseIfFaulted();
+    this.refuseIfPaused();
     this.reset();
     // A rebuild is the retry: clear a previous runtime failure so a provider that has since
     // been fixed (model downloaded, package installed) reports healthy again.
@@ -916,6 +946,7 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   async buildIncremental(fetchPage: PageFetcher, opts: IncrementalBuildOptions = {}): Promise<IndexBuildStatus> {
     this.refuseIfFaulted();
+    this.refuseIfPaused();
     // Before anything is cleared: a build for a different library than the rows held must
     // refuse here rather than reach reset() below (startIndexBuild also asserts this
     // synchronously, so tool callers see the refusal rather than a logged rejection).
@@ -1449,6 +1480,7 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   async updateIncremental(opts: IncrementalUpdateOptions): Promise<IndexBuildStatus> {
     this.refuseIfFaulted();
+    this.refuseIfPaused();
     // Same guard as the full build: a delta for a different library would splice its
     // changes into — and delete "missing" items from — rows that were never its own.
     if (opts.library) this.assertLibrary(opts.library);
@@ -2379,6 +2411,7 @@ export class MemorySearchIndex extends SearchIndexBase {
       // The other sequence's cursor: what an update hands to `/fulltext?since=` to find
       // the text Zotero extracted after this index was built (#26).
       fulltextVersion: this.fulltextVersion,
+      paused: this.paused,
     };
     if (this.libraryBackend) snapshot.libraryBackend = this.libraryBackend;
     // Present only while a build is unfinished, which is exactly when the next one has
@@ -2417,6 +2450,7 @@ export class MemorySearchIndex extends SearchIndexBase {
     // Absent in files written before resume existed, and in any file a finished build
     // wrote: both mean there is nothing to resume, which is what undefined says (#24).
     this.checkpoint = data.checkpoint;
+    this.paused = data.paused ?? false;
     // Absent in files written before the library stamp existed: an unstamped index
     // refuses nothing (assertLibrary), which is the only workable answer for it.
     this.library = data.library;

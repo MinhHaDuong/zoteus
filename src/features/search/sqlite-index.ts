@@ -1090,6 +1090,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // coverage gap is unknown, which the first update closes once (#26).
     this.fulltextVersion = Number(this.meta('fulltextVersion') ?? 0) || 0;
     this.checkpoint = parseCheckpoint(this.meta('checkpoint'));
+    this.paused = this.meta('paused') === 'true';
     // Absent in databases written before the library stamp: an unstamped index refuses
     // nothing (assertLibrary), so old files keep building rather than stranding.
     this.library = this.meta('library') || undefined;
@@ -1120,6 +1121,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // place a value can be added without a schema version bump: an older build ignores a
     // key it does not know, so a database written here still opens there.
     set.run('checkpoint', this.checkpoint ? JSON.stringify(this.checkpoint) : '');
+    set.run('paused', String(this.paused));
     set.run('library', this.library ?? '');
   }
 
@@ -1199,6 +1201,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // keeps knowing how far into Zotero's full-text sequence it read.
     this.fulltextVersion = snapshot.fulltextVersion ?? 0;
     this.checkpoint = snapshot.checkpoint;
+    this.paused = snapshot.paused ?? false;
     this.writeMeta();
     this.commit();
     this.storeNotice =
