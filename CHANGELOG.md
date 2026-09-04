@@ -88,7 +88,99 @@ All notable changes to Zoteus are documented here. The format is based on
   internet's weather. They now increment `zoteus_http_scanner_requests_total`, log at
   `debug`, and are kept out of the usage log.
 
+- **Every tool now says whether it destroys anything, and several were saying the wrong
+  thing by omission.** MCP's `destructiveHint` defaults to *true* when a tool is not
+  read-only, so leaving it unset told every client to assume the worst about eleven of the
+  thirteen writing tools, `zotero_create_items` and `zotero_import` included. Each was read
+  against its handler rather than its name, which changed three answers from what the
+  obvious guess would have been. `zotero_annotate` is **not** destructive: its `delete`
+  sets `deleted: 1` and lands in the reversible trash rather than issuing the erasing
+  DELETE. `zotero_create_items` **is**: its own description offers "include its `key` and
+  current `version`" to update, so one call can overwrite an existing item's fields in
+  place. `zotero_attachment` is too, but for a reason outside Zotero entirely: `download`
+  writes to the local filesystem. `zotero_semantic_search` keeps `readOnlyHint: true`; its
+  auto-build writes only Zoteus's own derived index, which is the same judgment that put
+  `zotero_index` on the read-only allowlist, and flipping it would drop semantic search out
+  of every `ZOTEUS_READ_ONLY` deployment.
+
+- **The update check is off by default, and the desktop bundle can switch it on (#54).**
+  `ZOTEUS_UPDATE_CHECK` defaulted to `true`, so a default install did one unauthenticated
+  `GET https://api.github.com/repos/oscardvs/zoteus/releases/latest` at startup, once a day,
+  before anyone had been asked. Nothing user-identifying went with it, and nothing about the
+  library did either, but it was still the only request Zoteus made on its own initiative, and
+  the one class of user this project is built for is the one who runs it against their own
+  library precisely so that nothing leaves the machine. It now defaults to `false`.
+
+  The check exists for a real reason and keeps it: a manually installed `.mcpb` has no
+  auto-update channel, so without the check it never learns a newer version exists. So the
+  desktop bundle gains a **Check for updates** switch in its settings pane, defaulting to off,
+  which is the first time that knob has been reachable from a `.mcpb` install at all. Reported
+  by MinhHaDuong, with the whole causal chain cited line by line.
+
+### Security
+- **A caller-supplied filesystem path reached the operator's disk on a shared deployment.**
+  Four tool arguments took a path and used it as given: `zotero_attach_file`'s `path`,
+  `zotero_attachment`'s `file_path` and `save_path`, and `zotero_tag_audit`'s
+  `vocabulary_path`. On a single-user install that is the tool working as intended, because
+  the caller owns the machine. On an OAuth deployment the caller is not the operator, and
+  those paths pointed at the *server's* filesystem.
+
+  So an authenticated user of a hosted instance could read any file the process could read,
+  by attaching it into their own library and downloading it again, and write any file the
+  process could write, by uploading bytes and then naming a destination. On a multi-tenant
+  server that reaches the encrypted per-user token store under the data directory and the
+  process environment, which is where the secret that encrypts that store lives; the write
+  side reaches the server's own `dist/`, which is what the entrypoint executes.
+
+  Paths from a caller are now resolved through `resolveCallerPath` and, whenever the caller
+  is not the operator (any per-user context, and any deployment with OAuth enabled), must
+  land inside the data directory. Resolution follows symlinks, so a link planted inside the
+  data directory cannot step out of it, and prefix matching is on a path boundary, so
+  `/data-evil` does not pass for `/data`. A caller-supplied `save_path` also refuses to
+  replace a file that already exists unless the new `overwrite: true` is passed; the default
+  download location is exempt, because that one is Zoteus's own cache for the attachment key
+  and re-downloading over it is the ordinary case. Nothing changes for a stdio install:
+  `zotero_attachment` can still write to `~/Desktop`, which is the point of the tool.
+
+  The container also no longer runs as root. It ran as uid 0, which is what turned the write
+  into code execution rather than a nuisance; it now runs as the image's unprivileged `node`
+  user. **Upgrading an existing deployment needs one manual step:** a volume mounted at
+  `/data` holds root-owned files written by the old image, so `chown -R 1000:1000` it once
+  before starting the new container.
+
+  Found while auditing every tool's MCP annotations for the Claude Connectors Directory
+  submission, not from a report, and there is no evidence it was exploited.
+
 ### Fixed
+- **`/metrics` and `/usage.json` were reachable from the public internet with one trailing
+  slash.** The 404 block added in 1.13.0 matched exact paths, and Express routes non-strictly:
+  it serves `/metrics/` from the same handler as `/metrics`. So `curl https://host/metrics`
+  answered 404 while `curl https://host/metrics/` returned request counts, tool-call volume and
+  issued-token counts to anyone who asked. `/usage.json/` reached the application the same way
+  and only escaped notice because 1.13.0 has no such route, which means shipping the usage log
+  would have turned that one into a 200 as well. The matcher is now
+  `path /metrics* /usage.json*`, matching by prefix; Caddy's path matcher is case-insensitive,
+  so `/METRICS/` is covered too. Verified against a live instance across every path shape:
+  bare, trailing slash, double slash, dot segment, query string, uppercase and a trailing
+  path segment. `/healthz` and `/readyz` stay public, as before.
+- **`npm i github:oscardvs/zoteus` installed a package whose `bin` did not exist.** `dist/` is
+  gitignored and only `prepublishOnly` built it, and npm does not run `prepublishOnly` for a
+  git dependency: it runs `prepare`, which the package did not have. So a git-URL install, the
+  one this project has pointed people to for trying an unreleased fix, produced a `zoteus`
+  binary pointing at a file that was never built. `prepare` is now defined. Both `npm ci`
+  layers in the Dockerfile take `--ignore-scripts`, because each runs before `tsconfig.json`
+  and `src/` are copied into the image and would otherwise try to compile a source tree that
+  is not there yet.
+- **The privacy policy denied that the project runs a hosted service.** `PRIVACY.md` claimed
+  Zoteus has "no servers operated by the project" and that "the Zoteus project does not operate
+  any hosted instance for the public". Both were true when they were written and neither has
+  been since `mcp.zoteus.com` went live as a paid tier. The policy now says what it actually
+  governs, which is the software you install, and points at
+  [zoteus.com/privacy](https://zoteus.com/privacy) as the controlling policy for the hosted
+  service. The desktop bundle lists both, hosted-aware one first.
+- **`server.json`'s description fits the MCP registry's 100-character cap.** A README rewrite
+  had pushed it to 150, which the registry rejects with a 422 at publish time rather than at
+  validation, so it only surfaced mid-release.
 - **`deploy/Caddyfile` no longer publishes `/metrics` to the internet.** The shipped proxy
   config was a blanket `reverse_proxy`, so every ops endpoint was public: on a live
   instance `curl https://host/metrics` returned request and tool-call volume to anyone who
