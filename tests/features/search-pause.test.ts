@@ -22,7 +22,10 @@ class GatedMemorySearchIndex extends MemorySearchIndex {
     this.unblockFirst = resolve;
   });
 
-  constructor(private readonly testPath: string) {
+  constructor(
+    private readonly testPath: string,
+    private readonly failSecond = false,
+  ) {
     super({ embedder: null, logger: silentLogger, path: testPath });
   }
 
@@ -30,14 +33,13 @@ class GatedMemorySearchIndex extends MemorySearchIndex {
     this.unblockFirst();
   }
 
-  protected override async writeSnapshot(): Promise<void> {
-    // Capture before waiting: without the production save queue this stale false snapshot
-    // would rename after setPaused(true)'s newer write and erase the durable hold.
-    const snapshot: IndexSnapshot = this.toJSON();
-    if (++this.writes === 1) {
+  protected override async writeSnapshot(snapshot: IndexSnapshot): Promise<void> {
+    const write = ++this.writes;
+    if (write === 1) {
       this.releaseFirst();
       await this.firstWriteGate;
     }
+    if (write === 2 && this.failSecond) throw new Error('second write failed');
     await saveIndex({ toJSON: () => snapshot, loadFromJSON() {} }, this.testPath);
   }
 }
@@ -86,6 +88,27 @@ describe('durable index pause', () => {
     const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
     expect(await loadIndex(reopened, path)).toBe(true);
     expect(reopened.isPaused).toBe(true);
+  });
+
+  it('does not publish a transient resume when its queued write fails', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'zoteus-pause-rollback-'));
+    const path = join(dir, 'search-index.json');
+    const seed = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    await seed.setPaused(true);
+
+    const index = new GatedMemorySearchIndex(path, true);
+    expect(await loadIndex(index, path)).toBe(true);
+    const older = index.save(); // captures paused:true, then waits before publishing it
+    await index.firstWriteStarted;
+    const failedResume = index.setPaused(false); // captures false, queues second, then fails
+    index.release();
+    await older;
+    await expect(failedResume).rejects.toThrow(/second write failed/);
+    expect(index.isPaused).toBe(true); // setter rolled memory back
+
+    const reopened = new MemorySearchIndex({ embedder: null, logger: silentLogger, path });
+    expect(await loadIndex(reopened, path)).toBe(true);
+    expect(reopened.isPaused).toBe(true); // disk agrees; the transient false never published
   });
 
   sqliteIt('persists the hold in SQLite while idle and clears it without a schema bump', async () => {

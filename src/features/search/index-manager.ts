@@ -2385,9 +2385,9 @@ export class MemorySearchIndex extends SearchIndexBase {
   }
 
   /** Atomically rewrite the JSON artifact. A no-op when this index has no file. */
-  protected async writeSnapshot(): Promise<void> {
+  protected async writeSnapshot(snapshot: IndexSnapshot): Promise<void> {
     if (!this.path) return;
-    await saveIndex(this, this.path);
+    await saveIndex({ toJSON: () => snapshot, loadFromJSON() {} }, this.path);
   }
 
   async save(): Promise<void> {
@@ -2398,7 +2398,11 @@ export class MemorySearchIndex extends SearchIndexBase {
     // reporting on. Faulted means: touch the artifact only to replace it deliberately.
     this.refuseIfFaulted();
     if (!this.path) return;
-    const write = this.saveTail.then(() => this.writeSnapshot());
+    // Capture now, not when the queued write gets its turn. A later setter may roll its
+    // in-memory value back after a failed write; no earlier save may publish that transient
+    // value merely because it observed mutable `this` late.
+    const snapshot = this.toJSON();
+    const write = this.saveTail.then(() => this.writeSnapshot(snapshot));
     // A failed write rejects its own caller but must not poison every later save.
     this.saveTail = write.catch(() => {});
     await write;
