@@ -98,29 +98,50 @@ Verify the listing resolves under `io.github.oscardvs/zoteus`.
 
 ---
 
-## 5. Claude Desktop extension (self-contained `.mcpb`)
+## 5. Claude Desktop extensions (self-contained `.mcpb`, one per operating system)
 
 > **Important:** the manifest lives in `mcpb/` but the runtime entry is `dist/index.js` with
 > bare imports (tsc output, not bundled). Packing `mcpb/` **alone produces a broken bundle**
-> (no `dist/`, no `node_modules`). You must stage a complete tree first.
+> (no `dist/`, no `node_modules`). A complete tree has to be staged first, one per OS.
+
+Why one per OS (#62): `pdfjs-dist` draws through `@napi-rs/canvas`, whose skia binary is a
+separate npm package per OS and CPU, and npm installs only the host's. Up to v1.15.0 the
+release job packed a plain `npm ci` from its Linux runner into one `zoteus.mcpb` whose
+manifest promised darwin and win32 as well; on those systems pdfjs failed to import
+(`DOMMatrix is not defined`) and exact-page extraction quietly fell back to approximate
+pages. One bundle carrying every binary measures 103 MB against 34, and the manifest's
+`compatibility.platforms` knows operating systems but not CPUs, so each bundle carries both
+CPUs of one OS and names only that OS. `scripts/mcpb-bundle.ts` does the staging (`npm ci
+--os --cpu` against the lockfile, no version repeated anywhere), narrows the manifest,
+validates, packs, and verifies the result:
 
 ```bash
 npm run build
-rm -rf /tmp/mcpb-build && mkdir -p /tmp/mcpb-build
-cp mcpb/manifest.json mcpb/icon.png /tmp/mcpb-build/
-cp -r dist /tmp/mcpb-build/dist
-cp package.json package-lock.json /tmp/mcpb-build/
-( cd /tmp/mcpb-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund )  # bundles prod deps incl. optional pdfjs-dist
-npx --yes @anthropic-ai/mcpb validate /tmp/mcpb-build/manifest.json
-npx --yes @anthropic-ai/mcpb pack /tmp/mcpb-build zoteus.mcpb
-# verify it carries the entry point + bundled deps:
-unzip -l zoteus.mcpb | grep -E ' dist/index.js$| icon.png$| manifest.json$'
-unzip -l zoteus.mcpb | grep -q 'node_modules/@modelcontextprotocol/sdk/' && echo "deps bundled"
+npx tsx scripts/mcpb-bundle.ts build darwin     # zoteus-macos.mcpb
+npx tsx scripts/mcpb-bundle.ts build win32      # zoteus-windows.mcpb
+npx tsx scripts/mcpb-bundle.ts build linux      # zoteus-linux.mcpb
+# the gate the release job runs: a .node binary for every CPU of the OS, the entry point,
+# pdfjs and the canvas loader present, nothing built for another OS riding along
+npx tsx scripts/mcpb-bundle.ts check zoteus-macos.mcpb darwin
+npx tsx scripts/mcpb-bundle.ts check zoteus-windows.mcpb win32
+npx tsx scripts/mcpb-bundle.ts check zoteus-linux.mcpb linux
+# a downloaded release asset can be checked the same way; the platform then comes from its manifest
+npx tsx scripts/mcpb-bundle.ts check ~/Downloads/zoteus-macos.mcpb
 ```
 
-The result is a ~35 MB self-contained `.mcpb` (full feature parity, incl. PDF passage
-extraction). Install it in Claude Desktop, confirm the tools load, and attach it to the
-GitHub Release for the tag (the `release` job in `deploy.yml` does this automatically).
+`mcpb/manifest.json` stays the template naming all three platforms; each staged copy has
+`compatibility.platforms` narrowed to its one OS. The results: `zoteus-macos.mcpb` (arm64
+and x64, about 33 MB), `zoteus-windows.mcpb` (x64 and arm64, about 32 MB) and
+`zoteus-linux.mcpb` (x64 and arm64, glibc and musl each, about 57 MB). Install the one for
+your machine in Claude Desktop, confirm the tools load, and attach all three to the GitHub
+Release for the tag (the `release` job in `deploy.yml` does this automatically).
+
+What this verifies, and what it does not: the check proves each archive holds the binary
+`@napi-rs/canvas`'s loader requires on that OS, and forcing that loader down the darwin and
+win32 branches against a staged tree reaches `dlopen` on the right file (where a Linux host
+can only refuse it). Installing a bundle on a native macOS or Windows machine and extracting
+a known page through `zotero_fulltext` is not part of the pipeline; do it by hand on a
+release when you can, and say so in #62.
 
 > **Uploading it by hand: checksum what actually landed.** Only needed when CI cannot do it
 > (an Actions outage, say). `gh release create` uploads the asset by creating the release as
@@ -130,14 +151,16 @@ GitHub Release for the tag (the `release` job in `deploy.yml` does this automati
 > actually download, never the size the API claims:
 >
 > ```bash
-> gh release upload vX.Y.Z zoteus.mcpb   # re-run with --clobber, or delete-asset first
+> gh release upload vX.Y.Z zoteus-macos.mcpb zoteus-windows.mcpb zoteus-linux.mcpb   # re-run with --clobber, or delete-asset first
 > gh release edit vX.Y.Z --draft=false
-> curl -sL --retry 3 -o /tmp/check.mcpb \
->   "https://github.com/oscardvs/zoteus/releases/download/vX.Y.Z/zoteus.mcpb"
-> sha256sum /tmp/check.mcpb zoteus.mcpb   # the two lines must match
+> for f in zoteus-macos zoteus-windows zoteus-linux; do   # each file separately
+>   curl -sL --retry 3 -o "/tmp/check-$f.mcpb" \
+>     "https://github.com/oscardvs/zoteus/releases/download/vX.Y.Z/$f.mcpb"
+>   sha256sum "/tmp/check-$f.mcpb" "$f.mcpb"   # the two lines must match
+> done
 > ```
 >
-> If they differ, `gh release delete-asset vX.Y.Z zoteus.mcpb --yes` and upload again. A
+> If they differ, `gh release delete-asset vX.Y.Z <file> --yes` and upload again. A
 > short download is not automatically the server's fault — pull a known-good asset from a
 > previous release as a control before concluding the new one is bad. This bit v1.7.1: the
 > first upload timed out at 30 MiB of 34 and published a bundle that could not be installed.
@@ -146,7 +169,8 @@ GitHub Release for the tag (the `release` job in `deploy.yml` does this automati
 > `dxt_version` 0.1 manifests) to `@anthropic-ai/mcpb` (`.mcpb`, `manifest_version` 0.3)
 > in 1.4.1. MCPB is required for official directory submission, and its 0.2+ manifest
 > carries the mandatory `privacy_policies` field (see `PRIVACY.md`). Releases up to
-> v1.4.0 attach `zoteus.dxt`; later releases attach `zoteus.mcpb`.
+> v1.4.0 attach `zoteus.dxt`, v1.4.1 through v1.15.0 a single `zoteus.mcpb`, and later
+> releases one `.mcpb` per operating system (#62).
 
 > **Updates (#6):** Claude only auto-updates extensions installed from the official
 > directory; a manually installed bundle stays on its version forever. Zoteus therefore
@@ -167,7 +191,7 @@ git push origin v1.0.0
 ```
 
 `deploy.yml` (on `v*`) runs: `test` → `image` (multi-arch GHCR push) + `npm-publish`
-(provenance) + `release` (self-contained `.mcpb` attached, auto release notes).
+(provenance) + `release` (one self-contained `.mcpb` per OS attached, auto release notes).
 
 ---
 

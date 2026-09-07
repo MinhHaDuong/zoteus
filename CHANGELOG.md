@@ -40,6 +40,19 @@ All notable changes to Zoteus are documented here. The format is based on
   stamp, exactly as an unreconciled deletion pass does, and a degraded census replaces
   nothing. The status carries one `ownWordsReason` sentence saying so, and the next
   `action:"update"` repeats the delta and retries.
+- **The Claude Desktop bundle is now one file per operating system, each carrying its own
+  native PDF dependency (#62).** `pdfjs-dist` draws through `@napi-rs/canvas`, whose skia
+  binary is a separate npm package per OS and CPU that npm installs only for the machine it
+  runs on, so the single `zoteus.mcpb` packed from a plain `npm ci` on the Linux release
+  runner carried the two linux-x64 binaries under a manifest that promised darwin and win32
+  as well; there, importing pdfjs failed with `DOMMatrix is not defined` and exact-page
+  extraction quietly fell back to approximate pages. The release now stages a tree per OS
+  with `npm ci --os --cpu` against the lockfile (both CPUs of each OS, no version repeated
+  anywhere), narrows each manifest to the one OS it is for, and refuses to publish unless
+  every archive holds a `.node` binary for each CPU the OS is promised on: `zoteus-macos.mcpb`,
+  `zoteus-windows.mcpb` and `zoteus-linux.mcpb`, 32 to 57 MB each, where one file for every
+  target would have been 103 MB. Verified by archive inspection and loader simulation on
+  Linux; a run on a native macOS or Windows machine is still owed.
 
 ## [1.15.0] - 2026-09-07
 

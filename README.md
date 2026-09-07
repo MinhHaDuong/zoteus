@@ -24,7 +24,7 @@ For most clients there is nothing to download: the client fetches Zoteus with `n
 
 | Client | How |
 |---|---|
-| **Claude Desktop** | Download `zoteus.mcpb` from the [latest release](https://github.com/oscardvs/zoteus/releases/latest) and double-click it. |
+| **Claude Desktop** | Download the bundle for your system from the [latest release](https://github.com/oscardvs/zoteus/releases/latest), `zoteus-macos.mcpb`, `zoteus-windows.mcpb` or `zoteus-linux.mcpb`, and double-click it. |
 | **Claude Code** | `claude mcp add --transport stdio zoteus -- npx -y @oscardvs/zoteus` |
 | **Cursor, VS Code, Zed, Codex, Gemini CLI, any MCP client** | `npx add-mcp @oscardvs/zoteus`, or add `npx -y @oscardvs/zoteus` as a stdio server by hand. |
 | **claude.ai in the browser** | Add a custom connector pointing at a [hosted Zoteus](https://zoteus.com/pricing) or at [your own remote instance](./docs/remote-oauth.md). |
@@ -37,7 +37,7 @@ claude mcp add --transport stdio zoteus -e ZOTERO_API_KEY=xxxxx -- npx -y @oscar
 
 > Get a key at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). In the desktop app, enable **Settings → Advanced → "Allow other applications on this computer to communicate with Zotero"**. Step-by-step for each client, with screenshots: [zoteus.com/docs/connect-claude-to-zotero](https://zoteus.com/docs/connect-claude-to-zotero/).
 
-> **Updating a desktop-extension install.** A manually installed `.mcpb` (or older `.dxt`) does not auto-update. Turn on **Check for updates** in the extension settings (or set `ZOTEUS_UPDATE_CHECK=true`) and Zoteus asks GitHub once a day, then says so in-chat via `zotero_whoami` when a newer version exists; download the new `zoteus.mcpb` and reinstall. The check is off by default. `npx` installs always run the latest published version.
+> **Updating a desktop-extension install.** A manually installed `.mcpb` (or older `.dxt`) does not auto-update. Turn on **Check for updates** in the extension settings (or set `ZOTEUS_UPDATE_CHECK=true`) and Zoteus asks GitHub once a day, then says so in-chat via `zotero_whoami` when a newer version exists; download the new bundle for your system and reinstall. The check is off by default. `npx` installs always run the latest published version.
 
 ## What it does
 

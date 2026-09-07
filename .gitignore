@@ -8,6 +8,10 @@ dist/
 build/
 *.tsbuildinfo
 
+# Claude Desktop bundles staged and packed by scripts/mcpb-bundle.ts
+mcpb-build/
+*.mcpb
+
 # Test / coverage
 coverage/
 .nyc_output/

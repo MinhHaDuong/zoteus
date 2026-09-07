@@ -56,7 +56,7 @@ const whoami: ToolDefinition = {
       const dist = ctx.config?.dist;
       const bundleHint =
         dist === 'dxt' || dist === 'mcpb'
-          ? ' Manually installed desktop extensions do not auto-update: tell the user to download the new bundle (zoteus.mcpb) from that page and reinstall it in Claude to upgrade.'
+          ? ' Manually installed desktop extensions do not auto-update: tell the user to download the new bundle for their operating system (zoteus-macos.mcpb, zoteus-windows.mcpb or zoteus-linux.mcpb) from that page and reinstall it in Claude to upgrade.'
           : '';
       summary += ` Zoteus ${update.latest} is available (installed: ${update.current}): ${update.url}.${bundleHint}`;
     }

@@ -55,10 +55,16 @@ to it.
 ### Step 1: download the file
 
 Go to the [latest release page](https://github.com/oscardvs/zoteus/releases/latest) and look
-for the **Assets** list near the bottom. Click **`zoteus.mcpb`** to download it. The file is
-around 35 MB, and it holds everything Zoteus needs, so there is nothing else to fetch.
+for the **Assets** list near the bottom. Click the file for your computer to download it:
+**`zoteus-macos.mcpb`** on a Mac, **`zoteus-windows.mcpb`** on Windows, **`zoteus-linux.mcpb`**
+on Linux. The file is between 32 and 57 MB, and it holds everything Zoteus needs on that
+system, so there is nothing else to fetch. There is one file per system because the part of
+Zoteus that reads PDF pages is compiled code that differs between them; a bundle built for
+another system installs but cannot read pages, so pick the one that matches.
 
-![The Zoteus release page on GitHub, with zoteus.mcpb in the Assets list](./images/github-release-download.png)
+![The Zoteus release page on GitHub, with the bundle in the Assets list](./images/github-release-download.png)
+
+(The screenshot is from an older release, which shipped a single `zoteus.mcpb`.)
 
 An `.mcpb` file is an extension for the Claude app, in the same way a `.docx` is a document
 for Word. Your browser may warn that the file type is unusual. It comes from the project's
@@ -74,7 +80,7 @@ recognized), install it by hand instead:
 
 1. Open the Claude app.
 2. Go to **Settings**, then **Extensions** under the **Desktop app** heading.
-3. Drag `zoteus.mcpb` onto the panel, where it says *Drag .MCPB or .DXT files here to install*.
+3. Drag the downloaded `.mcpb` file onto the panel, where it says *Drag .MCPB or .DXT files here to install*.
 
 Either way, when it has worked, the Extensions screen lists **Zoteus** under *Installed on
 your computer*, with a **Configure** button beside it:
@@ -82,7 +88,7 @@ your computer*, with a **Configure** button beside it:
 ![The Extensions screen in Claude's settings, showing Zoteus installed with a Configure button](./images/claude-desktop-extensions.png)
 
 <!-- TODO(screenshot): the install confirmation dialog that appears after double-clicking
-     zoteus.mcpb ("what this extension can do", with the Add button). Needs a desktop
+     the bundle ("what this extension can do", with the Add button). Needs a desktop
      screenshot tool driving the Claude app; it cannot be captured from a web browser. -->
 
 ### Step 3: let Claude see the Zotero app on your computer
@@ -174,7 +180,7 @@ Zoteus handles this by checking, once a day, whether a newer version has been pu
 there is one, it tells you in the chat, with the version number and a link. Updating is the
 same two steps as installing:
 
-1. Download the new `zoteus.mcpb` from the
+1. Download the new bundle for your system from the
    [latest release page](https://github.com/oscardvs/zoteus/releases/latest).
 2. Install it the same way you installed the first one. It replaces the old version.
 

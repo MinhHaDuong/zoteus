@@ -88,22 +88,31 @@ jobs:
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run build
-      # Assemble a SELF-CONTAINED .mcpb (MCP Bundle): manifest + icon + built dist + bundled
-      # production deps (incl. optional pdfjs-dist for feature parity). Packing mcpb/ alone
-      # would omit dist/ and node_modules, yielding a broken bundle — so stage a complete
-      # tree, then validate + pack + verify.
-      - name: Build self-contained .mcpb
+      # One SELF-CONTAINED .mcpb (MCP Bundle) per operating system: manifest + icon + built
+      # dist + bundled production deps. Packing mcpb/ alone would omit dist/ and node_modules
+      # and yield a broken bundle, so a complete tree is staged first. Per OS because pdfjs-dist
+      # needs @napi-rs/canvas, whose skia binary is a separate npm package per OS and CPU that
+      # npm installs only for the host: a plain `npm ci` on this Linux runner packed linux-x64
+      # binaries under a manifest promising darwin and win32 (#62). scripts/mcpb-bundle.ts
+      # stages each tree with `npm ci --os --cpu` from the lockfile (both CPUs of the OS,
+      # nothing hardcoded), narrows the manifest to that OS, validates and packs.
+      - name: Build one self-contained .mcpb per platform
         run: |
-          rm -rf mcpb-build && mkdir -p mcpb-build
-          cp mcpb/manifest.json mcpb/icon.png mcpb-build/
-          cp -r dist mcpb-build/dist
-          cp package.json package-lock.json mcpb-build/
-          (cd mcpb-build && npm ci --omit=dev --ignore-scripts --no-audit --no-fund)
-          npx --yes @anthropic-ai/mcpb validate mcpb-build/manifest.json
-          npx --yes @anthropic-ai/mcpb pack mcpb-build zoteus.mcpb
-          unzip -l zoteus.mcpb | grep -q ' dist/index.js$' || { echo "::error::.mcpb missing dist/index.js"; exit 1; }
-          unzip -l zoteus.mcpb | grep -q 'node_modules/@modelcontextprotocol/sdk/' || { echo "::error::.mcpb missing bundled deps"; exit 1; }
+          npx tsx scripts/mcpb-bundle.ts build darwin
+          npx tsx scripts/mcpb-bundle.ts build win32
+          npx tsx scripts/mcpb-bundle.ts build linux
+      # The gate: list each archive and fail the release unless it carries a .node binary for
+      # every CPU of the OS its manifest names, the entry point, pdfjs and the canvas loader,
+      # and nothing built for another OS.
+      - name: Verify each bundle carries its platform's native PDF dependency
+        run: |
+          npx tsx scripts/mcpb-bundle.ts check zoteus-macos.mcpb darwin
+          npx tsx scripts/mcpb-bundle.ts check zoteus-windows.mcpb win32
+          npx tsx scripts/mcpb-bundle.ts check zoteus-linux.mcpb linux
       - uses: softprops/action-gh-release@v2
         with:
-          files: zoteus.mcpb
+          files: |
+            zoteus-macos.mcpb
+            zoteus-windows.mcpb
+            zoteus-linux.mcpb
           generate_release_notes: true
