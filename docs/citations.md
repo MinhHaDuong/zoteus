@@ -21,10 +21,10 @@ docker run -d -p 1969:1969 zotero/translation-server
 - `list` returns the built-in common aliases. Any id from the [CSL styles repository](https://github.com/citation-style-language/styles) works too. Dependent styles are resolved to their independent parent automatically.
 
 ## `zotero_format_bibliography` — citeproc, any style, no library needed
-Formats a bibliography with **citeproc-js** over either `items` (arbitrary CSL-JSON, e.g. from `zotero_import`) or `item_keys` (library items, exported to CSL-JSON first). Pick `style` (name or id, default `apa`), `locale` (default `en-US`), and `format` (`html`/`text`/`rtf`). Styles and locales are fetched from the CSL CDN and cached.
+Formats a bibliography with **citeproc-js** over either `items` (arbitrary CSL-JSON, e.g. from `zotero_import`) or `item_keys` (library items, exported to CSL-JSON first over the same route as every other library read, so a library the desktop app serves needs no cloud key). Pick `style` (name or id, default `apa`), `locale` (default `en-US`), and `format` (`html`/`text`/`rtf`). Styles and locales are fetched from the CSL CDN and cached.
 
 ## `zotero_bibliography` — server-rendered (library items)
-Asks Zotero to render a bibliography for library `item_keys` in a CSL style (`format=bib`). Item-only and capped at 150 items. For arbitrary items or styles, use `zotero_format_bibliography`.
+Asks Zotero to render a bibliography for library `item_keys` in a CSL style (`format=bib`). The request follows the library's read route: the desktop app renders it for a library it serves (Zotero 10 honours `style`, `locale` and `linkwrap` locally, fetching a style it lacks from the repository), so no cloud key is needed there; any other library is rendered by the Web API. Item-only and capped at 150 items. For arbitrary items or styles, use `zotero_format_bibliography`.
 
 ### Which bibliography tool?
 - Items **in your library**, quick render → `zotero_bibliography`.

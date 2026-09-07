@@ -86,6 +86,28 @@ export class LocalApiClient {
     return { json: await res.json(), headers: res.headers };
   }
 
+  /**
+   * A read whose body is text rather than JSON: a rendered bibliography, an export. On
+   * failure the body is kept in the error, because that is where Zotero explains itself:
+   * an unknown style comes back as a 400 whose text names the style and the repository
+   * lookup that failed for it, and a bare status code would throw that away.
+   */
+  private async getRaw(path: string, query = ''): Promise<string> {
+    const res = await this.fetcher.fetch(
+      `${this.base}${path}${query}`,
+      { method: 'GET', headers: this.headers() },
+      { maxRetries: 0 },
+    );
+    if (!res.ok) {
+      const body = (await res.text().catch(() => '')).trim();
+      throw new LocalApiError(
+        res.status,
+        `Local API ${res.status} for ${path}${body ? `: ${body}` : ''}`,
+      );
+    }
+    return res.text();
+  }
+
   private toListResult<T>(json: T[], headers: Headers): ListResult<T> {
     // Mirror the Web API client: a MISSING header must fall back, not parse as 0
     // (`Number(null)` is 0, which is finite). A bogus totalResults of 0 would stop a
@@ -169,6 +191,64 @@ export class LocalApiClient {
       this.buildQuery(rest as any),
     );
     return this.toListResult(json, headers);
+  }
+
+  /**
+   * Items exported in a bibliographic format (bibtex/ris/csljson/...), as the raw text
+   * Zotero sends. The desktop app serves the same `format=` exports as the cloud, with two
+   * differences a caller never sees: its csljson is a bare array where the cloud's is
+   * wrapped in `{ items }` (the tools accept both), and its `?itemKey=` answers with the
+   * named items AND their children, so the attachment of a cited paper would come back as
+   * a `document` entry of its own. A keyed export therefore reads `/items/top`, which is
+   * exactly the items named, as on the cloud; a child key named on its own then yields
+   * nothing, which is also all a bibliography could make of it.
+   */
+  async exportItems(
+    params: {
+      format: string;
+      itemKey?: string[];
+      collectionKey?: string;
+      q?: string;
+      itemType?: string;
+      limit?: number;
+    },
+    lib?: LibraryRef,
+  ): Promise<string> {
+    const base = params.collectionKey ? `/collections/${params.collectionKey}` : '';
+    const segment = params.itemKey?.length ? `${base}/items/top` : `${base}/items`;
+    return this.getRaw(
+      `${localLibraryPrefix(lib)}${segment}`,
+      this.buildQuery({
+        format: params.format,
+        itemKey: params.itemKey?.join(','),
+        q: params.q,
+        itemType: params.itemType,
+        limit: params.limit ?? 50,
+      }),
+    );
+  }
+
+  /**
+   * A bibliography rendered by the desktop app (`format=bib`) for item keys. Zotero 10
+   * honours `style` (a CSL id or URL; a style it lacks is fetched from the repository, an
+   * unknown one answers 400), `locale` and `linkwrap` exactly as the cloud does, so a
+   * library the desktop serves renders with no cloud key at all (#64).
+   */
+  async getBibliography(
+    itemKeys: string[],
+    opts: { style?: string; locale?: string; linkwrap?: boolean } = {},
+    lib?: LibraryRef,
+  ): Promise<string> {
+    return this.getRaw(
+      `${localLibraryPrefix(lib)}/items`,
+      this.buildQuery({
+        itemKey: itemKeys.join(','),
+        format: 'bib',
+        style: opts.style,
+        locale: opts.locale,
+        linkwrap: opts.linkwrap ? 1 : undefined,
+      }),
+    );
   }
 
   /**

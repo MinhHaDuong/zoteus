@@ -53,6 +53,23 @@ All notable changes to Zoteus are documented here. The format is based on
   `zoteus-windows.mcpb` and `zoteus-linux.mcpb`, 32 to 57 MB each, where one file for every
   target would have been 103 MB. Verified by archive inspection and loader simulation on
   Linux; a run on a native macOS or Windows machine is still owed.
+- **Item-key bibliographies render from the desktop app in key-free mode (#64).**
+  `zotero_bibliography item_keys` and `zotero_format_bibliography item_keys` both read
+  straight from the cloud client instead of the router every other library read goes
+  through, so with `ZOTEUS_LOCAL=on` and no `ZOTERO_API_KEY` they asked api.zotero.org for
+  `users/0`, which it rejects as an invalid user id, although the same items were readable
+  locally. Zotero 10 serves `format=bib` itself, honouring `style` (fetching from the style
+  repository whatever it lacks), `locale` and `linkwrap` exactly as the cloud does, and
+  serves `format=csljson` as well, so both reads are now routed: the desktop renders or
+  exports for any library it serves, the personal library or a group it holds, and an
+  explicit cloud library still goes to the cloud with style and locale intact. The
+  supplied-CSL path of `zotero_format_bibliography` never touched a transport and is
+  unchanged, and so is style and locale retrieval for citeproc. Two desktop differences are
+  absorbed in the local client: its CSL-JSON is a bare array where the cloud's is wrapped in
+  `{ items }` (both shapes were already accepted), and its `?itemKey=` answers with the
+  named items and their children, so the PDF of a cited paper would have rendered as a
+  `document` entry of its own; a keyed export reads `/items/top`, which is exactly the items
+  named, as on the cloud.
 
 ## [1.15.0] - 2026-09-07
 

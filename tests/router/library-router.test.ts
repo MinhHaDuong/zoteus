@@ -21,6 +21,8 @@ function makeRouter(opts: {
     getFullText: vi.fn(async () => ({ content: 'CLOUD TEXT' })),
     fullTextSince: vi.fn(async () => ({ CLOUDATT: 9 })),
     itemVersions: vi.fn(async () => ({ versions: { CLOUD: 2114 }, totalResults: 1, lastModifiedVersion: 2114 })),
+    exportItems: vi.fn(async () => '{"items":[]}'),
+    getBibliography: vi.fn(async () => '<div>CLOUD BIB</div>'),
   };
   const local = {
     listItems: vi.fn(async () => ({ data: [{ key: 'LOCAL' }], totalResults: 1, lastModifiedVersion: 1 })),
@@ -29,6 +31,8 @@ function makeRouter(opts: {
     getFullText: vi.fn(async () => ({ content: 'LOCAL TEXT' })),
     fullTextSince: vi.fn(async () => ({ LOCALATT: 4 })),
     itemVersions: vi.fn(async () => ({ versions: { LOCAL: 13 }, totalResults: 1, lastModifiedVersion: 13 })),
+    exportItems: vi.fn(async () => '[]'),
+    getBibliography: vi.fn(async () => '<div>LOCAL BIB</div>'),
   };
   const cfg = loadConfig({ ZOTEUS_LOCAL: opts.local } as any);
   const capabilities: any = { cloud: cloudInfo, localApi: opts.localApi };
@@ -186,5 +190,31 @@ describe('LibraryRouter', () => {
     const held = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
     expect(held.router.servesLocally({ type: 'group', id: 999 })).toBe(true);
     expect(held.router.servesLocally({ type: 'group', id: 1000 })).toBe(false);
+  });
+
+  it('renders bibliographies and exports through the desktop app it serves from (#64)', async () => {
+    const held = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
+    const { router, web, local } = held;
+    const opts = { style: 'apa', locale: 'fr-FR', linkwrap: true };
+    expect(await router.getBibliography(['K1'], opts)).toBe('<div>LOCAL BIB</div>');
+    expect(local.getBibliography).toHaveBeenCalledWith(['K1'], opts, defaultUserLib);
+    const lib = { type: 'group' as const, id: 999 };
+    const query = { format: 'csljson', itemKey: ['K1'], limit: 100 };
+    expect(await router.exportItems({ ...query, library: lib })).toBe('[]');
+    expect(local.exportItems).toHaveBeenCalledWith(query, lib);
+    expect(web.getBibliography).not.toHaveBeenCalled();
+    expect(web.exportItems).not.toHaveBeenCalled();
+  });
+
+  it('keeps bibliographies and exports on the cloud for a group the desktop lacks', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true, localGroupIds: [] });
+    const lib = { type: 'group' as const, id: 999 };
+    const bib = await router.getBibliography(['K1'], { library: lib, style: 'apa' });
+    expect(bib).toBe('<div>CLOUD BIB</div>');
+    expect(web.getBibliography).toHaveBeenCalledWith(lib, ['K1'], { style: 'apa' });
+    expect(await router.exportItems({ format: 'bibtex', library: lib })).toBe('{"items":[]}');
+    expect(web.exportItems).toHaveBeenCalledWith(lib, { format: 'bibtex' });
+    expect(local.getBibliography).not.toHaveBeenCalled();
+    expect(local.exportItems).not.toHaveBeenCalled();
   });
 });

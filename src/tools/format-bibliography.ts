@@ -28,9 +28,17 @@ const formatBib: ToolDefinition = {
       const lib = args.library_id
         ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
         : ctx.router.defaultLibrary();
-      const text = await ctx.web.exportItems(lib, { format: 'csljson', itemKey: args.item_keys, limit: 100 });
+      // Routed like every other library read, so a desktop-served library exports with no
+      // cloud key (#64); the cloud path is unchanged for everything else.
+      const text = await ctx.router.exportItems({
+        library: lib,
+        format: 'csljson',
+        itemKey: args.item_keys,
+        limit: 100,
+      });
       const parsed = JSON.parse(text);
-      // Zotero's csljson export wraps items in { items: [...] }; older shapes are a bare array.
+      // The cloud's csljson export wraps items in { items: [...] }; the desktop app's is a
+      // bare array.
       cslItems = Array.isArray(parsed) ? parsed : (parsed.items ?? []);
     }
     const styleId = ctx.styles.resolveId(args.style ?? 'apa');

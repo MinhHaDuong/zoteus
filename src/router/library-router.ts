@@ -161,4 +161,41 @@ export class LibraryRouter {
     if (this.useLocal(lib)) return this.local!.listCollections(rest, lib);
     return this.web.listCollections(lib, rest);
   }
+
+  /**
+   * Items exported in a bibliographic format, routed like every other read. Before this
+   * existed, `zotero_format_bibliography item_keys` exported its CSL-JSON from
+   * api.zotero.org unconditionally, and in key-free local mode that is users/0, which the
+   * cloud rejects (#64).
+   */
+  async exportItems(
+    params: ReadOpts & {
+      format: string;
+      itemKey?: string[];
+      collectionKey?: string;
+      q?: string;
+      itemType?: string;
+      limit?: number;
+    },
+  ): Promise<string> {
+    const { library, backend, ...rest } = params;
+    const lib = library ?? this.defaultLibrary();
+    if (this.useLocal(lib, backend)) return this.local!.exportItems(rest, lib);
+    return this.web.exportItems(lib, rest);
+  }
+
+  /**
+   * A Zotero-rendered bibliography (`format=bib`) for item keys, routed like every other
+   * read: the desktop app renders it, honouring the same style, locale and linkwrap
+   * parameters, for any library it serves (#64).
+   */
+  async getBibliography(
+    itemKeys: string[],
+    opts: ReadOpts & { style?: string; locale?: string; linkwrap?: boolean } = {},
+  ): Promise<string> {
+    const { library, backend, ...rest } = opts;
+    const lib = library ?? this.defaultLibrary();
+    if (this.useLocal(lib, backend)) return this.local!.getBibliography(itemKeys, rest, lib);
+    return this.web.getBibliography(lib, itemKeys, rest);
+  }
 }

@@ -263,3 +263,73 @@ describe('LocalApiClient.listLocalGroupIds', () => {
     expect(await makeLocal(fetchImpl).listLocalGroupIds()).toHaveLength(100);
   });
 });
+
+describe('LocalApiClient bibliography and export reads', () => {
+  it('renders a desktop bibliography with style, locale and linkwrap (#64)', async () => {
+    // Probed against Zotero 10.0.1: format=bib honours all three, exactly as the cloud does.
+    const fetchImpl = vi.fn(async (url: string) => {
+      const u = new URL(url);
+      expect(u.origin + u.pathname).toBe('http://127.0.0.1:23119/api/users/0/items');
+      expect(u.searchParams.get('itemKey')).toBe('AAAA,BBBB');
+      expect(u.searchParams.get('format')).toBe('bib');
+      expect(u.searchParams.get('style')).toBe('apa');
+      expect(u.searchParams.get('locale')).toBe('fr-FR');
+      expect(u.searchParams.get('linkwrap')).toBe('1');
+      return new Response('<div class="csl-bib-body"/>', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html' },
+      });
+    });
+    const text = await makeLocal(fetchImpl).getBibliography(['AAAA', 'BBBB'], {
+      style: 'apa',
+      locale: 'fr-FR',
+      linkwrap: true,
+    });
+    expect(text).toBe('<div class="csl-bib-body"/>');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('exports named items from /items/top, since the desktop adds their children on /items', async () => {
+    // Probed on Zotero 10.0.1: /items?itemKey=PARENT answers with the parent AND its
+    // attachment, and csljson then carries a `document` entry for the PDF; /items/top with
+    // the same key answers with the parent alone, which is what the cloud means by itemKey.
+    const fetchImpl = vi.fn(async (url: string) => {
+      const u = new URL(url);
+      expect(u.pathname).toBe('/api/groups/999/items/top');
+      expect(u.searchParams.get('format')).toBe('csljson');
+      expect(u.searchParams.get('itemKey')).toBe('AAAA');
+      expect(u.searchParams.get('limit')).toBe('100');
+      return new Response('[{"id":"a"}]', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain' },
+      });
+    });
+    const text = await makeLocal(fetchImpl).exportItems(
+      { format: 'csljson', itemKey: ['AAAA'], limit: 100 },
+      { type: 'group', id: 999 },
+    );
+    expect(text).toBe('[{"id":"a"}]');
+  });
+
+  it('exports a collection or a search from /items, children included, as the cloud does', async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(new URL(url).pathname);
+      return new Response('@misc{a}', { status: 200 });
+    });
+    const local = makeLocal(fetchImpl);
+    await local.exportItems({ format: 'bibtex', collectionKey: 'ABC' });
+    await local.exportItems({ format: 'bibtex', q: 'robots' });
+    expect(seen).toEqual(['/api/users/0/collections/ABC/items', '/api/users/0/items']);
+  });
+
+  it('carries the body of a failed render, which is where Zotero names the bad style', async () => {
+    const fetchImpl = vi.fn(async () => new Response('Invalid style: nope', { status: 400 }));
+    const render = makeLocal(fetchImpl).getBibliography(['AAAA'], { style: 'nope' });
+    await expect(render).rejects.toMatchObject({
+      name: 'LocalApiError',
+      status: 400,
+      message: expect.stringContaining('Invalid style: nope'),
+    });
+  });
+});
