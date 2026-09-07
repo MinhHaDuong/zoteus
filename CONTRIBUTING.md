@@ -45,6 +45,6 @@ Zoteus targets **Node >= 20.19** and is written in TypeScript (NodeNext ESM).
 ## Reporting bugs / security
 
 - **Bugs & features:** open a [GitHub issue](https://github.com/oscardvs/zoteus/issues) with steps to reproduce.
-- **Security:** please report privately rather than in a public issue — email `support@zoteus.com`.
+- **Security:** please report privately rather than in a public issue: see [SECURITY.md](./SECURITY.md) for GitHub private vulnerability reporting, or email `support@zoteus.com`.
 
 By contributing, you agree that your contributions are licensed under the project's [MIT License](./LICENSE).
