@@ -4,7 +4,7 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.16.0] - 2026-09-07
 
 ### Fixed
 - **A paper with many annotations no longer crowds every other result off the page (#65).**
@@ -70,7 +70,6 @@ All notable changes to Zoteus are documented here. The format is based on
   named items and their children, so the PDF of a cited paper would have rendered as a
   `document` entry of its own; a keyed export reads `/items/top`, which is exactly the items
   named, as on the cloud.
-
 - **`ZOTEUS_LOG_FILE` now receives index build and update lines, not only HTTP requests (#59).**
   The server created one logger with the file attached and handed it to the HTTP transport,
   but the tool context built a second one from the level and format alone, and that second
