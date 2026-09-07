@@ -2144,42 +2144,98 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.refuseIfFaulted();
     const limit = opts.limit ?? 10;
     const mode = opts.mode ?? 'auto';
-    const pool = limit * 3;
 
-    const keyword: RankedId[] = mode === 'semantic' ? [] : this.keywordSearch(q, pool);
-    let vector: RankedId[] = [];
+    // Embedded once, before the pool below is widened however many times: it is the one
+    // step of a query that costs a model call or a network round trip, and widening only
+    // changes how many stored vectors the same query vector is ranked against.
+    let qv: number[] | undefined;
     if (mode !== 'keyword' && this.opts.embedder && this.counts().vectors) {
       try {
-        const [qv] = await this.opts.embedder.embed([q], 'query');
+        const [embedded] = await this.opts.embedder.embed([q], 'query');
         const dim = this.vectorDimension();
         // Index files written before the embedder identity was persisted carry no
         // provenance, so a model switch under one shows up only here, as a query of a
         // different width. Cosine over mismatched widths still returns numbers.
-        if (qv && dim !== undefined && qv.length !== dim) {
+        if (embedded && dim !== undefined && embedded.length !== dim) {
           this.dropStaleVectors(
-            `The stored vectors have ${dim} dimensions, but ${this.embedderId ?? 'the current embedder'} produces ${qv.length}.`,
+            `The stored vectors have ${dim} dimensions, but ${this.embedderId ?? 'the current embedder'} produces ${embedded.length}.`,
           );
-        } else if (qv) {
-          vector = this.vectorSearch(qv, pool);
+        } else {
+          qv = embedded;
         }
       } catch (e) {
         this.noteEmbedFailure(e);
       }
     }
 
-    const fused = rrf([keyword, vector]);
-    const seen = new Set<string>();
-    const hits: SearchHit[] = [];
+    // Both rankers rank PASSAGES; the page is made of ITEMS, de-duplicated by key in
+    // distinctHits. The pool between the two starts at three passages per item asked for,
+    // which is enough whenever the top of the ranking is spread across items, and doubles
+    // for as long as it is not. An item whose forty annotations all rank first (#33) fills
+    // a pool of fifteen by itself, and a fixed pool then cut the other relevant items off
+    // before the de-duplication ever saw them (#65); a larger fixed pool would only move
+    // the point at which that happens. The bound: a ranker that came back with fewer
+    // candidates than it was asked for has been read to its end and is not asked again,
+    // and the pool never exceeds the passages the index holds, so a page short of items
+    // costs at most log2(passages / (3 * limit)) extra rounds before it is returned as it
+    // stands. A page the first pool fills costs exactly what it always did.
+    const total = this.counts().documents;
+    let pool = limit * 3;
+    let keyword: RankedId[] = [];
+    let vector: RankedId[] = [];
+    let keywordOpen = mode !== 'semantic';
+    let vectorOpen = qv !== undefined;
     // Read once rather than per hit: on the SQLite backend it is a set lookup, on the JSON
     // one a closure over the live postings, and neither wants to be rebuilt ten times.
     const highDf = this.highDf();
+    // Passages hydrated so far. A wider round re-walks the fused prefix the narrower one
+    // already read, and on the SQLite backend each of those reads is a statement.
+    const passages = new Map<string, ChunkRecord | undefined>();
+    for (;;) {
+      if (keywordOpen) {
+        keyword = this.keywordSearch(q, pool);
+        keywordOpen = keyword.length >= pool;
+      }
+      if (qv && vectorOpen) {
+        vector = this.vectorSearch(qv, pool);
+        vectorOpen = vector.length >= pool;
+      }
+      const hits = this.distinctHits(rrf([keyword, vector]), limit, q, highDf, passages);
+      if (hits.length >= limit || !(keywordOpen || vectorOpen) || pool >= total) return hits;
+      pool = Math.min(pool * 2, total);
+    }
+  }
+
+  /**
+   * The first `limit` distinct items among the fused candidates, best first, each cited
+   * with the passage that ranked it. `passages` memoizes hydration across the rounds of one
+   * query; it must not outlive the query, since a passage can be replaced by an update.
+   */
+  private distinctHits(
+    fused: Array<{ id: string; score: number }>,
+    limit: number,
+    q: string,
+    highDf: TermPredicate | undefined,
+    passages: Map<string, ChunkRecord | undefined>,
+  ): SearchHit[] {
+    const seen = new Set<string>();
+    const hits: SearchHit[] = [];
     for (const { id, score } of fused) {
-      const rec = this.passage(id);
+      let rec = passages.get(id);
+      if (rec === undefined && !passages.has(id)) {
+        rec = this.passage(id);
+        passages.set(id, rec);
+      }
       if (!rec || seen.has(rec.itemKey)) continue;
       seen.add(rec.itemKey);
-      const hit: SearchHit = { itemKey: rec.itemKey, title: rec.title, snippet: makeSnippet(rec.text, q, 240, highDf), score };
+      const hit: SearchHit = {
+        itemKey: rec.itemKey,
+        title: rec.title,
+        snippet: makeSnippet(rec.text, q, 240, highDf),
+        score,
+      };
       // Worth surfacing: a body-text snippet is a passage the caller can go and cite with
-      // zotero_get_fulltext, whereas a metadata one is just the abstract — and a note or
+      // zotero_get_fulltext, whereas a metadata one is just the abstract, and a note or
       // annotation is the reader's own, which is a different thing again to be told.
       if (rec.source) hit.source = rec.source;
       hits.push(hit);

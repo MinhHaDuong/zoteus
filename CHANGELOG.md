@@ -4,6 +4,20 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A paper with many annotations no longer crowds every other result off the page (#65).**
+  Search ranks passages and answers with items, and between the two sat a fixed pool of
+  three passages per result asked for: an item whose forty annotations all ranked first
+  (#33) filled a pool of fifteen by itself, so `limit:5` returned that one paper while
+  `limit:20` returned the five relevant ones, in semantic, keyword and hybrid mode alike, for
+  child notes as much as for annotations. The pool now doubles until the page holds the
+  requested number of distinct items or the candidates are used up: a ranker that returns
+  fewer than it was asked for is not asked again, the pool never exceeds the passages the
+  index holds, and the query is embedded once for every round. A page the first pool fills
+  costs exactly what it did before.
+
 ## [1.15.0] - 2026-09-07
 
 ### Added
