@@ -167,7 +167,20 @@ const indexTool: ToolDefinition = {
           'Poll zotero_index action:"status" every few seconds until state is "done"; use action:"stop" to cancel.',
       );
     }
+    // Read before the build starts, because its prologue clears the store synchronously: a
+    // build over an index that already holds rows is a rebuild, and it replaces them at its
+    // first commit. Said here, when it can still be stopped, rather than learned the way #59
+    // learned it: from a build that aborted and left a 1,300-item partial index where a
+    // complete 97,000-passage one had been.
+    const before = ctx.search.buildStatus();
     const s = startIndexBuild(ctx, lib, maxItems, opts);
+    const replaces =
+      !s.resumedFrom && before.documents > 0
+        ? ` This REPLACES the existing index (${before.documents} passages over ${before.items} items) from its` +
+          ' first commit: the library is searchable on what the new build has indexed so far, and a build that' +
+          ' stops or fails leaves that partial index plus a checkpoint the next action:"build" resumes from.' +
+          ' For an index that is already complete, action:"update" is the incremental path and leaves it in place.'
+        : '';
     const ftNote = fulltext
       ? ' Attachment full text is included, so expect a noticeably longer build and a larger index; every item\'s' +
         ' metadata is indexed first, so the library becomes searchable well before the full-text pass finishes.'
@@ -191,7 +204,7 @@ const indexTool: ToolDefinition = {
       : `Index build started in the background (up to ${maxItems} items).`;
     return ok(
       { ...s, ...(repaired ? { repaired: repaired.removed } : {}) },
-      `${repairNote}${started}${ftNote} ` +
+      `${repairNote}${started}${replaces}${ftNote} ` +
         'Poll zotero_index action:"status" every few seconds until state is "done"; use action:"stop" to cancel.',
     );
   },

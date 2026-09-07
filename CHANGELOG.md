@@ -91,6 +91,14 @@ All notable changes to Zoteus are documented here. The format is based on
   `action:"update"`. On SQLite each item is written under a savepoint as well, so a failure
   between an item's first and last passage rolls the item back whole instead of leaving a
   half-written item that a resume would step over as finished.
+- **`action:"build"` says when it replaces an existing index (#59).** A build over an index
+  that already holds rows is a rebuild from scratch and replaces those rows at its first
+  commit. That is by design (the partial index is searchable at once and resumable from its
+  checkpoint), but it surfaced in #59 as a 1,300-item partial index where a complete
+  97,000-passage one had been. The tool now states it when the build starts, with the size
+  of what is being replaced, and names `action:"update"` as the path that leaves a complete
+  index in place.
+
 ## [1.15.0] - 2026-09-07
 
 ### Added
