@@ -390,6 +390,11 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   private embedderError: string | undefined = undefined;
   /**
+   * Passages the running (or last) build was handed a second time and stored once. Reset by
+   * each build and reported by it at the end; see `storePassage` for where they come from.
+   */
+  private duplicatePassages = 0;
+  /**
    * Last failure to write the index out. Same reasoning as `embedderError`: a build that
    * could not persist its artifact used to report state:"done" with only a stderr warning
    * to show for it, so the loss was discovered on the next startup (#10).
@@ -417,8 +422,24 @@ export abstract class SearchIndexBase implements SearchIndex {
   protected abstract clearStore(): void;
   /** Register an indexed item. Called for every item, including ones with no text at all. */
   protected abstract putItem(itemKey: string, title: string): void;
-  /** Store one passage (also updating item and full-text bookkeeping). */
-  protected abstract putPassage(rec: ChunkRecord): void;
+  /**
+   * Store one passage (also updating item and full-text bookkeeping). Answers false, and
+   * stores nothing, when the store already holds a passage with this id: the caller decides
+   * what a duplicate means, and a store must never abort a build over one (#59).
+   */
+  protected abstract putPassage(rec: ChunkRecord): boolean;
+  /**
+   * Run one item's writes as a unit the store either keeps whole or not at all.
+   *
+   * The default is no unit: the JSON backend has nothing that can refuse an insert partway
+   * through an item. The SQLite backend wraps this in a savepoint, so an insert that fails
+   * after an item's first passage rolls the item back entirely instead of leaving it
+   * committed with some of its chunks. That matters because a resumed build steps over
+   * items by key, and would take a half-written item for a finished one (#59).
+   */
+  protected atomically<T>(fn: () => T): T {
+    return fn();
+  }
   /**
    * Remove one item: its passages, their vectors and their keyword-index rows. Must be
    * exact, not best-effort. A passage left behind stays rankable, so a deleted item goes
@@ -898,7 +919,7 @@ export abstract class SearchIndexBase implements SearchIndex {
       const text = extra ? `${base}. ${extra}` : base;
       for (const ch of chunkText(text)) {
         const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title: d.title ?? '(untitled)', text: ch.text };
-        this.putPassage(rec);
+        if (!this.storePassage(rec)) continue;
         // Same rule as the incremental path: a vector the store can produce for itself is
         // never bought from the embedder a second time (#34).
         if (this.hasEmbedder && this.adoptVector(rec)) continue;
@@ -1013,6 +1034,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.updateNotice = opts.note;
     const token = { cancelled: false };
     this.cancelToken = token;
+    this.duplicatePassages = 0;
     /**
      * Items already in the store when a resumed build began, so its crawl can step over
      * them: an item committed by the run being continued is already chunked, already
@@ -1021,6 +1043,17 @@ export abstract class SearchIndexBase implements SearchIndex {
      * not by passages, so finding the resume point never walks the index.
      */
     let known: Set<string> | undefined;
+    /**
+     * Items THIS crawl has indexed, so a page that serves one of them again is stepped over.
+     * Both Zotero APIs page newest-modified first, and the crawl asks for no other order, so
+     * an item anyone edits while the library is being paged (another client's annotation, a
+     * tag edit, a sync) moves to the front and shifts every item behind it down by one: the
+     * item at the last page boundary is then served again at the top of the next page. Left
+     * to the insert, that second copy aborted the whole build with `UNIQUE constraint
+     * failed: passages.id` some 1,300 items into a 10,500-item library (#59).
+     */
+    const indexed = new Set<string>();
+    let duplicateItems = 0;
     /** Passages this run embedded on behalf of the interrupted one (see backfillVectors). */
     let backfilled = 0;
     if (resume) {
@@ -1279,17 +1312,25 @@ export abstract class SearchIndexBase implements SearchIndex {
           // holds costs nothing against the cap and must not consume one of its places.
           if (maxItems !== undefined && this.itemsFetched >= maxItems) break;
           consumed++;
+          const key = itemKeyOf(item);
           // Already committed by the run this one is resuming: it is indexed, embedded and
           // searchable, and its place in the full-text worklist came from the store.
-          if (known?.has(itemKeyOf(item))) continue;
-          const entry = this.addMetadata(item, pending);
+          if (known?.has(key)) continue;
+          // Served a second time by a page boundary that moved under the crawl (see
+          // `indexed`): the first copy is what the index holds, and the edit that moved it
+          // is after the crawl's version stamp, so the next update sees it.
+          if (key && indexed.has(key)) {
+            duplicateItems++;
+            continue;
+          }
           // In the metadata pass, not a pass of its own: the census behind this is already
           // resident by the first item, so an item's own words cost no request here, and
           // writing them with the item means one commit covers the item entirely — which
-          // is what lets a resume step over an item by key and know it is complete.
-          if (entry && opts.ownWords) {
-            this.addOwnWords(entry.key, entry.title, await opts.ownWords.textsFor(entry.key), pending);
-          }
+          // is what lets a resume step over an item by key and know it is complete. Read
+          // before the item's writes begin, so those writes can be one synchronous unit.
+          const words = key && opts.ownWords ? await opts.ownWords.textsFor(key) : undefined;
+          const entry = this.indexItem(item, words, pending);
+          if (key) indexed.add(key);
           // Recorded now, crawled in the second pass. Truncating here rather than there is
           // what keeps the item cap honest without re-checking it against a moving count.
           if (entry && worklist) worklist.push(entry);
@@ -1351,7 +1392,7 @@ export abstract class SearchIndexBase implements SearchIndex {
           for (let j = 0; j < group.length; j++) {
             if (token.cancelled) break;
             const text = texts?.[j];
-            if (text) this.addFulltext(group[j]!.key, group[j]!.title, text, pending);
+            if (text) this.indexFulltext(group[j]!.key, group[j]!.title, text, pending);
             this.fulltextItemsScanned++;
             itemsSincePersist++;
             itemsSinceLog++;
@@ -1443,6 +1484,16 @@ export abstract class SearchIndexBase implements SearchIndex {
       await persistNow();
       this.buildState = 'done';
       if (resume) noteResumed();
+      // Said once, with the numbers, because the same condition used to end the build with
+      // a constraint error and no explanation: a library edited while it is being paged
+      // serves some rows twice, and the edited items themselves belong to the next update.
+      if (duplicateItems || this.duplicatePassages) {
+        this.opts.logger?.warn(
+          `index build: the library changed while it was being paged, so ${duplicateItems} item(s) and ` +
+            `${this.duplicatePassages} passage(s) were served twice and indexed once. Anything edited during ` +
+            'the crawl is picked up by the next zotero_index action:"update".',
+        );
+      }
       const final = this.buildStatus();
       this.opts.logger?.info(`index build ${token.cancelled ? 'stopped' : 'complete'}: ${progressLine(final)}`);
       opts.onProgress?.(final);
@@ -2157,6 +2208,57 @@ export abstract class SearchIndexBase implements SearchIndex {
   }
 
   /**
+   * A build's write of one item, metadata and own words, as a unit (see `atomically`).
+   *
+   * The passages it queued for embedding are withdrawn with it when it fails, so a batch
+   * never embeds rows the rollback removed; the failure itself still ends the build, as it
+   * did, but with whole items committed and nothing for a resume to mistake for finished.
+   */
+  private indexItem(
+    item: any,
+    ownWords: OwnWordsEntry[] | undefined,
+    pending: ChunkRecord[],
+  ): { key: string; title: string } | undefined {
+    const queued = pending.length;
+    try {
+      return this.atomically(() => {
+        const entry = this.addMetadata(item, pending);
+        if (entry && ownWords?.length) this.addOwnWords(entry.key, entry.title, ownWords, pending);
+        return entry;
+      });
+    } catch (e) {
+      pending.length = queued;
+      throw e;
+    }
+  }
+
+  /** The full-text pass's twin of `indexItem`: one item's body passages, whole or not at all. */
+  private indexFulltext(itemKey: string, title: string, text: string, pending: ChunkRecord[]): void {
+    const queued = pending.length;
+    try {
+      this.atomically(() => this.addFulltext(itemKey, title, text, pending));
+    } catch (e) {
+      pending.length = queued;
+      throw e;
+    }
+  }
+
+  /**
+   * Store one passage, or step over it when the store already holds its id.
+   *
+   * A duplicate reaches this from a crawl that served the same item or child twice (see
+   * `buildIncremental`), and until #59 the SQLite insert answered it by aborting the build.
+   * The first copy stands; the second is counted, reported once by the job that met it, and
+   * never queued for embedding, since the row it names is embedded already or in the queue.
+   */
+  private storePassage(rec: ChunkRecord): boolean {
+    if (this.putPassage(rec)) return true;
+    this.duplicatePassages++;
+    this.opts.logger?.debug(`index: passage ${rec.id} is already stored, so its second copy was skipped.`);
+    return false;
+  }
+
+  /**
    * Index one item's own text (title, abstract, creators, tags) and nothing else.
    *
    * Returns the key and title it used, which is what a build's full-text pass needs to
@@ -2171,7 +2273,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     this.putItem(key, title);
     for (const ch of chunkText(itemText(d))) {
       const rec: ChunkRecord = { id: `${key}#${ch.index}`, itemKey: key, title, text: ch.text };
-      this.putPassage(rec);
+      if (!this.storePassage(rec)) continue;
       if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
     }
     return { key, title };
@@ -2191,7 +2293,7 @@ export abstract class SearchIndexBase implements SearchIndex {
         text: ch.text,
         source: 'fulltext',
       };
-      this.putPassage(rec);
+      if (!this.storePassage(rec)) continue;
       if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
     }
   }
@@ -2216,7 +2318,7 @@ export abstract class SearchIndexBase implements SearchIndex {
           text: ch.text,
           source: entry.kind,
         };
-        this.putPassage(rec);
+        if (!this.storePassage(rec)) continue;
         // Through the same salvage every other passage goes through (#34): a note that has
         // not been edited embeds to the vector a sidelined index already holds for it.
         if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
@@ -2447,7 +2549,10 @@ export class MemorySearchIndex extends SearchIndexBase {
     this.items.set(itemKey, title);
   }
 
-  protected putPassage(rec: ChunkRecord): void {
+  protected putPassage(rec: ChunkRecord): boolean {
+    // The Map would have overwritten the record silently, and the BM25 index and the
+    // counters below would have taken the second copy for a new document.
+    if (this.chunks.has(rec.id)) return false;
     this.chunks.set(rec.id, rec);
     // A passage restored from disk arrives without its item having been announced, so this
     // is also where a reloaded index learns its items and their titles.
@@ -2463,6 +2568,7 @@ export class MemorySearchIndex extends SearchIndexBase {
       this.ownWordsItems.add(rec.itemKey);
       this.ownWordsPassages++;
     }
+    return true;
   }
 
   protected deleteItem(itemKey: string): void {

@@ -979,8 +979,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
     this.rescoreStmts.clear();
     this.stmts = {
       insertItem: db.prepare('INSERT OR IGNORE INTO items(item_key, title) VALUES (?, ?)'),
+      // OR IGNORE: a duplicate id answers with zero changes for putPassage to report, instead
+      // of `UNIQUE constraint failed: passages.id`, which aborted a whole build (#59).
       insertPassage: db.prepare(
-        'INSERT INTO passages(id, item_key, title, text, source) VALUES (?, ?, ?, ?, ?)',
+        'INSERT OR IGNORE INTO passages(id, item_key, title, text, source) VALUES (?, ?, ?, ?, ?)',
       ),
       insertFts: db.prepare('INSERT INTO passages_fts(rowid, text) VALUES (?, ?)'),
       variantsFor: db.prepare('SELECT term, df FROM accent_variants WHERE folded = ?'),
@@ -1241,9 +1243,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
     if (Number(res.changes) > 0) this.c.items++;
   }
 
-  protected putPassage(rec: ChunkRecord): void {
+  protected putPassage(rec: ChunkRecord): boolean {
     this.begin();
     const res = this.stmts.insertPassage.run(rec.id, rec.itemKey, rec.title, rec.text, rec.source ?? null);
+    // Ignored, so the row that holds this id is the one already there, FTS row and counters
+    // included; `lastInsertRowid` names some earlier insert and must not be used.
+    if (Number(res.changes) === 0) return false;
     // Normalized once, here, so what FTS tokenizes is exactly what the JS query side
     // produces (NFC, unicode61-aware case fold) — unicode61 itself normalizes nothing.
     // The delete sites below re-derive the same string from passages.text, which the
@@ -1264,6 +1269,37 @@ export class SqliteSearchIndex extends SearchIndexBase {
         this.ownWordsKeys.add(rec.itemKey);
         this.c.ownWordsItems++;
       }
+    }
+    return true;
+  }
+
+  /**
+   * One item's writes under a savepoint inside the build's open transaction.
+   *
+   * A failure between an item's first and last passage rolls back to the savepoint, so the
+   * commit that follows holds whole items only: a resume steps over items by key, and an
+   * item row with half its chunks would be stepped over as if it were finished (#59). The
+   * counters are derived from the rows, so after a rollback they are re-read rather than
+   * trusted. `begin()` first: a savepoint outside a transaction would open one of its own,
+   * and the next `BEGIN` from putItem would then fail inside it.
+   */
+  protected override atomically<T>(fn: () => T): T {
+    this.begin();
+    this.handle.exec('SAVEPOINT item');
+    try {
+      const out = fn();
+      this.handle.exec('RELEASE item');
+      return out;
+    } catch (e) {
+      try {
+        this.handle.exec('ROLLBACK TO item');
+        this.handle.exec('RELEASE item');
+        this.refreshCounts();
+      } catch {
+        // The failure being handled is the one worth reporting; a connection that cannot
+        // even roll back will say so again on the next statement.
+      }
+      throw e;
     }
   }
 

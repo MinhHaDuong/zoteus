@@ -109,7 +109,7 @@ export class CorruptSearchIndex extends SearchIndexBase {
   protected putItem(): void {
     throw this.failure;
   }
-  protected putPassage(): void {
+  protected putPassage(): boolean {
     throw this.failure;
   }
   protected deleteItem(): void {

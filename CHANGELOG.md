@@ -78,6 +78,19 @@ All notable changes to Zoteus are documented here. The format is based on
   the file held request lines and nothing else, while build progress and the error that
   ended a build went to a stderr nobody was reading. The context now logs through the
   server's logger, and a context built without one still attaches the file itself.
+- **A build no longer aborts with `UNIQUE constraint failed: passages.id` when the library
+  is edited while it is being paged (#59).** Both Zotero APIs page newest-modified first, so
+  an item anyone edits mid-crawl (another client's annotation, a tag change, a sync) moves
+  to the front and shifts the page boundary: the item at the boundary is served again at the
+  top of the next page, and its second copy reached a plain INSERT that the unique passage
+  id refused, ending the whole build about 1,300 items into a 10,500-item library. The crawl
+  now steps over items it has already indexed in this run, the children census behind the
+  reader's own words dedupes by key the same way, and the insert itself is `OR IGNORE`, so a
+  duplicate id can never abort a build: it is counted, skipped, and reported in one log line
+  at the end, with the reminder that anything edited during the crawl belongs to the next
+  `action:"update"`. On SQLite each item is written under a savepoint as well, so a failure
+  between an item's first and last passage rolls the item back whole instead of leaving a
+  half-written item that a resume would step over as finished.
 ## [1.15.0] - 2026-09-07
 
 ### Added

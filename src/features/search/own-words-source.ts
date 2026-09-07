@@ -156,6 +156,13 @@ export async function createOwnWordsSource(
   const byParent = new Map<string, OwnWordsEntry[]>();
   /** The attachment keys that turned up as annotation parents, awaiting their own parents. */
   const attachments = new Set<string>();
+  /**
+   * Children already listed. The crawl pages newest-modified first, like every Zotero
+   * listing, so a note or annotation anyone writes while it runs moves to the front and
+   * shifts the page boundary: the child at the boundary is then listed twice, and two
+   * entries for one child meant two passages with one id, which aborted the build (#59).
+   */
+  const seen = new Set<string>();
   let notes = 0;
   let annotations = 0;
   /** What this census is missing, if anything; becomes `incomplete` on the source. */
@@ -182,6 +189,8 @@ export async function createOwnWordsSource(
         // A note with no parent is a top-level item in its own right: the metadata crawl
         // already indexes it, `note` included, and claiming it here would index it twice.
         if (!key || !parent) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
         const text = textOf(d);
         if (!text) continue;
         const kind: 'note' | 'annotation' = d.itemType === 'annotation' ? 'annotation' : 'note';
