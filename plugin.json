@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "zoteus",
+  "description": "Zotero library for your agent: search, PDF passages with page locators, CSL citations, add by DOI, group libraries, and safe writes.",
+  "version": "1.15.0",
+  "author": { "name": "Oscar Devos", "url": "https://github.com/oscardvs" },
+  "homepage": "https://zoteus.com",
+  "repository": "https://github.com/oscardvs/zoteus",
+  "license": "MIT",
+  "keywords": ["zotero", "research", "citations", "mcp", "reference-manager"]
+}
