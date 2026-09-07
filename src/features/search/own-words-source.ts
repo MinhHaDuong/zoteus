@@ -63,8 +63,21 @@ export interface OwnWordsSource {
   annotations: number;
   /** Items those add up to. */
   items: number;
-  /** Set when own words cannot be indexed at all; the build then leaves them out. */
+  /**
+   * Set when own words cannot be indexed at all; the build then leaves them out. The cause
+   * alone, without a remedy: the remedy depends on the job that asked (a build is repaired
+   * by another build, an update retries on the next one), so the index that receives it
+   * names the right one (noteOwnWordsUnavailable).
+   */
   unavailable?: string;
+  /**
+   * Set when the census holds only part of the library's own words: the crawl stopped
+   * early, or annotations sit on attachments that could not be resolved to their items.
+   * Everything it does hold is right, but "no own words for this item" is not an answer it
+   * can be trusted to give, so an update treats it as a failed read and replaces nothing
+   * (#63). The cause alone, like `unavailable`.
+   */
+  incomplete?: string;
 }
 
 /**
@@ -145,6 +158,8 @@ export async function createOwnWordsSource(
   const attachments = new Set<string>();
   let notes = 0;
   let annotations = 0;
+  /** What this census is missing, if anything; becomes `incomplete` on the source. */
+  const gaps: string[] = [];
 
   try {
     let start = 0;
@@ -183,11 +198,12 @@ export async function createOwnWordsSource(
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     if (byParent.size === 0) {
-      return emptySource(
-        `The library's notes and annotations could not be listed (${why}), so the index holds each item's ` +
-          'metadata but not the reader\'s own words. Re-run zotero_index action:"build" to try again.',
-      );
+      return emptySource(`The library's notes and annotations could not be listed (${why})`);
     }
+    gaps.push(
+      `the census of notes and annotations stopped early after ${byParent.size} parent(s) ` +
+        `(${why})`,
+    );
     ctx.logger.warn(`Own-words census stopped early after ${byParent.size} parent(s): ${why}`);
   }
 
@@ -195,6 +211,8 @@ export async function createOwnWordsSource(
 
   /** attachment key -> the item it belongs to (itself, when it is top-level). */
   const itemOfAttachment = new Map<string, string>();
+  let unresolved = 0;
+  let unresolvedWhy = '';
   if (attachments.size) {
     const keys = [...attachments];
     for (let i = 0; i < keys.length; i += KEY_BATCH) {
@@ -223,11 +241,19 @@ export async function createOwnWordsSource(
       } catch (e) {
         // The annotations on this batch stay unattributed rather than mis-attributed, and
         // the rest of the census is still worth having.
+        unresolved += batch.length;
+        unresolvedWhy = e instanceof Error ? e.message : String(e);
         ctx.logger.warn(
           `Could not resolve ${batch.length} annotated attachment(s) to their items: ` +
-            `${e instanceof Error ? e.message : String(e)}. Those annotations are not indexed.`,
+            `${unresolvedWhy}. Those annotations are not indexed.`,
         );
       }
+    }
+    if (unresolved) {
+      gaps.push(
+        `${unresolved} annotated attachment(s) could not be resolved to their items ` +
+          `(${unresolvedWhy})`,
+      );
     }
   }
 
@@ -282,5 +308,6 @@ export async function createOwnWordsSource(
     notes,
     annotations,
     items: byItem.size,
+    ...(gaps.length ? { incomplete: gaps.join('; ') } : {}),
   };
 }

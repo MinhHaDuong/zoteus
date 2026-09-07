@@ -598,9 +598,19 @@ export abstract class SearchIndexBase implements SearchIndex {
    * Zotero yet, unreachable full-text endpoints). Mirrors the embedder's reporting: a
    * metadata-only index that was ASKED for full text must say so, not look complete.
    */
-  /** Why this build indexed no notes or annotations, from the source that could not serve them. */
+  /**
+   * Why this job could not read all of the library's notes and annotations, from the source
+   * that could not serve them: the cause alone. The remedy is named here, because it depends
+   * on the job. A build's gap is closed by another build. An update's is closed by the next
+   * update, which repeats this delta because the stamp is withheld (#63): the update keeps
+   * the cause as it stands and composes its own sentence when it ends.
+   */
   noteOwnWordsUnavailable(reason: string): void {
-    this.ownWordsUnavailable = reason;
+    this.ownWordsUnavailable =
+      this.operation === 'update' && this.isBuilding
+        ? reason
+        : `${reason}, so the index holds each item's metadata but not all of the reader's ` +
+          'own words. Re-run zotero_index action:"build" to try again.';
     this.opts.logger?.warn(reason);
   }
 
@@ -1563,6 +1573,12 @@ export abstract class SearchIndexBase implements SearchIndex {
     let fulltextCursor = this.fulltextVersion;
     let caughtUp = 0;
     let ownWordsRefreshed = 0;
+    /**
+     * Why this update could not compare, read or attribute every note and annotation, once
+     * it could not. Set anywhere own-words work fails and read where the stamp is written:
+     * a gap here withholds the stamp, so the next update repeats this delta (#63).
+     */
+    let ownWordsGap: string | undefined;
 
     const maybeLog = (): void => {
       if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
@@ -1581,7 +1597,28 @@ export abstract class SearchIndexBase implements SearchIndex {
         const pageItems = page.items ?? [];
         if (pageItems.length === 0) break;
         const texts = await this.fulltextForPage(pageItems, opts, token, fulltextLimit);
-        const own = await this.ownWordsForPage(pageItems, opts, token);
+        // This page's own words, or undefined when they cannot be trusted: the read threw, or
+        // the census opened degraded under it (see noteOwnWordsUnavailable). A degraded
+        // census answers "no own words" for an item exactly as it would for a reader who
+        // deleted them, so nothing it says may replace what the index holds. The items below
+        // are then refreshed with the own words they already carry, and the gap withholds
+        // the stamp so the next update reads them again (#63).
+        let own: Array<OwnWordsEntry[]> | undefined;
+        try {
+          own = await this.ownWordsForPage(pageItems, opts, token);
+        } catch (e) {
+          ownWordsGap ??=
+            'the notes and annotations of the changed items could not be read ' +
+            `(${e instanceof Error ? e.message : String(e)})`;
+        }
+        if (this.ownWordsUnavailable) {
+          ownWordsGap ??= this.ownWordsUnavailable;
+          own = undefined;
+        }
+        const kept =
+          opts.ownWords && !own && !token.cancelled
+            ? this.ownWordsRecords(pageItems.map(itemKeyOf))
+            : undefined;
         for (let i = 0; i < pageItems.length; i++) {
           if (token.cancelled) break;
           const item = pageItems[i];
@@ -1599,6 +1636,15 @@ export abstract class SearchIndexBase implements SearchIndex {
           // the item wholesale is the only way to leave no orphans behind.
           this.deleteItem(key);
           this.addOneItem(item, pending, texts?.[i], own?.[i]);
+          // The own words the upsert took out come back as they were, re-titled after the
+          // item and re-embedded only where the store cannot answer their vector: the
+          // changed items' notes, once, against a note that stops being findable because a
+          // request about something else failed.
+          for (const rec of kept?.get(key) ?? []) {
+            const back = { ...rec, title: this.itemTitle(key) ?? rec.title };
+            this.putPassage(back);
+            if (this.hasEmbedder && !this.adoptVector(back)) pending.push(back);
+          }
           known.add(key);
           refreshed.add(key);
           this.itemsFetched++;
@@ -1651,10 +1697,33 @@ export abstract class SearchIndexBase implements SearchIndex {
       // not have its notes re-indexed on the way out, and `known` is only the surviving
       // set once that pass has taken its keys out of it.
       if (!token.cancelled && opts.ownWords) {
-        ownWordsRefreshed = await this.ownWordsCatchUp(opts, fromVersion, known, refreshed, pending, token);
+        const catchUp = await this.ownWordsCatchUp(
+          opts,
+          fromVersion,
+          known,
+          refreshed,
+          pending,
+          token,
+        );
+        ownWordsRefreshed = catchUp.items;
+        ownWordsGap ??= catchUp.gap;
+      }
+      if (ownWordsGap && !token.cancelled) {
+        // The same rule the deletion pass applies to a failed key census, for the same
+        // reason: the stamp says "everything up to here is indexed", and the children this
+        // update could not compare, read or attribute are not. Stamped past them, they are
+        // older than the stamp by the next update, so an edited note would keep its old text
+        // and an added one would never arrive until a rebuild (#63). What this update did
+        // index stays; the stamp stays where it was; the next update repeats the delta.
+        this.ownWordsUnavailable =
+          `Notes and annotations were NOT fully caught up: ${ownWordsGap}. The own words already ` +
+          'indexed were left as they were, and the version stamp stayed at ' +
+          `${opts.backend} library version ${fromVersion} so that the next action:"update" ` +
+          'repeats this delta and retries them.';
+        this.opts.logger?.warn(this.ownWordsUnavailable);
       }
 
-      if (!token.cancelled && reconciled && crawlVersion) {
+      if (!token.cancelled && reconciled && crawlVersion && !ownWordsGap) {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.backend;
         // An index stamped before the library stamp existed gets one here: the update just
@@ -1662,7 +1731,9 @@ export abstract class SearchIndexBase implements SearchIndex {
         if (opts.library) this.library = opts.library;
       }
       // The full-text cursor advances under the same rule as the stamp, and for the same
-      // reason: an update that did not finish must repeat this delta, not skip past it.
+      // reason: an update that did not finish must repeat this delta, not skip past it. An
+      // own-words gap does not hold it back: the two sequences are independent (#26), and
+      // the body text this update caught up is indexed whether or not the delta is repeated.
       if (!token.cancelled && reconciled) this.fulltextVersion = fulltextCursor;
       // Inside the update's single transaction, like every other write it made: a delta
       // adds codes for the passages it added and nothing else, and a failure below rolls
@@ -1848,6 +1919,15 @@ export abstract class SearchIndexBase implements SearchIndex {
    * second cursor. The expensive census behind `textsFor` is opened only when there is
    * something to re-index, so an update over a library nobody has annotated since costs
    * exactly one request.
+   *
+   * Returns how many items it re-indexed and, when it could not do all of its work, why:
+   * a census that could not be taken, that came back empty against an index holding
+   * children, that opened degraded, or a body or attribution that could not be read. None
+   * of those fails the delta (the items that DID change are correctly indexed either way),
+   * but the caller withholds the stamp on the gap, because a child this update could not
+   * compare is older than the stamp by the next update and would never be revisited (#63).
+   * A degraded census replaces nothing: "no own words for this item" is not an answer it
+   * can be trusted to give, so the text already indexed stays until a census can be read.
    */
   private async ownWordsCatchUp(
     opts: IncrementalUpdateOptions,
@@ -1856,31 +1936,34 @@ export abstract class SearchIndexBase implements SearchIndex {
     refreshed: Set<string>,
     pending: ChunkRecord[],
     token: { cancelled: boolean },
-  ): Promise<number> {
+  ): Promise<{ items: number; gap?: string }> {
     const access = opts.ownWords!;
+    // Already opened degraded under the delta's own pages: nothing it answers from here on
+    // can be trusted either, and asking it costs requests.
+    if (this.ownWordsUnavailable) return { items: 0, gap: this.ownWordsUnavailable };
     let live: Map<string, number>;
     try {
       live = await access.childVersions();
     } catch (e) {
-      // A census that cannot be taken must not fail the delta: the items that DID change
-      // are correctly indexed either way, and the next update asks again.
-      this.opts.logger?.warn(
-        `The library's notes and annotations could not be listed (${e instanceof Error ? e.message : String(e)}), ` +
-          'so this update did not revisit them.',
-      );
-      return 0;
+      return {
+        items: 0,
+        gap:
+          "the library's notes and annotations could not be listed " +
+          `(${e instanceof Error ? e.message : String(e)})`,
+      };
     }
     const stored = this.ownWordsChildren();
     if (live.size === 0 && stored.size > 0) {
       // The same rule the item-level deletion pass learned: a library reporting no notes
       // and no annotations at all, against an index holding some, is a failed read far
-      // more often than a reader who deleted every one of them — and acting on it would
+      // more often than a reader who deleted every one of them, and acting on it would
       // erase exactly the text this feature exists to keep.
-      this.opts.logger?.warn(
-        'The library reported no notes or annotations at all, which is treated as a failed read rather than a ' +
-          'reader who deleted every one; the indexed ones were left alone.',
-      );
-      return 0;
+      return {
+        items: 0,
+        gap:
+          'the library reported no notes or annotations at all, which is treated as a failed ' +
+          'read rather than a reader who deleted every one',
+      };
     }
     const targets = new Set<string>();
     const held = new Set<string>();
@@ -1913,35 +1996,52 @@ export abstract class SearchIndexBase implements SearchIndex {
     const unheld = [...live.entries()]
       .filter(([key, version]) => !held.has(key) && (gapFill || version > since))
       .map(([key]) => key);
+    let gap: string | undefined;
     if (unheld.length) {
       try {
         for (const itemKey of await access.itemsFor(unheld)) {
           if (known.has(itemKey) && !refreshed.has(itemKey)) targets.add(itemKey);
         }
       } catch (e) {
-        this.opts.logger?.warn(
-          `New notes and annotations could not be attributed to their items ` +
-            `(${e instanceof Error ? e.message : String(e)}), so this update did not index them.`,
-        );
+        gap =
+          'new notes and annotations could not be attributed to their items ' +
+          `(${e instanceof Error ? e.message : String(e)})`;
       }
+      // Opening the census is what may have found it degraded (see noteOwnWordsUnavailable).
+      if (this.ownWordsUnavailable) return { items: 0, gap: this.ownWordsUnavailable };
     }
-    if (!targets.size) return 0;
+    if (!targets.size) return gap ? { items: 0, gap } : { items: 0 };
 
     const batchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
     const delayMs = opts.embedBatchDelayMs ?? 0;
     let items = 0;
     for (const key of targets) {
       if (token.cancelled) break;
+      // Read before anything is cleared, so a body that cannot be read leaves the text the
+      // index already holds in place rather than replacing it with nothing (#63).
+      let entries: OwnWordsEntry[];
+      try {
+        entries = await access.textsFor(key);
+      } catch (e) {
+        gap ??=
+          'the notes and annotations of an item could not be read ' +
+          `(${e instanceof Error ? e.message : String(e)})`;
+        break;
+      }
+      if (this.ownWordsUnavailable) {
+        gap ??= this.ownWordsUnavailable;
+        break;
+      }
       // The item's own metadata and body passages are untouched: nothing about the item
       // changed. Its own words are replaced wholesale, which is also how a note that lost
       // a paragraph stops being findable by the paragraph it lost.
       this.clearOwnWords(key);
-      this.addOwnWords(key, this.itemTitle(key) ?? '(untitled)', await access.textsFor(key), pending);
+      this.addOwnWords(key, this.itemTitle(key) ?? '(untitled)', entries, pending);
       items++;
       await this.embedPending(pending, token, batchSize, delayMs, false);
     }
     if (!token.cancelled) await this.embedPending(pending, token, batchSize, delayMs, true);
-    return items;
+    return gap ? { items, gap } : { items };
   }
 
   /**
@@ -2122,6 +2222,27 @@ export abstract class SearchIndexBase implements SearchIndex {
         if (this.hasEmbedder && !this.adoptVector(rec)) pending.push(rec);
       }
     }
+  }
+
+  /**
+   * The own-words passages this index holds for these items, read back whole, so an upsert
+   * can carry them across when the census that would have replaced them cannot be read
+   * (#63). One walk of the own-words ids for the page, not one per item.
+   */
+  private ownWordsRecords(keys: string[]): Map<string, ChunkRecord[]> {
+    const wanted = new Set(keys.filter(Boolean));
+    const out = new Map<string, ChunkRecord[]>();
+    if (!wanted.size) return out;
+    for (const id of this.ownWordsPassageIds()) {
+      const itemKey = parseOwnWordsId(id)?.itemKey;
+      if (!itemKey || !wanted.has(itemKey)) continue;
+      const rec = this.passage(id);
+      if (!rec) continue;
+      const list = out.get(itemKey);
+      if (list) list.push(rec);
+      else out.set(itemKey, [rec]);
+    }
+    return out;
   }
 
   /** The notes and annotations this index currently holds, by the item they belong to. */

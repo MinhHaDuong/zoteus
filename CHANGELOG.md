@@ -30,6 +30,16 @@ All notable changes to Zoteus are documented here. The format is based on
   through the parent and children reads, the PDF lookup and the write; the desktop paths
   apply only when that library is the personal one, and a group target with no cloud key
   fails clearly before anything is fetched or written.
+- **A failed notes-and-annotations catch-up no longer advances the version stamp (#63).**
+  When the child census behind `action:"update"` failed (the keys-only versions request,
+  the body crawl, or resolving annotated attachments to their items) the update swallowed
+  the failure and stamped the newer library version anyway, so an edited note kept its old
+  text searchable and an added note was never indexed until a rebuild; a census that
+  stopped early even answered "no own words" for the affected items, and the update indexed
+  that over the text it held. Own-words work that does not complete now withholds the
+  stamp, exactly as an unreconciled deletion pass does, and a degraded census replaces
+  nothing. The status carries one `ownWordsReason` sentence saying so, and the next
+  `action:"update"` repeats the delta and retries.
 
 ## [1.15.0] - 2026-09-07
 

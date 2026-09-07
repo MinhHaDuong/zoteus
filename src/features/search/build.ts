@@ -592,7 +592,11 @@ function crawlOptions(
   let ownSource: Promise<OwnWordsSource> | undefined;
   const openOwnWords = (): Promise<OwnWordsSource> =>
     (ownSource ??= createOwnWordsSource(ctx, lib, { backend }).then((src) => {
+      // A census missing part of the library is reported the same way as one missing all
+      // of it: what it does not hold looks exactly like "this item has no own words", and
+      // indexing that answer would erase text an earlier run indexed (#63).
       if (src.unavailable) ctx.search.noteOwnWordsUnavailable(src.unavailable);
+      else if (src.incomplete) ctx.search.noteOwnWordsUnavailable(src.incomplete);
       else ctx.logger.info(`Own words: ${src.notes} note(s) and ${src.annotations} annotation(s) over ${src.items} item(s).`);
       return src;
     }));

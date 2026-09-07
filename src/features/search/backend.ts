@@ -184,7 +184,12 @@ export interface SearchIndexStatus {
   ownWordsItems: number;
   /** Passages that came from them (a subset of `documents`). */
   ownWordsPassages: number;
-  /** Why notes and annotations are not indexed although they were asked for. */
+  /**
+   * Why notes and annotations are not indexed, or not current, although they were asked
+   * for: a build whose census could not be read in full, or an update whose own-words
+   * catch-up did not complete and therefore withheld the version stamp, so that the next
+   * update repeats the delta and retries (#63). Absent when they are complete and current.
+   */
   ownWordsReason?: string;
   /** True when this build was asked to index attachment full text (opt-in). */
   fulltextEnabled: boolean;
@@ -613,7 +618,10 @@ export interface SearchIndex {
   readonly isEmpty: boolean;
   /** Explain why an opt-in full-text build is not producing passages. */
   noteFulltextUnavailable(reason: string): void;
-  /** Why this index holds no notes or annotations although they were asked for. */
+  /**
+   * Why the running job could not read all of the library's notes and annotations: the
+   * cause alone. The index names the remedy, which differs between a build and an update.
+   */
   noteOwnWordsUnavailable(reason: string): void;
   /**
    * Zotero's local API stopped answering while the running job was reading from it. Backs
