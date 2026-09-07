@@ -1,7 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { ToolContext } from '../../registry/registry.js';
-import { ensureLocalApi } from '../../registry/registry.js';
+import { ensureLocalApi, isPersonalLibrary } from '../../registry/registry.js';
 import type { LibraryRef } from '../../api/web-client.js';
 
 /**
@@ -35,7 +35,7 @@ export interface LoadedAttachmentBytes {
 export interface LoadAttachmentBytesOptions {
   /** The attachment item key. */
   key: string;
-  /** Target library; undefined means the default (personal) library. */
+  /** Target library; undefined means the router's default library. */
   library?: LibraryRef;
   /** The attachment's `filename`, when known: names the file inside `storage/<key>/`. */
   filename?: string;
@@ -73,9 +73,11 @@ export async function loadAttachmentBytes(
   const reasons: string[] = [];
   const { key } = opts;
 
-  // 1. The running desktop app. Only for the default library: an explicit group library
-  //    may well be one the app does not hold, and the cloud is the answer for those.
-  if (!opts.library && ctx.local && (await ensureLocalApi(ctx))) {
+  // 1. The running desktop app. Only for the personal library, the one its file endpoint
+  //    serves: a group, explicit or configured, may well be one the app does not hold, and
+  //    the cloud is the answer for those.
+  const desktopCanRead = !opts.library || isPersonalLibrary(opts.library);
+  if (desktopCanRead && ctx.local && (await ensureLocalApi(ctx))) {
     try {
       const bytes = await ctx.local.downloadFileBytes(key);
       if (bytes.byteLength) return { bytes, source: 'local-api', reasons };

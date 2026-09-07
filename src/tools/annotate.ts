@@ -1,6 +1,14 @@
 import { z } from 'zod';
+import type { LibraryRef } from '../api/web-client.js';
 import type { ToolContext, ToolDefinition } from '../registry/registry.js';
-import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
+import {
+  ok,
+  resolveLibrary,
+  isPersonalLibrary,
+  requireCloud,
+  isLocalWritesUnavailable,
+  ensureLocalApi,
+} from '../registry/registry.js';
 import { locatePassages, type PassageAnchor } from '../features/fulltext/pdf-locate.js';
 import { DEFAULT_PRECISE_MAX_BYTES } from '../features/fulltext/pdf-pages.js';
 import { loadAttachmentBytes } from '../features/attachments/bytes.js';
@@ -102,13 +110,17 @@ const annotateTool: ToolDefinition = {
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   handler: async (args, ctx) => {
     const action = args.action ?? 'add';
+    // Decided once, so the parent and children reads, the PDF bytes and the write all name
+    // the same library; the desktop shortcuts below apply only to the personal one (#61).
+    const lib = resolveLibrary(ctx, args);
+    const personal = isPersonalLibrary(lib);
 
     if (action === 'delete') {
       const keys: string[] = args.annotation_keys ?? [];
       if (!keys.length) {
         return { content: [{ type: 'text', text: '`annotation_keys` is required for action:"delete".' }], isError: true };
       }
-      if (!args.library_id && (await ensureLocalApi(ctx)) && ctx.localWrites) {
+      if (personal && (await ensureLocalApi(ctx)) && ctx.localWrites) {
         try {
           // `deleted: 1` (reversible trash), not DELETE — the local API's DELETE erases.
           const result = await ctx.localWrites.setDeleted(keys, 1);
@@ -123,7 +135,6 @@ const annotateTool: ToolDefinition = {
         }
       }
       if (ctx.capabilities.cloud) {
-        const lib = requireCloudLibrary(ctx, args);
         const objects: any[] = [];
         for (const key of keys) {
           const item = await ctx.web.getItem(lib, key);
@@ -156,13 +167,13 @@ const annotateTool: ToolDefinition = {
 
     // Resolve the PDF attachment: the parent may be the attachment itself or any
     // regular item whose children include a stored/linked PDF.
-    const parentItem = await ctx.router.getItem(parentKey);
+    const parentItem = await ctx.router.getItem(parentKey, { library: lib });
     const parentData = parentItem?.data ?? parentItem;
     let attachmentKey: string | undefined;
     if (parentData?.itemType === 'attachment') {
       attachmentKey = parentData.key ?? parentKey;
     } else {
-      const children = await ctx.router.getItemChildren(parentKey);
+      const children = await ctx.router.getItemChildren(parentKey, { library: lib });
       const pdf = children.data
         .map((c: any) => c?.data ?? c)
         .filter((c: any) => c?.itemType === 'attachment')
@@ -184,7 +195,7 @@ const annotateTool: ToolDefinition = {
     // Anchor every passage-only highlight to the lines it occupies in the PDF, so a caller
     // that can quote a passage never has to supply coordinates it has no way to know.
     const problems: string[] = [];
-    const anchored = await anchorPassages(ctx, args, targetAttachment, anns, problems);
+    const anchored = await anchorPassages(ctx, lib, targetAttachment, anns, problems);
 
     // Build annotation items in Zotero's data model.
     const items: Record<string, unknown>[] = [];
@@ -234,7 +245,7 @@ const annotateTool: ToolDefinition = {
     // (a) Zotero 10+ local-API writes (the first one asks for a key in-app — choose
     //     "Always Allow" to be asked once), or (b) the connector protocol that every
     //     recent Zotero exposes while running.
-    if (!args.library_id && (await ensureLocalApi(ctx)) && ctx.localWrites) {
+    if (personal && (await ensureLocalApi(ctx)) && ctx.localWrites) {
       try {
         const result = await ctx.localWrites.writeItems(items);
         if (result.failed.length) {
@@ -254,7 +265,7 @@ const annotateTool: ToolDefinition = {
         ctx.logger.info(`Local-API writes unavailable (${e instanceof Error ? e.message : e}); using the connector protocol.`);
       }
     }
-    if (!args.library_id && ctx.connectorWrites && (await ensureLocalApi(ctx))) {
+    if (personal && ctx.connectorWrites && (await ensureLocalApi(ctx))) {
       const { sessionID } = await ctx.connectorWrites.saveItems(items, { uri: 'zotero://zoteus/annotate' });
       // The connector returns no keys; recover them by querying the local API.
       const created = await pollCreatedAnnotations(ctx, targetAttachment, items);
@@ -272,7 +283,7 @@ const annotateTool: ToolDefinition = {
         `Added ${created.length}/${items.length} annotation(s) to PDF ${targetAttachment} via the running Zotero desktop app.` + anchorNote(anchored.size),
       );
     }
-    const lib = requireCloudLibrary(ctx, args);
+    requireCloud(ctx, lib);
     const result = await ctx.web.writeItems(lib, items);
     return ok(
       {
@@ -303,7 +314,7 @@ const annotateTool: ToolDefinition = {
  */
 async function anchorPassages(
   ctx: ToolContext,
-  args: any,
+  library: LibraryRef,
   attachmentKey: string,
   anns: any[],
   problems: string[],
@@ -319,7 +330,7 @@ async function anchorPassages(
   });
   if (!pending.length) return resolved;
 
-  const bytes = await loadPdfBytes(ctx, args, attachmentKey);
+  const bytes = await loadPdfBytes(ctx, library, attachmentKey);
   if (!bytes) {
     for (const p of pending) {
       problems.push(
@@ -392,10 +403,11 @@ async function anchorPassages(
  * Zotero storage folder answers when the app is not running but shares the machine, and a
  * hosted Zoteus downloads them from Zotero storage. Returns null when none can.
  */
-async function loadPdfBytes(ctx: ToolContext, args: any, attachmentKey: string): Promise<Uint8Array | null> {
-  const library = args.library_id
-    ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-    : undefined;
+async function loadPdfBytes(
+  ctx: ToolContext,
+  library: LibraryRef,
+  attachmentKey: string,
+): Promise<Uint8Array | null> {
   const loaded = await loadAttachmentBytes(ctx, {
     key: attachmentKey,
     library,

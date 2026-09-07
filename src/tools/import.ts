@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition, ToolHandlerResult, ToolContext } from '../registry/registry.js';
-import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
+import {
+  ok,
+  resolveLibrary,
+  isPersonalLibrary,
+  requireCloud,
+  isLocalWritesUnavailable,
+  ensureLocalApi,
+} from '../registry/registry.js';
 import { arxivItem, fromScholarWork, parseIdentifier, bareDoi, type ResolvedItem } from '../features/resolve/resolve.js';
 import {
   AttachmentDownloadError,
@@ -123,9 +130,11 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
       `Resolved ${payload.length} item(s) via ${source} (not saved to library).`,
     );
   }
+  const lib = resolveLibrary(ctx, args);
+  const personal = isPersonalLibrary(lib);
   // Prefer the desktop app for the personal library (no cloud key needed);
   // fall back to the cloud Web API otherwise.
-  if (!args.library_id && (await ensureLocalApi(ctx)) && ctx.localWrites) {
+  if (personal && (await ensureLocalApi(ctx)) && ctx.localWrites) {
     try {
       if (args.collection_key) {
         for (const it of payload) it.collections = [...(it.collections ?? []), args.collection_key];
@@ -163,7 +172,7 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
       ctx.logger.info(`Local-API writes unavailable (${e instanceof Error ? e.message : e}); using the connector protocol.`);
     }
   }
-  if (!args.library_id && ctx.connectorWrites && (await ensureLocalApi(ctx))) {
+  if (personal && ctx.connectorWrites && (await ensureLocalApi(ctx))) {
     // Connector protocol: collections are targeted by treeViewID via updateSession,
     // not by the collections array, so strip it from the payload.
     const stripped = payload.map(({ collections: _c, ...rest }) => rest);
@@ -231,9 +240,8 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
   if (args.collection_key) {
     for (const it of payload) it.collections = [...(it.collections ?? []), args.collection_key];
   }
-  let lib: ReturnType<typeof requireCloudLibrary>;
   try {
-    lib = requireCloudLibrary(ctx, args);
+    requireCloud(ctx, lib);
   } catch (e) {
     return {
       content: [{

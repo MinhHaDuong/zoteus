@@ -1,7 +1,14 @@
 import { z } from 'zod';
 import { resolveCallerPath, CallerPathError } from '../lib/caller-path.js';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, ensureLocalApi, isLocalWritesUnavailable, requireCloudLibrary } from '../registry/registry.js';
+import {
+  ok,
+  ensureLocalApi,
+  isLocalWritesUnavailable,
+  isPersonalLibrary,
+  requireCloud,
+  resolveLibrary,
+} from '../registry/registry.js';
 import {
   AttachmentDownloadError,
   AttachmentUploadError,
@@ -60,8 +67,12 @@ const attachFile: ToolDefinition = {
     }
     // Desktop first for the personal library: no cloud key, no quota, bytes never leave
     // the machine. Group libraries the app may not have are cloud-only either way.
-    const useLocal = !args.library_id && Boolean(ctx.localWrites) && (await ensureLocalApi(ctx));
-    if (!useLocal && !args.library_id && !ctx.capabilities.cloud) {
+    const lib = resolveLibrary(ctx, args);
+    const personal = isPersonalLibrary(lib);
+    const useLocal = personal && Boolean(ctx.localWrites) && (await ensureLocalApi(ctx));
+    // A group with no cloud key fails here, before any bytes are fetched.
+    if (!personal) requireCloud(ctx, lib);
+    if (!useLocal && !ctx.capabilities.cloud) {
       return err(
         'Storing a file needs one of two write paths, and neither is available: the Zotero desktop app (Zotero 10+ with the local API enabled, granted once when Zotero asks), or a cloud API key with file access (ZOTERO_API_KEY). ' +
           'If Zoteus is running on a different machine than Zotero, only the cloud key can work, since the desktop local API listens on your own loopback address.',
@@ -109,7 +120,6 @@ const attachFile: ToolDefinition = {
       }
     }
 
-    const lib = requireCloudLibrary(ctx, args);
     const result = await storeCloudAttachment(ctx, lib, {
       parent: args.parent,
       bytes,

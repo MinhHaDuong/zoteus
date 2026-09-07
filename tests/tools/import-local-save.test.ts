@@ -110,6 +110,26 @@ describe('zotero_import save target (DOI without translation-server)', () => {
     expect((res.structuredContent as any).created).toEqual(['CLOUDKEY']);
   });
 
+  it('follows a configured group default past the desktop app to the cloud (#61)', async () => {
+    const writeItems = vi.fn(async () => localWriteResult);
+    const saveItems = vi.fn(async () => ({ sessionID: 'S1', connectorIds: ['c1'] }));
+    const ctx = makeCtx({
+      capabilities: { cloud: { userID: 42 }, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems },
+      connectorWrites: { saveItems },
+      router: { defaultLibrary: () => ({ type: 'group', id: 456 }) },
+    });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+    expect(writeItems).not.toHaveBeenCalled();
+    expect(saveItems).not.toHaveBeenCalled();
+    expect(ctx.web.writeItems).toHaveBeenCalledWith({ type: 'group', id: 456 }, expect.any(Array));
+    expect((res.structuredContent as any).target).toBe('cloud');
+  });
+
   it('falls back to the cloud Web API when the desktop app is not available', async () => {
     const ctx = makeCtx({ capabilities: { cloud: { userID: 42 }, localApi: false } });
     const res = await importTool.handler(
@@ -229,6 +249,8 @@ describe('zotero_import attach_url on the cloud save path', () => {
   const cloudCtx = (over: any = {}) =>
     makeCtx({
       capabilities: { cloud: { userID: 19552201, username: 'oscardvs', access: {} }, localApi: false },
+      // What the real router resolves for a cloud key with no configured default.
+      router: { defaultLibrary: () => ({ type: 'user', id: 19552201 }) },
       web: {
         writeItems: vi.fn(async (_lib: any, items: any[]) =>
           items[0]?.itemType === 'attachment'

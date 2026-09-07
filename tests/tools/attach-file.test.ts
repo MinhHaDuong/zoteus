@@ -144,6 +144,35 @@ describe('zotero_attach_file', () => {
     expect(ctx.web.writeItems).not.toHaveBeenCalled();
   });
 
+  it('follows a configured group default past the desktop app to the cloud (#61)', async () => {
+    const writeItems = vi.fn(async () => localWriteResult);
+    const uploadFile = vi.fn(async () => {});
+    const ctx = makeCtx({
+      capabilities: { cloud: { userID: 19552201, access: {} }, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems, uploadFile },
+      router: { defaultLibrary: () => ({ type: 'group', id: 456 }) },
+    });
+    const res = await attachFile.handler({ parent: 'ITEM1', url: PDF_URL }, ctx);
+
+    expect((res.structuredContent as any).target).toBe('cloud');
+    expect(writeItems).not.toHaveBeenCalled();
+    expect(uploadFile).not.toHaveBeenCalled();
+    expect(ctx.web.writeItems).toHaveBeenCalledWith({ type: 'group', id: 456 }, expect.any(Array));
+  });
+
+  it('refuses a group target with no cloud key before downloading anything (#61)', async () => {
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems: vi.fn(), uploadFile: vi.fn() },
+      router: { defaultLibrary: () => ({ type: 'group', id: 456 }) },
+    });
+    await expect(attachFile.handler({ parent: 'ITEM1', url: PDF_URL }, ctx)).rejects.toThrow(
+      /cloud API key/,
+    );
+    expect(ctx.fetcher.fetch).not.toHaveBeenCalled();
+    expect(ctx.localWrites.writeItems).not.toHaveBeenCalled();
+  });
+
   it('explains both write paths when neither is available, before downloading anything', async () => {
     const ctx = makeCtx({ capabilities: { cloud: null, localApi: false } });
     const res = await attachFile.handler({ parent: 'ITEM1', url: PDF_URL }, ctx);

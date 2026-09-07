@@ -14,6 +14,7 @@ function ctx(over: Record<string, unknown> = {}) {
   return {
     config: { dataDir: join(tmpdir(), 'zoteus-data-does-not-exist') },
     remoteCaller: true,
+    router: { defaultLibrary: () => ({ type: 'user', id: 1 }) },
     logger: { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} },
     ...over,
   } as never;

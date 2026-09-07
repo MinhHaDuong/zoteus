@@ -139,24 +139,54 @@ export function ok(structured: Record<string, unknown>, summary: string): ToolHa
 }
 
 /**
- * Resolve the library a WRITE should target on the cloud Web API. Group libraries (and
- * any library the running desktop app cannot reach) are cloud-only, so this throws a
- * friendly error when no API key is configured. The thrown message is surfaced to the
- * model as an isError result.
+ * The library an operation acts on, decided once so that every step of it (the parent and
+ * children reads, the attachment lookup, the write) names the same one: the caller's
+ * explicit `library_type`/`library_id` when given, otherwise the configured default
+ * (ZOTERO_LIBRARY_TYPE / ZOTERO_LIBRARY_ID), otherwise the key's own personal library.
  */
-export function requireCloudLibrary(
+export function resolveLibrary(
   ctx: ToolContext,
   args?: { library_type?: 'user' | 'group'; library_id?: number },
 ): LibraryRef {
   if (args?.library_id) return { type: args.library_type ?? 'group', id: args.library_id };
-  const cloud = ctx.capabilities.cloud;
-  if (!cloud) {
+  return ctx.router.defaultLibrary();
+}
+
+/**
+ * Whether the running desktop app can take a write for `lib`. Its local-API writes address
+ * `/users/0` and the connector protocol saves into the library the app has open, so the
+ * desktop only ever writes the personal library. A group, configured or explicit, is
+ * cloud-only, and a desktop shortcut taken for one would land in the wrong library (#61).
+ */
+export function isPersonalLibrary(lib: LibraryRef): boolean {
+  return lib.type === 'user';
+}
+
+/**
+ * `lib`, once there is a cloud Web API to write it to. Group libraries (and any library the
+ * running desktop app cannot reach) are cloud-only, so this throws a friendly error when no
+ * API key is configured. The thrown message is surfaced to the model as an isError result.
+ */
+export function requireCloud(ctx: ToolContext, lib: LibraryRef): LibraryRef {
+  if (!ctx.capabilities.cloud) {
     throw new Error(
       'This operation writes to a cloud/group library and requires a cloud API key (set ZOTERO_API_KEY). ' +
         'For the personal library, writes can instead go through the running Zotero 10+ desktop app (local API).',
     );
   }
-  return { type: 'user', id: cloud.userID };
+  return lib;
+}
+
+/**
+ * The library a WRITE targets on the cloud Web API: `resolveLibrary`, then `requireCloud`.
+ * Until #61 this ignored the configured default and answered with the key's own user id,
+ * so a group configured as the default was written to as the personal library.
+ */
+export function requireCloudLibrary(
+  ctx: ToolContext,
+  args?: { library_type?: 'user' | 'group'; library_id?: number },
+): LibraryRef {
+  return requireCloud(ctx, resolveLibrary(ctx, args));
 }
 
 /**

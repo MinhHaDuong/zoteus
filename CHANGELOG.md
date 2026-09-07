@@ -17,6 +17,19 @@ All notable changes to Zoteus are documented here. The format is based on
   fewer than it was asked for is not asked again, the pool never exceeds the passages the
   index holds, and the query is embedded once for every round. A page the first pool fills
   costs exactly what it did before.
+- **Writes and annotation reads follow the configured or explicit library, never silently
+  the personal one (#61).** With `ZOTERO_LIBRARY_TYPE=group` and `ZOTERO_LIBRARY_ID` set,
+  every cloud write resolved its target from the API key's user id rather than from the
+  configured default, so `zotero_create_items` with no per-call library wrote to the
+  personal library; `zotero_annotate` with an explicit group still looked the parent up in
+  the personal library and failed with a 404 before writing; and the desktop shortcuts
+  (local-API and connector writes, which can only ever reach the personal library) were
+  gated on the absence of a per-call `library_id`, so a configured group default went to
+  the desktop's personal library too. The effective library is now resolved once per call
+  (explicit arguments, then the configured default, then the key's own library) and passed
+  through the parent and children reads, the PDF lookup and the write; the desktop paths
+  apply only when that library is the personal one, and a group target with no cloud key
+  fails clearly before anything is fetched or written.
 
 ## [1.15.0] - 2026-09-07
 

@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
+import {
+  ok,
+  resolveLibrary,
+  isPersonalLibrary,
+  requireCloud,
+  isLocalWritesUnavailable,
+  ensureLocalApi,
+} from '../registry/registry.js';
 
 const deleteItems: ToolDefinition = {
   name: 'zotero_delete_items',
@@ -37,9 +44,10 @@ const deleteItems: ToolDefinition = {
         isError: true,
       };
     }
+    const lib = resolveLibrary(ctx, args);
     // Local-first for the personal library: Zotero 10's local API implements the same
     // multi-DELETE (with the library-version precondition), so no cloud key is needed.
-    if (ctx.localWrites && !args.library_id && (await ensureLocalApi(ctx))) {
+    if (ctx.localWrites && isPersonalLibrary(lib) && (await ensureLocalApi(ctx))) {
       try {
         await ctx.localWrites.deleteItems(args.item_keys);
         return ok(
@@ -51,7 +59,7 @@ const deleteItems: ToolDefinition = {
         ctx.logger.info(`Local-API writes unavailable (${e instanceof Error ? e.message : e}); falling back to the cloud Web API.`);
       }
     }
-    const lib = requireCloudLibrary(ctx, args);
+    requireCloud(ctx, lib);
     const version = await ctx.web.currentLibraryVersion(lib);
     await ctx.web.deleteItems(lib, args.item_keys, version);
     return ok(

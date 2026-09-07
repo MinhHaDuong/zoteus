@@ -40,6 +40,7 @@ describe('zotero_annotate action:"delete"', () => {
     const ctx: any = {
       capabilities: { cloud: null, localApi: true },
       localWrites: { setDeleted, deleteItems },
+      router: { defaultLibrary: () => ({ type: 'user', id: 0 }) },
       logger: { debug() {}, info() {}, warn() {}, error() {} },
     };
     const res = await annotate.handler({ action: 'delete', annotation_keys: ['ANN1'] }, ctx);

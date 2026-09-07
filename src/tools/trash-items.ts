@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok, requireCloudLibrary, isLocalWritesUnavailable, ensureLocalApi } from '../registry/registry.js';
+import {
+  ok,
+  resolveLibrary,
+  isPersonalLibrary,
+  requireCloud,
+  isLocalWritesUnavailable,
+  ensureLocalApi,
+} from '../registry/registry.js';
 
 function versionOf(item: any): number | undefined {
   return item?.version ?? item?.data?.version;
@@ -20,8 +27,9 @@ const trashItems: ToolDefinition = {
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   handler: async (args, ctx) => {
     const deleted = args.action === 'restore' ? 0 : 1;
+    const lib = resolveLibrary(ctx, args);
     // Local-first for the personal library when the desktop app supports writes.
-    if (ctx.localWrites && !args.library_id && (await ensureLocalApi(ctx))) {
+    if (ctx.localWrites && isPersonalLibrary(lib) && (await ensureLocalApi(ctx))) {
       try {
         // Set the `deleted` flag rather than issuing a DELETE: the local API's DELETE,
         // like the Web API's, erases items outright, which is not what "trash" means.
@@ -36,7 +44,7 @@ const trashItems: ToolDefinition = {
         ctx.logger.info(`Local-API writes unavailable (${e instanceof Error ? e.message : e}); falling back to the cloud Web API.`);
       }
     }
-    const lib = requireCloudLibrary(ctx, args);
+    requireCloud(ctx, lib);
     const objects: any[] = [];
     for (const key of args.item_keys) {
       const version = versionOf(await ctx.web.getItem(lib, key));
