@@ -53,6 +53,14 @@ export interface ContextOverrides {
 export interface Telemetry {
   metrics?: Metrics;
   usage?: UsageRecorder;
+  /**
+   * The process's one logger, the instance `main()` created with ZOTEUS_LOG_FILE attached.
+   * Without it a context built its own from the level and format alone, and everything
+   * that logs through the context (the embedder, every index build's progress and failure
+   * line, the Zotero clients) went to stderr only, while the file received the HTTP request
+   * lines and nothing else (#59).
+   */
+  logger?: Logger;
 }
 
 /**
@@ -74,8 +82,12 @@ export async function buildContext(
   config: ZoteusConfig,
   overrides: ContextOverrides = {},
 ): Promise<ToolContext> {
-  const logger = createLogger(config.logLevel, config.logFormat);
   const { metrics, usage } = overrides.telemetry ?? {};
+  // The caller's logger when it has one, so a context logs where the server logs. The
+  // fallback carries the file too: a context built without the server's logger (a test, an
+  // embedding) must still leave the record ZOTEUS_LOG_FILE promises.
+  const logger =
+    overrides.telemetry?.logger ?? createLogger(config.logLevel, config.logFormat, { file: config.logFile });
   const apiKey = overrides.apiKey ?? config.apiKey;
   const perUser = overrides.apiKey !== undefined;
   const fetcher = new RateLimitedFetcher({ maxConcurrency: 4, logger });

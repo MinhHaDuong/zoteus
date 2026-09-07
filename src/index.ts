@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   if (httpFlag !== undefined) {
     const port = Number(flag('port') ?? process.env.PORT ?? 3939);
     const metrics = config.metricsEnabled ? createMetrics() : undefined;
-    const telemetry: Telemetry = { metrics, usage: usage?.recorder };
+    const telemetry: Telemetry = { metrics, usage: usage?.recorder, logger };
     const { ctx } = await buildServer(config, telemetry);
     const oauth = await buildOAuth(config, {
       onEvent: (e) => {
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
     // server down (#18). Tool calls await the build, so none of them sees a half-built
     // context; only the handshake stops waiting on it.
     const { server, context } = createDeferredServer(config, () =>
-      buildContext(config, { telemetry: { usage: usage?.recorder } }),
+      buildContext(config, { telemetry: { usage: usage?.recorder, logger } }),
     );
     // Held for the shutdown flush, and only once the build has succeeded: a session that
     // ends before then has nothing of its own to write, and must not start a build on its

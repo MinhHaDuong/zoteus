@@ -71,6 +71,13 @@ All notable changes to Zoteus are documented here. The format is based on
   `document` entry of its own; a keyed export reads `/items/top`, which is exactly the items
   named, as on the cloud.
 
+- **`ZOTEUS_LOG_FILE` now receives index build and update lines, not only HTTP requests (#59).**
+  The server created one logger with the file attached and handed it to the HTTP transport,
+  but the tool context built a second one from the level and format alone, and that second
+  logger is the one every index job, the embedder and the Zotero clients write through. So
+  the file held request lines and nothing else, while build progress and the error that
+  ended a build went to a stderr nobody was reading. The context now logs through the
+  server's logger, and a context built without one still attaches the file itself.
 ## [1.15.0] - 2026-09-07
 
 ### Added
