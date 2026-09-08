@@ -27,6 +27,16 @@ All notable changes to Zoteus are documented here. The format is based on
   is a deliberation step at the scale where a bad decision does real damage, not a human in
   the loop: a model can re-call with `confirm: true`.
 
+- **The citeproc-js attribution travels with every artefact that redistributes it (#70).** The
+  `.mcpb` bundles and the container image carry `node_modules/citeproc`, which is licensed
+  CPAL-1.0 or AGPL, and the CPAL asks for a copyright notice, an attribution phrase and an
+  attribution URL to be displayed when a session begins. `THIRD_PARTY_NOTICES.md` at the
+  repository root now carries the three Exhibit B lines and states that Zoteus takes the
+  CPAL option; it is in the npm package's `files`, staged into each bundle, and copied into
+  the image, and the bundle gate checks it is there rather than trusting the script. An MCP
+  server's only screen is its text, so the attribution line is written to the log once at
+  startup and returned by `zotero_whoami`, in its summary and in a structured `attribution`
+  field. The npm package itself never vendored citeproc and is unaffected.
 - **`ZOTEUS_OPENALEX_API_KEY`, and `zotero_scholar` says when a list was cut (#76).** OpenAlex
   replaced its "polite pool" with free API keys before February 2026 and now ignores the
   `mailto=` parameter Zoteus appended to every request, so the parameter is gone from the
