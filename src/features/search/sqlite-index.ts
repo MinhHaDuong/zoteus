@@ -321,6 +321,8 @@ interface Statements {
   // The two-stage vector path (#30). Everything below reads or maintains `vector_codes`.
   insertCode: StatementSync;
   deleteItemCodes: StatementSync;
+  deleteFulltextCodes: StatementSync;
+  deleteOwnWordsCodes: StatementSync;
   deletePassageCode: StatementSync;
   anyCode: StatementSync;
   allCodes: StatementSync;
@@ -1039,6 +1041,16 @@ export class SqliteSearchIndex extends SearchIndexBase {
       // insert once it is the largest one free. So a code MUST leave with the passage it
       // was taken from: left behind, it would eventually describe a different passage.
       deleteItemCodes: db.prepare('DELETE FROM vector_codes WHERE pid IN (SELECT pid FROM passages WHERE item_key = ?)'),
+      // Scoped by source, and deliberately not the statement above: the two partial clears
+      // leave the item's other passages in place, so a delete over the whole item would
+      // strip the codes off rows nothing touched and send every later query back to the
+      // exact scan for the coverage gap it opened.
+      deleteFulltextCodes: db.prepare(
+        "DELETE FROM vector_codes WHERE pid IN (SELECT pid FROM passages WHERE item_key = ? AND source = 'fulltext')",
+      ),
+      deleteOwnWordsCodes: db.prepare(
+        "DELETE FROM vector_codes WHERE pid IN (SELECT pid FROM passages WHERE item_key = ? AND source IN ('note', 'annotation'))",
+      ),
       deletePassageCode: db.prepare('DELETE FROM vector_codes WHERE pid = (SELECT pid FROM passages WHERE id = ?)'),
       anyCode: db.prepare('SELECT 1 AS present FROM vector_codes LIMIT 1'),
       allCodes: db.prepare('SELECT pid, code FROM vector_codes ORDER BY pid'),
@@ -1359,6 +1371,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
    */
   protected clearFulltext(itemKey: string): void {
     this.begin();
+    // Before the passages go, exactly as in deleteItem: the codes are keyed by their
+    // rowids, and after the delete there is nothing left to name them by.
+    if (this.hasCodes) this.stmts.deleteFulltextCodes.run(itemKey);
+    this.invalidateCodes();
     const rows = this.stmts.itemFulltext.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
     for (const row of rows) {
       this.stmts.deleteFts.run(row.pid, normalizeForSearch(row.text));
@@ -1377,6 +1393,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
   /** The own-words twin of `clearFulltext`, down to the external-content delete protocol. */
   protected clearOwnWords(itemKey: string): void {
     this.begin();
+    if (this.hasCodes) this.stmts.deleteOwnWordsCodes.run(itemKey);
+    this.invalidateCodes();
     const rows = this.stmts.itemOwnWords.all(itemKey) as Array<{ pid: number; text: string; has_vector: number }>;
     for (const row of rows) {
       this.stmts.deleteFts.run(row.pid, normalizeForSearch(row.text));
