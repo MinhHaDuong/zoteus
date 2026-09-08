@@ -4,6 +4,25 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`mode:"semantic"` no longer answers "No matches" when there is no embedder to turn the
+  query into a vector (#7).** Semantic ranking needs both ends of the comparison — vectors
+  in the index, and a provider to embed the query — but the refusal only tested the first.
+  An index built with an embedder and reopened with `ZOTEUS_EMBEDDINGS=off` keeps its
+  vectors (they are unusable, not known-wrong), so `hasVectors` stayed true, the refusal did
+  not fire, and the query fell through to a vector ranker with no query vector and a keyword
+  ranker closed by `mode:"semantic"`. The result was a bare `No matches for "…"`,
+  indistinguishable from a library that genuinely holds nothing on the subject;
+  `embedderNotice` is deliberately silent about a provider switched off on purpose, so
+  nothing else explained it either. Semantic mode now refuses whenever no provider is
+  configured at all, names which of the two halves is missing, and — when the vectors carry
+  their provenance — names the provider that built them. `auto` and `keyword` are
+  unaffected. So is a provider that is configured and merely failed: it is still reported
+  through the existing notice, and the next query ranks again as soon as it recovers,
+  without an index rebuild.
+
 ## [1.16.0] - 2026-09-07
 
 ### Fixed

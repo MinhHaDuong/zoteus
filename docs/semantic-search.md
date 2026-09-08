@@ -107,11 +107,16 @@ summary, because a build whose artifact never reached disk still reports `state:
 - `q` — natural-language query. `mode`: `auto` (hybrid, default), `keyword` (BM25), or `semantic` (vector).
 - Returns ranked items with a snippet and fused score. The index is built automatically on first use (see `auto_build` below), or ahead of time with `zotero_index`.
 - `auto_build` (default `true`) — when the index is empty the tool starts a background build itself and tells you to poll `zotero_index` action:"status" until `done`, then retry, instead of returning a bare error; pass `auto_build: false` to opt out.
-- `mode: "semantic"` ranks by vectors alone, so with **0 vectors** in the index it returns an
-  explicit error naming the cause (missing embedder, or an index built before one was
-  available) rather than an empty hit list, which would be indistinguishable from "your
-  library has nothing on this". `auto` and `keyword` keep working on BM25; `auto` appends a
-  one-line notice when vector ranking is off.
+- `mode: "semantic"` ranks by vectors alone, which needs both ends of the comparison:
+  vectors in the index, and an embedding provider to turn the query into one. With **0
+  vectors**, or with **no provider at all** (`ZOTEUS_EMBEDDINGS=off`, or one that never
+  started), it returns an explicit error naming the cause rather than an empty hit list,
+  which would be indistinguishable from "your library has nothing on this" — an index built
+  with vectors and reopened with embeddings off keeps those vectors, so the 0-vector test
+  alone would let that case through silently. A provider that is configured and merely
+  *failed* is not refused: the one-line notice reports it, and the next query ranks again as
+  soon as it recovers, with no rebuild. `auto` and `keyword` keep working on BM25; `auto`
+  appends a one-line notice when vector ranking is off.
 - Snippets are query-centred and trimmed to word boundaries: the excerpt is positioned around the first query token hit rather than always taken from the document head, so the relevant phrase appears in the snippet even when it occurs deep in the abstract.
 - A hit whose snippet came from a PDF body rather than the item's metadata is marked
   `source: "fulltext"`, so the caller knows the passage is quotable and can fetch it with
