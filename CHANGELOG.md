@@ -35,6 +35,20 @@ All notable changes to Zoteus are documented here. The format is based on
   handed back to a replacement passage that carried no vector yet. Both clears now drop the
   codes of the passages they remove, scoped by source so the item's other passages keep
   theirs.
+- **A transient attachment read during `action:"update"` no longer drops an item's body
+  passages and stamps past them (#67).** A changed item whose PDF could not be read got the
+  same answer as an item with no extracted text at all, so the upsert replaced its indexed
+  body with nothing and the version stamp advanced anyway: the attachment had not changed in
+  Zotero, so no later delta named the item and `/fulltext?since=` would not either, and its
+  body stayed unsearchable until a full `action:"refresh"`. On a saturated library (#39) or
+  a rate-limited key that happened to every changed item on the page at once, with only a
+  lower `fulltextItems` to show for it. The full-text source now says when a read failed
+  instead of folding it into "no text", a failed read replaces nothing (the body passages
+  the index holds are put back through the upsert), and the sequence that would have to
+  offer the item again is held back: a gap on the delta's own items withholds the version
+  stamp, and a gap in the catch-up withholds the full-text cursor. The status carries one
+  `fulltextReason` sentence saying so, and the next `action:"update"` retries. This is the
+  full-text sibling of #63, and it follows the same rule.
 
 ## [1.16.0] - 2026-09-07
 

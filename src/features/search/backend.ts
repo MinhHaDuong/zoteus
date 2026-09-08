@@ -197,7 +197,12 @@ export interface SearchIndexStatus {
   fulltextItems: number;
   /** Passages that came from attachment full text (a subset of `documents`). */
   fulltextPassages: number;
-  /** Why full text is not being indexed although it was requested. */
+  /**
+   * Why full text is not being indexed, or not current, although it was requested: a build
+   * that could not read it at all, or an update whose reads failed and which therefore
+   * withheld the version stamp (or the full-text cursor) so that the next one retries
+   * them (#67). Absent when the body text is complete and current.
+   */
   fulltextReason?: string;
   /**
    * Items crawled by the build that produced this index. Named for the Zotero library
@@ -495,6 +500,13 @@ export interface FulltextCatchUp {
   itemKeys: Set<string>;
   /** The highest full-text version seen, to store once those items are indexed. */
   version: number;
+  /**
+   * Set when the map that turned those attachment keys into item keys could not be read in
+   * full, so some of them resolved to nothing for want of the map rather than because they
+   * belong outside this library view. The cursor then stays where it was, because moving it
+   * past text nobody could look at is what makes the miss permanent (#67).
+   */
+  incomplete?: string;
 }
 
 /**

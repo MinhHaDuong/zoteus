@@ -108,6 +108,8 @@ function makeCtx(opts: {
   withText?: Record<string, number>;
   fulltext?: Record<string, any>;
   sinceThrows?: boolean;
+  /** Page the attachment crawl one at a time and fail its second page, mid-map. */
+  pageTwoThrows?: boolean;
   config?: Record<string, string>;
 } = {}) {
   const attachments = opts.attachments ?? [];
@@ -120,7 +122,9 @@ function makeCtx(opts: {
   const searchItems = vi.fn(async (q: any) => {
     const start = q.start ?? 0;
     const source = q.itemType === 'attachment' ? attachments : [];
-    return { data: source.slice(start, start + (q.limit ?? PAGE_SIZE)), totalResults: source.length, lastModifiedVersion: 1 };
+    if (opts.pageTwoThrows && q.itemType === 'attachment' && start > 0) throw new Error('page two gone');
+    const size = opts.pageTwoThrows ? 1 : (q.limit ?? PAGE_SIZE);
+    return { data: source.slice(start, start + size), totalResults: source.length, lastModifiedVersion: 1 };
   });
   const ctx: any = {
     config: loadConfig((opts.config ?? {}) as any),
@@ -201,7 +205,11 @@ describe('createFulltextSource', () => {
     const src = await createFulltextSource(ctx, undefined);
     expect(src.unavailable).toMatch(/403 Forbidden/);
     expect(src.attachments).toBe(0);
-    expect(await src.textFor('ITEM1')).toBeUndefined();
+    // Opening it degrades; ASKING it refuses. A source that never opened knows nothing
+    // about any item, and answering "this item has no text" would let an update index that
+    // over the body passages it already holds and then stamp past them (#67).
+    expect(src.incomplete).toMatch(/full-text index could not be listed: 403 Forbidden/);
+    await expect(src.textFor('ITEM1')).rejects.toThrow(/403 Forbidden/);
     // The expensive attachment walk never starts once the cheap probe has failed.
     expect(searchItems).not.toHaveBeenCalled();
   });
@@ -212,7 +220,7 @@ describe('createFulltextSource', () => {
     expect(src.unavailable).toMatch(/no attachments with extracted full text/i);
   });
 
-  it('survives one unreadable attachment', async () => {
+  it('survives one unreadable attachment, and says which item it could not read', async () => {
     const { ctx } = makeCtx({
       attachments: [attachment('ATT1', 'ITEM1'), attachment('ATT2', 'ITEM2')],
       withText: { ATT1: 1, ATT2: 2 },
@@ -223,8 +231,27 @@ describe('createFulltextSource', () => {
       return { content: 'readable body' };
     });
     const src = await createFulltextSource(ctx, undefined);
-    expect(await src.textFor('ITEM1')).toBeUndefined();
+    // The failure is confined to the item whose attachment it was: the rest of the library
+    // is read normally. It is reported rather than folded into the `undefined` an item with
+    // no extracted text gets, which is what let an update erase indexed bodies (#67).
+    await expect(src.textFor('ITEM1')).rejects.toThrow(/storage offline/);
     expect(await src.textFor('ITEM2')).toBe('readable body');
+    expect(src.readFailures()).toBe(1);
+  });
+
+  it('refuses to answer for an item its attachment map never reached', async () => {
+    // The map stopped early, so an item it does not hold may simply be on the pages this
+    // crawl never read. Saying "no text" there is a guess an update would index (#67).
+    const { ctx } = makeCtx({
+      attachments: [attachment('ATT1', 'ITEM1'), attachment('ATT2', 'ITEM2')],
+      withText: { ATT1: 1, ATT2: 2 },
+      fulltext: { ATT1: { content: 'first body' } },
+      pageTwoThrows: true,
+    });
+    const src = await createFulltextSource(ctx, undefined);
+    expect(src.incomplete).toMatch(/attachment map stopped early after 1\/2 attachment\(s\): page two gone/);
+    expect(await src.textFor('ITEM1')).toBe('first body');
+    await expect(src.textFor('ITEM2')).rejects.toThrow(/stopped early/);
   });
 });
 

@@ -22,7 +22,16 @@ const ATTACHMENT_PAGE_SIZE = 100;
 const MAX_ATTACHMENT_PAGES = 500;
 
 export interface FulltextSource {
-  /** Concatenated, capped full text of one item's attachments (undefined when it has none). */
+  /**
+   * Concatenated, capped full text of one item's attachments, or undefined when the item
+   * has none.
+   *
+   * THROWS when the text could not be read, and that distinction is the point: an
+   * attachment whose read failed, and a source that never opened, used to answer with the
+   * same `undefined` an item with no extracted text gets, so an update indexed that
+   * nothing over the body passages it already held and then stamped past the item (#67).
+   * Callers catch this per item, so one unreadable PDF still cannot abort a job.
+   */
   textFor(itemKey: string): Promise<string | undefined>;
   /** Attachments with indexed full text that this source can serve. */
   attachments: number;
@@ -50,6 +59,17 @@ export interface FulltextSource {
   /** Set when full text cannot be indexed at all; the build then stays metadata-only. */
   unavailable?: string;
   /**
+   * Set when this source holds only part of the library's body text, or none of it because
+   * it never opened: the attachment map stopped early, or the census behind it failed. The
+   * cause alone, short enough to sit inside a sentence the caller composes.
+   *
+   * What it does NOT mean is a library with nothing extracted in it, which is a complete
+   * answer. An incomplete source cannot tell "this item has no text" from "this item is on
+   * the part of the map I never read", so it refuses to answer at all rather than let an
+   * update index that nothing over the text it already holds (#67).
+   */
+  incomplete?: string;
+  /**
    * Attachments whose text could not be READ, as opposed to items that simply have none.
    *
    * One unreadable PDF must not abort a build, so those failures are caught and skipped —
@@ -60,10 +80,21 @@ export interface FulltextSource {
   readFailures(): number;
 }
 
-/** An inert source, for "full text requested but not obtainable". */
-function emptySource(unavailable?: string): FulltextSource {
+/**
+ * An inert source, for "full text requested but not obtainable".
+ *
+ * `incomplete` separates the two ways of being inert. A library with nothing extracted in
+ * it answers "no text" truthfully, so this source may say so. One whose census could not be
+ * read knows nothing about any item, and must say THAT instead: it refuses every read, so
+ * an update keeps the body text it holds and comes back for it (#67).
+ */
+function emptySource(unavailable?: string, incomplete?: string): FulltextSource {
   const src: FulltextSource = {
-    textFor: async () => undefined,
+    textFor: incomplete
+      ? async () => {
+          throw new Error(incomplete);
+        }
+      : async () => undefined,
     attachments: 0,
     items: 0,
     itemKeys: new Set(),
@@ -72,6 +103,7 @@ function emptySource(unavailable?: string): FulltextSource {
     readFailures: () => 0,
   };
   if (unavailable) src.unavailable = unavailable;
+  if (incomplete) src.incomplete = incomplete;
   return src;
 }
 
@@ -108,11 +140,14 @@ export async function createFulltextSource(
     return emptySource(
       `Zotero's full-text index could not be listed (${why}). The index was built from metadata only. ` +
         'Full-text indexing needs either the Zotero desktop app running, or a cloud API key with file access.',
+      `Zotero's full-text index could not be listed: ${why}`,
     );
   }
 
   const total = Object.keys(withText).length;
   if (total === 0) {
+    // Complete, and empty: Zotero was asked and answered. Not `incomplete`, so an update
+    // over a library nobody has opened a PDF in goes on stamping normally.
     return emptySource(
       'Zotero reports no attachments with extracted full text in this library, so there was nothing to index. ' +
         'Zotero extracts a PDF the first time it is opened in the app; open some, then rebuild.',
@@ -127,6 +162,8 @@ export async function createFulltextSource(
   /** The reverse of `byItem`: what `/fulltext?since=` answers in, mapped to what we index. */
   const parentOf = new Map<string, string>();
   let mapped = 0;
+  /** What this map is missing, if anything; becomes `incomplete` on the source. */
+  let incomplete: string | undefined;
   try {
     let start = 0;
     for (let page = 0; page < MAX_ATTACHMENT_PAGES && mapped < total; page++) {
@@ -158,15 +195,27 @@ export async function createFulltextSource(
     const why = e instanceof Error ? e.message : String(e);
     // Whatever was mapped before the failure is still usable; only say so when nothing was.
     if (mapped === 0) {
-      return emptySource(`Attachments could not be listed (${why}). The index was built from metadata only.`);
+      return emptySource(
+        `Attachments could not be listed (${why}). The index was built from metadata only.`,
+        `attachments could not be listed: ${why}`,
+      );
     }
+    // Usable, but no longer able to say that an item it does not hold has no text: the item
+    // may simply sit on the pages this crawl never reached (#67).
+    incomplete = `the attachment map stopped early after ${mapped}/${total} attachment(s): ${why}`;
     ctx.logger.warn(`Full-text mapping stopped early after ${mapped}/${total} attachments: ${why}`);
   }
 
   let failures = 0;
   const textFor = async (itemKey: string): Promise<string | undefined> => {
     const keys = byItem.get(itemKey);
-    if (!keys) return undefined;
+    // Not in the map. Over a complete map that means the item has no extracted text, which
+    // is an answer. Over one that stopped early it means nothing at all, and answering "no
+    // text" would let an update index that over the body it already holds (#67).
+    if (!keys) {
+      if (incomplete) throw new Error(incomplete);
+      return undefined;
+    }
     const parts: string[] = [];
     let used = 0;
     for (const key of keys) {
@@ -176,14 +225,19 @@ export async function createFulltextSource(
         const ft = await ctx.router.getFullText(key, { library, backend });
         content = typeof ft?.content === 'string' ? ft.content : '';
       } catch (e) {
-        // One unreadable attachment must not abort the build: skip it, and say so once.
+        const why = e instanceof Error ? e.message : String(e);
+        // One unreadable attachment must not abort the build, and it does not: every caller
+        // catches this per item and carries on. What it must not do either is come back as
+        // the `undefined` an item with no extracted text gets, because that answer is
+        // indexed over the body text the item already has and stamped past (#67). The
+        // item's other attachments are not read: half a body indexed under this item's
+        // `#f<n>` ids would look complete to the resume filter and to the next update.
         if (failures++ === 0) {
           ctx.logger.warn(
-            `Could not read full text for attachment ${key}: ${e instanceof Error ? e.message : String(e)}. ` +
-              'Those items are indexed from metadata only.',
+            `Could not read full text for attachment ${key}: ${why}. Those items are indexed from metadata only.`,
           );
         }
-        continue;
+        throw new Error(why);
       }
       if (!content) continue;
       const slice = maxChars > 0 ? content.slice(0, maxChars - used) : content;
@@ -208,5 +262,6 @@ export async function createFulltextSource(
     },
     maxVersion,
     readFailures: () => failures,
+    ...(incomplete ? { incomplete } : {}),
   };
 }

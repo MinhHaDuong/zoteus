@@ -463,6 +463,13 @@ export abstract class SearchIndexBase implements SearchIndex {
   /** True when the store already holds attachment body passages for this item. */
   protected abstract hasFulltext(itemKey: string): boolean;
   /**
+   * Ids of one item's body passages. Asked per item rather than for the whole index, unlike
+   * the own-words twin below, because there are orders of magnitude more of these: it is
+   * only ever called for the handful of items whose attachments an update could not read,
+   * and what it finds is put straight back after the upsert (#67).
+   */
+  protected abstract fulltextPassageIds(itemKey: string): string[];
+  /**
    * Ids of the passages that came from the reader's own words. Bounded by those passages
    * (thousands) rather than by the index (which is full-text passages in their hundreds of
    * thousands), and it is what lets an update notice a note that was DELETED: deleting one
@@ -1630,6 +1637,20 @@ export abstract class SearchIndexBase implements SearchIndex {
      * a gap here withholds the stamp, so the next update repeats this delta (#63).
      */
     let ownWordsGap: string | undefined;
+    /**
+     * Why this update could not read the attachment body text of items the DELTA carried,
+     * once it could not. Same rule and same remedy as the own-words gap: the stamp stays
+     * where it was, so the next update carries those items again (#67).
+     */
+    let fulltextGap: string | undefined;
+    /**
+     * The same, for text the catch-up could not read. That work is on the other sequence
+     * (#26), so it withholds the other cursor: these items are in no item delta, and only
+     * `/fulltext?since=` will ever offer them again.
+     */
+    let fulltextStale: string | undefined;
+    /** Items either of the two could not read, for the sentence that reports the gap. */
+    let fulltextFailed = 0;
 
     const maybeLog = (): void => {
       if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
@@ -1647,7 +1668,19 @@ export abstract class SearchIndexBase implements SearchIndex {
         if (!crawlVersion && page.lastModifiedVersion) crawlVersion = page.lastModifiedVersion;
         const pageItems = page.items ?? [];
         if (pageItems.length === 0) break;
-        const texts = await this.fulltextForPage(pageItems, opts, token, fulltextLimit);
+        // The items on this page whose body text could NOT be read, which is not the answer
+        // an item with no extracted text gives. The upsert below would replace their body
+        // passages with that nothing, and the stamp would move past them although their
+        // attachments never change in Zotero, so no later delta would ever revisit them
+        // (#67). Their indexed body text is read back here and put back after the upsert,
+        // and the gap withholds the stamp so the next update reads them again.
+        const failedText = new Map<string, string>();
+        const texts = await this.fulltextForPage(pageItems, opts, token, fulltextLimit, failedText);
+        if (failedText.size) {
+          fulltextFailed += failedText.size;
+          fulltextGap ??= `the attachment text of the changed items could not be read (${[...failedText.values()][0]})`;
+        }
+        const keptText = failedText.size ? this.fulltextRecords(failedText.keys()) : undefined;
         // This page's own words, or undefined when they cannot be trusted: the read threw, or
         // the census opened degraded under it (see noteOwnWordsUnavailable). A degraded
         // census answers "no own words" for an item exactly as it would for a reader who
@@ -1691,11 +1724,11 @@ export abstract class SearchIndexBase implements SearchIndex {
           // item and re-embedded only where the store cannot answer their vector: the
           // changed items' notes, once, against a note that stops being findable because a
           // request about something else failed.
-          for (const rec of kept?.get(key) ?? []) {
-            const back = { ...rec, title: this.itemTitle(key) ?? rec.title };
-            this.putPassage(back);
-            if (this.hasEmbedder && !this.adoptVector(back)) pending.push(back);
-          }
+          this.restorePassages(kept?.get(key), key, pending);
+          // And the body text, on the same terms, when this item's attachments could not be
+          // read: an item whose PDF the desktop app was too busy to serve keeps the body
+          // passages it has rather than being reduced to its metadata (#67).
+          this.restorePassages(keptText?.get(key), key, pending);
           known.add(key);
           refreshed.add(key);
           this.itemsFetched++;
@@ -1712,6 +1745,8 @@ export abstract class SearchIndexBase implements SearchIndex {
         const catchUp = await this.fulltextCatchUp(opts, known, refreshed, pending, token, fulltextLimit);
         fulltextCursor = catchUp.version;
         caughtUp = catchUp.items;
+        fulltextStale ??= catchUp.gap;
+        fulltextFailed += catchUp.failed;
       }
 
 
@@ -1773,8 +1808,35 @@ export abstract class SearchIndexBase implements SearchIndex {
           'repeats this delta and retries them.';
         this.opts.logger?.warn(this.ownWordsUnavailable);
       }
+      if ((fulltextGap || fulltextStale) && !token.cancelled) {
+        // The full-text half of the same rule, split over the two sequences it has to
+        // withhold. An item the DELTA carried is offered again only by another delta, so
+        // its gap holds the stamp; text the CATCH-UP could not read is offered again only
+        // by `/fulltext?since=`, so its gap holds that cursor instead (#26). Either way the
+        // body text already indexed stays exactly where it is (#67).
+        const parts: string[] = [];
+        if (fulltextGap) {
+          parts.push(
+            `${fulltextGap}, so the version stamp stayed at ${opts.backend} library version ${fromVersion} and ` +
+              'the next action:"update" repeats this delta',
+          );
+        }
+        if (fulltextStale) {
+          parts.push(
+            `${fulltextStale}, so the full-text cursor stayed at ${fulltextCursor} and the next action:"update" ` +
+              'asks Zotero for that text again',
+          );
+        }
+        // The count is left out when nothing was read at all (a map that could not be
+        // opened fails before any item is asked), rather than reported as zero items.
+        const scope = fulltextFailed ? ` for ${fulltextFailed} item(s)` : '';
+        this.fulltextUnavailable =
+          `Attachment full text was NOT fully updated${scope}: ${parts.join('; ')}. ` +
+          'The body text already indexed was left as it was.';
+        this.opts.logger?.warn(this.fulltextUnavailable);
+      }
 
-      if (!token.cancelled && reconciled && crawlVersion && !ownWordsGap) {
+      if (!token.cancelled && reconciled && crawlVersion && !ownWordsGap && !fulltextGap) {
         this.libraryVersion = crawlVersion;
         this.libraryBackend = opts.backend;
         // An index stamped before the library stamp existed gets one here: the update just
@@ -1782,9 +1844,11 @@ export abstract class SearchIndexBase implements SearchIndex {
         if (opts.library) this.library = opts.library;
       }
       // The full-text cursor advances under the same rule as the stamp, and for the same
-      // reason: an update that did not finish must repeat this delta, not skip past it. An
-      // own-words gap does not hold it back: the two sequences are independent (#26), and
-      // the body text this update caught up is indexed whether or not the delta is repeated.
+      // reason: an update that did not finish must repeat this delta, not skip past it. A
+      // gap on the item sequence does not hold it back, whether it is own words or the body
+      // text of a changed item: the two sequences are independent (#26) and those items come
+      // back with the delta. What DOES hold it back is a read the catch-up itself missed,
+      // and `fulltextCatchUp` holds it by handing back the cursor it was given (#67).
       if (!token.cancelled && reconciled) this.fulltextVersion = fulltextCursor;
       // Inside the update's single transaction, like every other write it made: a delta
       // adds codes for the passages it added and nothing else, and a failure below rolls
@@ -1869,6 +1933,12 @@ export abstract class SearchIndexBase implements SearchIndex {
    *
    * Costs one request on a library where nothing has been extracted since. Items the delta
    * already refreshed are skipped: they were re-read whole, body text included.
+   *
+   * Returns the cursor to store, how many items it re-indexed, and, when a read in the loop
+   * failed or the map behind it was incomplete, why. The cursor it returns is then the one
+   * it was given: an item whose text this pass could not read is in no item delta (its
+   * attachment did not change), so `/fulltext?since=` is the only thing that will ever
+   * offer it again, and a cursor moved past it makes the miss permanent (#67).
    */
   private async fulltextCatchUp(
     opts: IncrementalUpdateOptions,
@@ -1877,7 +1947,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     pending: ChunkRecord[],
     token: { cancelled: boolean },
     limit: Semaphore,
-  ): Promise<{ version: number; items: number }> {
+  ): Promise<{ version: number; items: number; failed: number; gap?: string }> {
     const since = this.fulltextVersion;
     let answer;
     try {
@@ -1890,30 +1960,39 @@ export abstract class SearchIndexBase implements SearchIndex {
         `Zotero's full-text index could not be consulted (${e instanceof Error ? e.message : String(e)}), so ` +
           'newly extracted attachment text was not picked up by this update.',
       );
-      return { version: since, items: 0 };
+      return { version: since, items: 0, failed: 0 };
     }
     const version = Math.max(since, answer.version);
+    // The map that turned attachment keys into item keys could not be read in full, so some
+    // of what the probe named resolved to nothing for want of the map. Nothing is indexed
+    // over, but the cursor waits: over a readable map those items are named again (#67).
+    if (answer.incomplete) return { version: since, items: 0, failed: 0, gap: answer.incomplete };
     // An index written before this cursor existed cannot say which text is new, so the
     // catch-up is narrowed to its coverage GAP: items holding no body passages at all. It
     // is a one-off, because this update stores a cursor. And it is only run for an index
     // that already holds body text: turning `action:"update"` into the days-long full-text
     // crawl a metadata-only index has never had is not an update.
     const gapOnly = since === 0;
-    if (gapOnly && this.counts().fulltextPassages === 0) return { version, items: 0 };
+    if (gapOnly && this.counts().fulltextPassages === 0) return { version, items: 0, failed: 0 };
     const targets = [...answer.itemKeys].filter(
       (key) => known.has(key) && !refreshed.has(key) && !(gapOnly && this.hasFulltext(key)),
     );
     const batchSize = opts.embedBatchSize ?? DEFAULT_EMBED_BATCH_SIZE;
     const delayMs = opts.embedBatchDelayMs ?? 0;
     let items = 0;
+    /** Items named by the probe whose text could not be read, and the first reason why. */
+    const failed = new Map<string, string>();
     for (let i = 0; i < targets.length && !token.cancelled; i += PAGE_GROUP) {
       const group = targets
         .slice(i, i + PAGE_GROUP)
         .map((key) => ({ key, title: this.itemTitle(key) ?? '(untitled)' }));
-      const texts = await this.fulltextForKeys(group, opts, token, limit);
+      const texts = await this.fulltextForKeys(group, opts, token, limit, failed);
       for (let j = 0; j < group.length; j++) {
         if (token.cancelled) break;
         const text = texts?.[j];
+        // Nothing to write: either Zotero has since dropped this attachment's text, or the
+        // read failed, in which case `failed` holds the key and the cursor waits for it.
+        // Either way what the index holds for the item is left exactly as it is.
         if (!text) continue;
         // The item's own metadata passages are untouched: nothing about the item changed.
         // Its body passages are replaced wholesale, because their ids (`<key>#f<n>`) are
@@ -1926,7 +2005,15 @@ export abstract class SearchIndexBase implements SearchIndex {
       await this.embedPending(pending, token, batchSize, delayMs, false);
     }
     if (!token.cancelled) await this.embedPending(pending, token, batchSize, delayMs, true);
-    return { version, items };
+    if (failed.size) {
+      return {
+        version: since,
+        items,
+        failed: failed.size,
+        gap: `newly extracted attachment text could not be read (${[...failed.values()][0]})`,
+      };
+    }
+    return { version, items, failed: 0 };
   }
 
   /**
@@ -2098,12 +2185,18 @@ export abstract class SearchIndexBase implements SearchIndex {
   /**
    * Full text for one page of items, several attachments in flight, so the per-item round
    * trip does not serialize the whole crawl behind the network.
+   *
+   * A read that failed answers `undefined`, exactly as an item with no extracted text does,
+   * so that one unreadable PDF cannot abort the job. `failed` is how the two are told apart
+   * afterwards: the keys it collects are the items whose body text this page could NOT
+   * read, and what a caller does about them is the whole of #67.
    */
   private async fulltextForPage(
     batch: any[],
     opts: IncrementalBuildOptions,
     token: { cancelled: boolean },
     limit: Semaphore,
+    failed?: Map<string, string>,
   ): Promise<Array<string | undefined> | undefined> {
     if (!opts.fulltextFor || token.cancelled) return undefined;
     return Promise.all(
@@ -2116,7 +2209,9 @@ export abstract class SearchIndexBase implements SearchIndex {
           try {
             return await opts.fulltextFor!(key, item);
           } catch (e) {
-            this.opts.logger?.debug(`full text for ${key} skipped: ${e instanceof Error ? e.message : String(e)}`);
+            const why = e instanceof Error ? e.message : String(e);
+            failed?.set(key, why);
+            this.opts.logger?.debug(`full text for ${key} skipped: ${why}`);
             return undefined;
           }
         }),
@@ -2136,6 +2231,7 @@ export abstract class SearchIndexBase implements SearchIndex {
     opts: IncrementalBuildOptions,
     token: { cancelled: boolean },
     limit: Semaphore,
+    failed?: Map<string, string>,
   ): Promise<Array<string | undefined> | undefined> {
     if (!opts.fulltextFor || token.cancelled) return undefined;
     return Promise.all(
@@ -2145,9 +2241,9 @@ export abstract class SearchIndexBase implements SearchIndex {
           try {
             return await opts.fulltextFor!(entry.key);
           } catch (e) {
-            this.opts.logger?.debug(
-              `full text for ${entry.key} skipped: ${e instanceof Error ? e.message : String(e)}`,
-            );
+            const why = e instanceof Error ? e.message : String(e);
+            failed?.set(entry.key, why);
+            this.opts.logger?.debug(`full text for ${entry.key} skipped: ${why}`);
             return undefined;
           }
         }),
@@ -2345,6 +2441,40 @@ export abstract class SearchIndexBase implements SearchIndex {
       else out.set(itemKey, [rec]);
     }
     return out;
+  }
+
+  /**
+   * The body passages this index holds for these items, read back whole, so an upsert can
+   * carry them across when the attachments that would have replaced them cannot be read
+   * (#67). The own-words twin above walks the ids of every note in the index because that
+   * set is small; this one asks per item, because on a full-text index the same walk is
+   * hundreds of thousands of passages and only a handful of items ever fail a read.
+   */
+  private fulltextRecords(keys: Iterable<string>): Map<string, ChunkRecord[]> {
+    const out = new Map<string, ChunkRecord[]>();
+    for (const key of keys) {
+      if (!key) continue;
+      const recs: ChunkRecord[] = [];
+      for (const id of this.fulltextPassageIds(key)) {
+        const rec = this.passage(id);
+        if (rec) recs.push(rec);
+      }
+      if (recs.length) out.set(key, recs);
+    }
+    return out;
+  }
+
+  /**
+   * Put passages an upsert took out back as they were, re-titled after the item they hang
+   * off, and re-embedded only where the store cannot answer their vector from something it
+   * already holds.
+   */
+  private restorePassages(recs: ChunkRecord[] | undefined, itemKey: string, pending: ChunkRecord[]): void {
+    for (const rec of recs ?? []) {
+      const back = { ...rec, title: this.itemTitle(itemKey) ?? rec.title };
+      this.putPassage(back);
+      if (this.hasEmbedder && !this.adoptVector(back)) pending.push(back);
+    }
   }
 
   /** The notes and annotations this index currently holds, by the item they belong to. */
@@ -2600,6 +2730,14 @@ export class MemorySearchIndex extends SearchIndexBase {
 
   protected hasFulltext(itemKey: string): boolean {
     return this.fulltextItems.has(itemKey);
+  }
+
+  protected fulltextPassageIds(itemKey: string): string[] {
+    const ids: string[] = [];
+    for (const id of this.byItem.get(itemKey) ?? []) {
+      if (this.chunks.get(id)?.source === 'fulltext') ids.push(id);
+    }
+    return ids;
   }
 
   protected ownWordsPassageIds(): string[] {

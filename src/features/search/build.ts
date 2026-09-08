@@ -88,7 +88,9 @@ export function ownWordsNotice(s: IndexBuildStatus): string {
  */
 export function fulltextNotice(s: IndexBuildStatus): string {
   if (!s.fulltextEnabled || !s.fulltextReason) return '';
-  return ` Full-text indexing produced nothing: ${s.fulltextReason}`;
+  // "produced nothing" is the build's case. An update that could not read part of the body
+  // text has plenty of it indexed and a gap in it, and its reason says so itself (#67).
+  return s.fulltextPassages > 0 ? ` ${s.fulltextReason}` : ` Full-text indexing produced nothing: ${s.fulltextReason}`;
 }
 
 /**
@@ -556,6 +558,10 @@ function crawlOptions(
     (source ??= createFulltextSource(ctx, lib, { maxChars, backend }).then((src) => {
       opened = src;
       if (src.unavailable) ctx.search.noteFulltextUnavailable(src.unavailable);
+      // A map missing part of the library is reported like one missing all of it: the items
+      // it never reached look exactly like items with no extracted text, and indexing that
+      // answer would erase body text an earlier run indexed (#67).
+      else if (src.incomplete) ctx.search.noteFulltextUnavailable(src.incomplete);
       else ctx.logger.info(`Full-text indexing: ${src.attachments} attachment(s) over ${src.items} item(s).`);
       return src;
     }));
@@ -581,7 +587,13 @@ function crawlOptions(
         const keys = Object.keys(extracted);
         if (!keys.length) return { itemKeys: new Set<string>(), version: since };
         const version = Object.values(extracted).reduce((hi, v) => (v > hi ? v : hi), since);
-        return { itemKeys: (await openSource()).itemsFor(keys), version };
+        const src = await openSource();
+        const itemKeys = src.itemsFor(keys);
+        // The map is what turns those attachment keys into items, and a map that could not
+        // be read drops them silently: indistinguishable, from here, from attachments that
+        // belong outside this view. Say so, and the cursor waits for a readable map (#67).
+        const incomplete = src.incomplete ?? (itemKeys.size === 0 ? src.unavailable : undefined);
+        return { itemKeys, version, ...(incomplete ? { incomplete } : {}) };
       }
     : undefined;
   /**

@@ -301,6 +301,7 @@ interface Statements {
   deleteFts: StatementSync;
   itemPassages: StatementSync;
   itemFulltext: StatementSync;
+  itemFulltextIds: StatementSync;
   itemOwnWords: StatementSync;
   ownWordsIds: StatementSync;
   deleteOwnWords: StatementSync;
@@ -999,6 +1000,7 @@ export class SqliteSearchIndex extends SearchIndexBase {
       itemFulltext: db.prepare(
         "SELECT pid, text, vector IS NOT NULL AS has_vector FROM passages WHERE item_key = ? AND source = 'fulltext'",
       ),
+      itemFulltextIds: db.prepare("SELECT id FROM passages WHERE item_key = ? AND source = 'fulltext'"),
       // Both own-words statements go through `passages_source`, so they read the notes and
       // annotations alone and never the body passages they sit beside — which on a
       // full-text index is the difference between thousands of rows and hundreds of
@@ -1362,6 +1364,10 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // The resident set refreshCounts/putPassage maintain, so a resume's worklist filter
     // costs no query per item.
     return this.fulltextKeys.has(itemKey);
+  }
+
+  protected fulltextPassageIds(itemKey: string): string[] {
+    return (this.stmts.itemFulltextIds.all(itemKey) as Array<{ id: string }>).map((r) => r.id);
   }
 
   /**

@@ -130,6 +130,9 @@ export class CorruptSearchIndex extends SearchIndexBase {
   protected hasFulltext(): boolean {
     return false;
   }
+  protected fulltextPassageIds(): string[] {
+    return [];
+  }
   protected clearFulltext(): void {
     throw this.failure;
   }
