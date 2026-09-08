@@ -194,6 +194,122 @@ describe('zotero_semantic_search with no vectors', () => {
   });
 });
 
+describe('zotero_semantic_search with vectors but nothing to embed the query', () => {
+  /**
+   * The state an index reaches when it was built with an embedder and the server was then
+   * restarted with ZOTEUS_EMBEDDINGS=off: the vectors are still on disk and are kept (they
+   * are not known-wrong, only unusable), so `hasVectors` is true and the 0-vector refusal
+   * does not fire. Semantic mode still cannot rank, because ranking needs the query
+   * embedded too — and `embedderNotice` is deliberately silent about a provider that was
+   * switched off on purpose, so nothing else explains the empty page either.
+   */
+  async function vectorsWithoutEmbedder(configured: string, unavailable?: string): Promise<SearchIndex> {
+    const embedder: EmbeddingProvider = {
+      name: 'openai',
+      model: 'text-embedding-3-small',
+      embed: async (texts) => texts.map(() => [1, 0, 0]),
+    };
+    const built = new MemorySearchIndex({ embedder, configured: 'openai', logger: silentLogger });
+    await built.build(items);
+    // The provenance stamp is kept, not stripped: a server with no embedder of its own has
+    // nothing to compare it against, so reconcileVectorProvenance leaves the rows alone and
+    // vectorEmbedderId still names what produced them — which is what the message quotes.
+    const saved = JSON.parse(JSON.stringify(built.toJSON()));
+
+    const search = new MemorySearchIndex({ embedder: null, configured, unavailable, logger: silentLogger });
+    search.loadFromJSON(saved);
+    return search;
+  }
+
+  it('errors instead of answering "No matches" when embeddings are switched off', async () => {
+    const search = await vectorsWithoutEmbedder('off');
+    expect(search.hasVectors).toBe(true);
+    expect(search.hasEmbedder).toBe(false);
+
+    const res = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, { search } as any);
+
+    // The whole point: an empty hit list here is indistinguishable from a library that
+    // holds nothing on the subject, and no notice covers a deliberate `off`.
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).not.toMatch(/^No matches/);
+    expect(res.content[0].text).toMatch(/ZOTEUS_EMBEDDINGS/);
+    expect(res.content[0].text).toMatch(/mode:"keyword"/);
+    // The index knows what produced the vectors it is still holding; the way back is to
+    // that provider, not to any provider, so the message says which.
+    expect(res.content[0].text).toContain('openai:text-embedding-3-small');
+    expect(res.structuredContent?.hits).toEqual([]);
+    expect(res.structuredContent?.embedderConfigured).toBe('off');
+    expect(res.structuredContent?.embedderActive).toBe(false);
+  });
+
+  it('names the provider and its cause when one was configured but is not running', async () => {
+    const search = await vectorsWithoutEmbedder('local', missingTransformersHint({ dist: 'mcpb' }));
+
+    const res = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, { search } as any);
+
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/@huggingface\/transformers/);
+    expect(res.structuredContent?.embedderConfigured).toBe('local');
+  });
+
+  it('still answers in auto and keyword mode, which do not need the query embedded', async () => {
+    const search = await vectorsWithoutEmbedder('off');
+
+    for (const args of [{ q: 'deep learning' }, { q: 'deep learning', mode: 'keyword' as const }]) {
+      const res = await semanticSearch.handler(args, { search } as any);
+      expect(res.isError).toBeUndefined();
+      expect((res.structuredContent?.hits as any[]).length).toBeGreaterThan(0);
+    }
+  });
+
+  /**
+   * The refusal must not fire on a provider that is merely *unhealthy*, and the two are
+   * easy to conflate: `embedderActive` goes false on the first query-time failure and stays
+   * false until the next build or update, because `noteEmbedFailure` records only the first
+   * edge and nothing clears it on a later success. `query()` does not consult that flag —
+   * it keys on the provider object — so it re-embeds and ranks again the moment the
+   * provider recovers. A refusal keyed on the flag would convert one rate-limit blip into a
+   * mode that stays dead until the user rebuilds the index, while `auto` went on embedding
+   * the same query successfully.
+   *
+   * This test passes before the change as well as after: it is not the red step, it is the
+   * guard on the one behaviour the fix could plausibly break, and nothing upstream pinned
+   * it.
+   */
+  it('keeps ranking after a transient embedder failure, without an index rebuild', async () => {
+    let failing = false;
+    let embedCalls = 0;
+    const flaky: EmbeddingProvider = {
+      name: 'openai',
+      model: 'text-embedding-3-small',
+      embed: async (texts) => {
+        embedCalls += 1;
+        if (failing) throw new Error('429 rate limited');
+        return texts.map(() => [1, 0, 0]);
+      },
+    };
+    const search = new MemorySearchIndex({ embedder: flaky, configured: 'openai', logger: silentLogger });
+    await search.build(items);
+
+    failing = true;
+    const during = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, { search } as any);
+    // The failing query itself is not refused: the notice is what reports it, as before.
+    expect(during.isError).toBeUndefined();
+    expect(during.content[0].text).toMatch(/Semantic ranking is OFF/);
+    expect(search.embedderActive).toBe(false); // and the flag is now stuck false
+
+    failing = false;
+    const before = embedCalls;
+    const after = await semanticSearch.handler({ q: 'deep learning', mode: 'semantic' }, { search } as any);
+
+    expect(after.isError).toBeUndefined();
+    expect((after.structuredContent?.hits as any[]).length).toBeGreaterThan(0);
+    // Ranked because the query was embedded again, not because a keyword ranker answered:
+    // in mode:"semantic" the keyword side is closed, so a hit here can only be a vector hit.
+    expect(embedCalls).toBe(before + 1);
+  });
+});
+
 describe('local-embedding diagnostics name the path that was searched (#38)', () => {
   /** A directory that resolves nothing: the shape of a mistyped or stale settings value. */
   const emptyRoot = () => mkdtempSync(join(tmpdir(), 'zoteus-wrong-'));
