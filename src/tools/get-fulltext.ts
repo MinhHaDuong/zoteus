@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
 import { rankPassages, approxPage, type Passage } from '../features/fulltext/passages.js';
 import {
@@ -186,10 +186,7 @@ const getFulltext: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const library: LibraryRef | undefined = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : undefined;
-
+    const library: LibraryRef | undefined = optionalLibrary(args);
     const resolved = await resolveAttachment(ctx, args.item_key, library);
     if ('error' in resolved) return err(resolved.error);
 

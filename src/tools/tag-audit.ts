@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { resolveCallerPath, CallerPathError } from '../lib/caller-path.js';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
 import {
   auditOffTaxonomy,
@@ -106,9 +106,7 @@ const tagAudit: ToolDefinition = {
       vocab = parsed.data;
     } else return err('Provide a `vocabulary` object or a `vocabulary_path`.');
 
-    const library: LibraryRef | undefined = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : undefined;
+    const library: LibraryRef | undefined = optionalLibrary(args);
     const lib = library ?? ctx.router.defaultLibrary();
     const cap = args.limit ?? 50;
 

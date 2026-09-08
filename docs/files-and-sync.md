@@ -3,7 +3,9 @@
 M4 rounds out library coverage with five tools; `zotero_attach_file` and `zotero_annotate` were added later and write through the Zotero desktop app when one is reachable, falling back to the cloud Web API when it is not.
 
 ## `zotero_groups`
-Lists the group libraries your key can access (id, name, type, item count, edit permissions). Pass a returned id as `library_id` (with `library_type:"group"`) to other tools to operate on a group library.
+Lists the group libraries your key can access (id, name, type, item count, edit permissions). Pass a returned id as `library_id` (with `library_type:"group"`) to other tools to operate on a group library. `library_type` alone does not address a group: without an id the call is refused rather than falling back to your personal library.
+
+Reading a group needs the key to have *read* access to it (or a Zotero 10+ desktop app that holds the group, which serves reads with no key at all). **Writing** to one always goes to the cloud Web API and needs a key with write access to that group, whatever the desktop app is doing: see [Group libraries](./writing.md#group-libraries).
 
 ## `zotero_export`
 Exports items in a machine-readable bibliographic format and returns the raw text:

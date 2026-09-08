@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 import {
   progressLine,
   startIndexBuild,
@@ -146,9 +146,7 @@ const indexTool: ToolDefinition = {
         `A build is already in progress — ${progressLine(s)}. Poll action:"status" instead of starting another build.`,
       );
     }
-    const lib: LibraryRef | undefined = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : undefined;
+    const lib: LibraryRef | undefined = optionalLibrary(args);
     const maxItems = Math.min(args.limit ?? ctx.config.indexMaxItems, ctx.config.indexMaxItems);
     const fulltext = args.fulltext ?? ctx.config.indexFulltext;
     const ownWords = args.own_words ?? ctx.config.indexOwnWords;

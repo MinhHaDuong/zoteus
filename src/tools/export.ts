@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
+import { optionalLibrary } from '../registry/registry.js';
 import { BbtClient } from '../api/bbt-client.js';
 
 const EXPORT_FORMATS = [
@@ -37,10 +38,7 @@ const exportTool: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const lib = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : ctx.router.defaultLibrary();
-
+    const lib = optionalLibrary(args) ?? ctx.router.defaultLibrary();
     if (args.format === 'better-biblatex') {
       const bbt = ctx.local ? new BbtClient({ port: ctx.config.localPort }) : undefined;
       if (bbt && (await bbt.ping())) {

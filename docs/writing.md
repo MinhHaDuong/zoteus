@@ -4,7 +4,7 @@ Writes to your **personal** library go straight to the running Zotero desktop ap
 
 ## Tools
 
-"Route" is the order Zoteus tries: `desktop` means the running Zotero app for the personal library, `cloud` the Web API v3. Passing `library_id` (a group library) always routes to the cloud.
+"Route" is the order Zoteus tries: `desktop` means the running Zotero app for the personal library, `cloud` the Web API v3. Passing `library_id` (a group library) always routes to the cloud; see [Group libraries](#group-libraries) below for what that needs.
 
 | Tool | What it does | Route | Safety |
 |---|---|---|---|
@@ -19,6 +19,41 @@ Writes to your **personal** library go straight to the running Zotero desktop ap
 | `zotero_attach_file` | Store a file (`url`, or `path` on the Zoteus machine) as a stored attachment under an existing item. Returns the new attachment key. | desktop → cloud | non-destructive |
 
 `zotero_import` with `save_to_library:true` also saves through the desktop app (both desktop paths), including `attach_url` to stream a PDF into the same save session and `collection_key` targeting — see [`citations.md`](./citations.md). Without a reachable desktop it saves through the cloud, and `attach_url` goes up through Zotero file storage there.
+
+## Group libraries
+
+**Yes, adding items to a group library works, but only through the cloud Web API, and only with a key that may write that group.** The Zotero desktop app cannot stand in for it, however it is configured: its local-API writes address `…/api/users/0/…` and the connector protocol saves into the library the app has open, so both write your **personal** library and nothing else. That holds even for a group the desktop is holding and *reading* key-free on Zotero 10+: reads route to the app, writes to the cloud.
+
+So a group write needs all three of these, and each one fails differently:
+
+1. **A cloud API key.** `ZOTERO_API_KEY`, created at [zotero.org/settings/keys](https://www.zotero.org/settings/keys). With no key at all, a group write stops before any request and says so.
+2. **Write access to that group on the key.** A key's group access is separate from its personal-library access: on the key's settings page, either tick "Read/Write" under **All Groups**, or grant it per group. Zoteus reads the key's own permission map at startup, so a key that is read-only for the group is refused locally, naming the group, and no request is sent.
+3. **Permission to edit the group's library on zotero.org.** The key's owner must be a member, and the group's **Library Editing** setting must allow it (a group can be set so only admins may edit). Nothing on the key overrides that, so this one surfaces as an HTTP 403 from Zotero.
+
+### Addressing a group
+
+A group is addressed by its **numeric library id**, which is not the same thing as a collection key:
+
+- **Library id**: the group itself, e.g. `2405685`. Get it from `zotero_groups`, which lists every group the key can reach with its `id`, `numItems` and `libraryEditing`. Pass it as `library_id` (with `library_type: "group"`) to any tool. `library_type: "group"` on its own is **not** enough: without an id Zoteus refuses the call rather than quietly using your personal library.
+- **Collection key**: an 8-character key like `ABCD1234`, naming a collection *inside* one library. A collection key from your personal library means nothing in a group. List a group's own collections with `zotero_list_collections` passing the same `library_id`, then use those keys in `collections` on the item, or in `zotero_manage_collections`.
+
+```jsonc
+// 1. find the group
+// zotero_groups  ->  [{ "id": 2405685, "name": "Review team", "libraryEditing": "members" }]
+
+// 2. list that group's collections (not your own)
+// zotero_list_collections
+{ "library_type": "group", "library_id": 2405685 }
+
+// 3. create the item in the group, in one of its collections
+// zotero_create_items
+{ "library_type": "group", "library_id": 2405685,
+  "items": [{ "itemType": "journalArticle", "title": "…", "collections": ["ABCD1234"] }] }
+```
+
+To make a group the default for every call instead of repeating it, pin it in the environment: `ZOTERO_LIBRARY_TYPE=group` and `ZOTERO_LIBRARY_ID=2405685`. Per-call `library_id` still overrides it.
+
+Items written to a group appear in the desktop app on its next sync, not instantly: the write went to zotero.org, and the app pulls it down on its own schedule (or when you hit Sync).
 
 ## Desktop write paths
 

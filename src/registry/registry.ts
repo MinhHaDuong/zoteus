@@ -138,18 +138,41 @@ export function ok(structured: Record<string, unknown>, summary: string): ToolHa
   };
 }
 
+/** The two arguments every library-addressable tool accepts. */
+export interface LibraryArgs {
+  library_type?: 'user' | 'group';
+  library_id?: number;
+}
+
+/**
+ * The library named by the caller's own arguments, or undefined when they named none.
+ *
+ * A group is addressed by its numeric id, never by `library_type` alone: `library_type`
+ * only says how to read `library_id`. Asking for a group without one used to fall through
+ * to the default library, so a call that plainly said "the group" silently read from (or
+ * wrote to) the personal library and reported success (#74). Saying so is the whole fix:
+ * the id is one `zotero_groups` call away.
+ */
+export function optionalLibrary(args?: LibraryArgs): LibraryRef | undefined {
+  if (args?.library_id) return { type: args.library_type ?? 'group', id: args.library_id };
+  if (args?.library_type === 'group') {
+    throw new Error(
+      'A group library is addressed by its numeric id: pass library_id as well as library_type:"group". ' +
+        'Call zotero_groups to list the groups this API key can reach, then use the `id` it returns. ' +
+        '(Without an id this would have used the personal library instead.)',
+    );
+  }
+  return undefined;
+}
+
 /**
  * The library an operation acts on, decided once so that every step of it (the parent and
  * children reads, the attachment lookup, the write) names the same one: the caller's
  * explicit `library_type`/`library_id` when given, otherwise the configured default
  * (ZOTERO_LIBRARY_TYPE / ZOTERO_LIBRARY_ID), otherwise the key's own personal library.
  */
-export function resolveLibrary(
-  ctx: ToolContext,
-  args?: { library_type?: 'user' | 'group'; library_id?: number },
-): LibraryRef {
-  if (args?.library_id) return { type: args.library_type ?? 'group', id: args.library_id };
-  return ctx.router.defaultLibrary();
+export function resolveLibrary(ctx: ToolContext, args?: LibraryArgs): LibraryRef {
+  return optionalLibrary(args) ?? ctx.router.defaultLibrary();
 }
 
 /**
@@ -162,18 +185,84 @@ export function isPersonalLibrary(lib: LibraryRef): boolean {
   return lib.type === 'user';
 }
 
+const KEY_SETTINGS_URL = 'https://www.zotero.org/settings/keys';
+
 /**
- * `lib`, once there is a cloud Web API to write it to. Group libraries (and any library the
- * running desktop app cannot reach) are cloud-only, so this throws a friendly error when no
- * API key is configured. The thrown message is surfaced to the model as an isError result.
+ * What the key's own `access` map says is missing for a WRITE to `lib`, or null when it
+ * says nothing against it.
+ *
+ * `/keys/current` reports exactly what the key may do:
+ *
+ *   {"user": {"library": true, "files": true, "notes": true, "write": true},
+ *    "groups": {"all": {"library": true, "write": true}, "12345": {"library": true}}}
+ *
+ * `groups.all` is the default for every group the key's owner belongs to, and a numeric
+ * entry overrides it for that one group. A missing `write` means read-only.
+ *
+ * Checking this BEFORE the request is the point. Without it a group write that the key was
+ * never allowed to make travelled to api.zotero.org and came back 403 "Access denied. Your
+ * API key may lack permission for this library or operation": true, unactionable, and
+ * indistinguishable from the other reasons a group refuses a write, so a model would
+ * simply try again (#74). Here the answer is known locally and names the remedy.
+ *
+ * Deliberately silent when the map is absent or empty: it is evidence, not a schema, and
+ * an older/partial answer must not invent a refusal the server would not make.
+ */
+export function missingWriteAccess(
+  info: { userID?: number; access?: Record<string, unknown> },
+  lib: LibraryRef,
+): string | null {
+  const access = info.access;
+  if (!access || typeof access !== 'object') return null;
+  const user = access.user as { write?: boolean } | undefined;
+  const groups = access.groups as Record<string, { library?: boolean; write?: boolean }> | undefined;
+
+  if (lib.type === 'user') {
+    if (info.userID !== undefined && lib.id !== 0 && lib.id !== info.userID) {
+      return `This API key belongs to user ${info.userID}, so it cannot write to users/${lib.id} (another account's personal library). Only group libraries are shared between accounts.`;
+    }
+    if (user && user.write !== true) {
+      return `This API key is read-only for your personal library. Grant it "Allow write access" at ${KEY_SETTINGS_URL}, or let the running Zotero desktop app take the write instead (no key needed).`;
+    }
+    return null;
+  }
+
+  // A group target. `groups` absent while the map says anything at all means the key was
+  // created with no group access whatsoever, which is the default on zotero.org.
+  if (!groups || typeof groups !== 'object') {
+    if (!user) return null;
+    return `This API key has no access to any group library, so it cannot write to group ${lib.id}. Edit the key at ${KEY_SETTINGS_URL} and give it read/write access to that group (or to all groups).`;
+  }
+  const entry = groups[String(lib.id)] ?? groups.all;
+  if (!entry) {
+    return `This API key has no access to group ${lib.id}. Check the id with zotero_groups, then, at ${KEY_SETTINGS_URL}, give the key read/write access to that group, and make sure the key's owner is a member of it.`;
+  }
+  if (entry.write !== true) {
+    return `This API key has read-only access to group ${lib.id}. Change it to read/write at ${KEY_SETTINGS_URL}. Note that a group can also be configured so only admins may edit the library, which no key setting overrides.`;
+  }
+  return null;
+}
+
+/**
+ * `lib`, once there is a cloud Web API to write it to AND the key is allowed to write it.
+ * Group libraries (and any library the running desktop app cannot reach) are cloud-only,
+ * so this throws a friendly error when no API key is configured, and a second, more
+ * specific one when the key that is configured cannot write this particular library. Both
+ * messages are surfaced to the model as an isError result.
  */
 export function requireCloud(ctx: ToolContext, lib: LibraryRef): LibraryRef {
-  if (!ctx.capabilities.cloud) {
+  const cloud = ctx.capabilities.cloud;
+  if (!cloud) {
     throw new Error(
-      'This operation writes to a cloud/group library and requires a cloud API key (set ZOTERO_API_KEY). ' +
-        'For the personal library, writes can instead go through the running Zotero 10+ desktop app (local API).',
+      lib.type === 'group'
+        ? `Writing to group library ${lib.id} needs a Zotero cloud API key with write access to that group (set ZOTERO_API_KEY; create one at ${KEY_SETTINGS_URL}). ` +
+          'The Zotero desktop app cannot stand in for it: its local API and the connector protocol both write your personal library only, so group writes always go through the cloud Web API, even for a group the desktop is holding.'
+        : 'This operation writes to a cloud/group library and requires a cloud API key (set ZOTERO_API_KEY). ' +
+          'For the personal library, writes can instead go through the running Zotero 10+ desktop app (local API).',
     );
   }
+  const missing = missingWriteAccess(cloud, lib);
+  if (missing) throw new Error(missing);
   return lib;
 }
 
@@ -182,10 +271,7 @@ export function requireCloud(ctx: ToolContext, lib: LibraryRef): LibraryRef {
  * Until #61 this ignored the configured default and answered with the key's own user id,
  * so a group configured as the default was written to as the personal library.
  */
-export function requireCloudLibrary(
-  ctx: ToolContext,
-  args?: { library_type?: 'user' | 'group'; library_id?: number },
-): LibraryRef {
+export function requireCloudLibrary(ctx: ToolContext, args?: LibraryArgs): LibraryRef {
   return requireCloud(ctx, resolveLibrary(ctx, args));
 }
 

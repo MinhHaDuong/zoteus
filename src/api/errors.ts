@@ -29,7 +29,16 @@ export function actionableMessage(status: number, body: string, headers: Headers
     case 400:
       return `Zotero rejected the request as malformed${detail}. Check field names and itemType against the schema (zotero_schema).`;
     case 403:
-      return `Access denied${detail}. Your API key may lack permission for this library or operation.`;
+      // Three different things wear this status, and the remedy differs for each, so name
+      // all three rather than the one (#74). Group writes are where it usually lands: the
+      // key's group scope and the group's own edit setting are separate gates, and
+      // "Access denied" alone left callers retrying a request that can never succeed.
+      return (
+        `Access denied${detail}. For a group library this is one of: your API key has no write access to that group ` +
+        `(edit it at https://www.zotero.org/settings/keys), the key's owner is not a member of the group, or the group ` +
+        `itself only lets admins edit the library (check "Library Editing" in the group's settings on zotero.org). ` +
+        `For your personal library it means the key is read-only. zotero_groups shows which groups the key can reach.`
+      );
     case 404:
       return `Not found${detail}. The item/collection key or library may be wrong.`;
     case 409:

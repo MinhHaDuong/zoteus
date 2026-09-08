@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, requireCloudLibrary } from '../registry/registry.js';
+import { ok, optionalLibrary, requireCloudLibrary } from '../registry/registry.js';
 import { uploadFile, downloadFile } from '../api/attachments.js';
 import { AttachmentDownloadError, readAttachmentSource, storeCloudAttachment } from '../features/attachments/store.js';
 
@@ -77,9 +77,7 @@ const attachment: ToolDefinition = {
 
     if (args.action === 'info') {
       if (!args.item_key) return err('`item_key` is required for info.');
-      const library = args.library_id
-        ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-        : undefined;
+      const library = optionalLibrary(args);
       const item = await ctx.router.getItem(args.item_key, { library });
       return ok({ attachment: item }, `Attachment ${args.item_key}: ${item?.data?.filename ?? item?.data?.title ?? '(unnamed)'}.`);
     }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, requireCloudLibrary } from '../registry/registry.js';
+import { ok, optionalLibrary, requireCloudLibrary } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
 
 function err(text: string): ToolHandlerResult {
@@ -29,7 +29,11 @@ const manageCollections: ToolDefinition = {
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     if (args.action === 'list') {
-      const r = await ctx.router.listCollections({});
+      // Routed like every other read, but in the library the caller named: listing the
+      // personal library's collections for a call that named a group handed the model
+      // collection keys that do not exist there, and the create that followed failed or
+      // landed in the wrong place (#74).
+      const r = await ctx.router.listCollections({ library: optionalLibrary(args) });
       const collections = r.data.map((c: any) => ({
         key: c.key ?? c.data?.key,
         name: c.data?.name,

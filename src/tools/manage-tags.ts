@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, requireCloudLibrary } from '../registry/registry.js';
+import { ok, requireCloudLibrary, resolveLibrary } from '../registry/registry.js';
 
 function err(text: string): ToolHandlerResult {
   return { content: [{ type: 'text', text }], isError: true };
@@ -28,7 +28,10 @@ const manageTags: ToolDefinition = {
   },
   handler: async (args, ctx) => {
     if (args.action === 'list') {
-      const lib = ctx.router.defaultLibrary();
+      // The caller's library_type/library_id, like every other action here: listing the
+      // personal library's tags for a call that named a group is a wrong answer, not a
+      // default (#74).
+      const lib = resolveLibrary(ctx, args);
       const r = await ctx.web.listTags(lib, { q: args.q, limit: args.limit ?? 100 });
       const tags = r.data.map((t: any) => (typeof t === 'string' ? t : t.tag));
       return ok({ tags, totalResults: r.totalResults }, `${tags.length} tag(s) returned.`);

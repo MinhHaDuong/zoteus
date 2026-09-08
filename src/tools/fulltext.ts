@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, requireCloudLibrary } from '../registry/registry.js';
+import { ok, optionalLibrary, requireCloudLibrary } from '../registry/registry.js';
 
 function err(text: string): ToolHandlerResult {
   return { content: [{ type: 'text', text }], isError: true };
@@ -25,10 +25,7 @@ const fulltext: ToolDefinition = {
   },
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const readLib = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : ctx.router.defaultLibrary();
-
+    const readLib = optionalLibrary(args) ?? ctx.router.defaultLibrary();
     if (args.action === 'get') {
       if (!args.item_key) return err('`item_key` is required for get.');
       const ft = await ctx.router.getFullText(args.item_key, { library: readLib });

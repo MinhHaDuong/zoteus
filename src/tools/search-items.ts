@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 
 const MAX_LIMIT = 100;
 
@@ -55,9 +55,7 @@ const searchItems: ToolDefinition = {
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     const detailed = args.response_format === 'detailed';
-    const library = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : undefined;
+    const library = optionalLibrary(args);
     const baseQuery = {
       q: args.q,
       qmode: args.qmode,

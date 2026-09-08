@@ -69,6 +69,18 @@ export interface WebApiClientOptions {
 
 const DEFAULT_BASE = 'https://api.zotero.org';
 
+/**
+ * Budget for moving a file's bytes, as opposed to answering an API question.
+ *
+ * The fetcher's 25 s default is sized for a JSON request, and it is the right size for
+ * one: past it, the message tells the caller to narrow the query. A PDF is not a query.
+ * On the cloud path (the only path a group library has for files) a large attachment
+ * would routinely exceed 25 s and come back as "narrow the query, lower the limit",
+ * advice that fits nothing the caller did. The desktop upload already allows five
+ * minutes; this is the same allowance for the cloud one. (#74)
+ */
+const FILE_TRANSFER = { deadlineMs: 300_000 };
+
 export class WebApiClient {
   private readonly apiKey?: string;
   private readonly baseUrl: string;
@@ -369,11 +381,15 @@ export class WebApiClient {
   }
 
   async uploadBytes(url: string, contentType: string, body: Uint8Array): Promise<void> {
-    const res = await this.fetcher.fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': contentType },
-      body,
-    });
+    const res = await this.fetcher.fetch(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': contentType },
+        body,
+      },
+      FILE_TRANSFER,
+    );
     if (res.status !== 201 && !res.ok) {
       const b = await res.text().catch(() => '');
       throw new ZoteroApiError({ status: res.status, message: `File storage upload failed (${res.status}). ${b.slice(0, 200)}` });
@@ -402,10 +418,11 @@ export class WebApiClient {
     lib: LibraryRef,
     key: string,
   ): Promise<{ bytes: Uint8Array; contentType?: string; etag?: string }> {
-    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/file`, {
-      method: 'GET',
-      headers: this.headers(),
-    });
+    const res = await this.fetcher.fetch(
+      `${this.baseUrl}${this.prefix(lib)}/items/${key}/file`,
+      { method: 'GET', headers: this.headers() },
+      FILE_TRANSFER,
+    );
     if (!res.ok) {
       const b = await res.text().catch(() => '');
       throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });

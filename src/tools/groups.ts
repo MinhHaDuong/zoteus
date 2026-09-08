@@ -5,7 +5,7 @@ const groups: ToolDefinition = {
   name: 'zotero_groups',
   title: 'List Zotero groups',
   description:
-    'List the group libraries the current API key can access, with each group\'s id, name, type, item count, and edit permissions. Use a returned group id with the `library_id`/`library_type:"group"` parameters of other tools to operate on that group library. Requires a cloud API key.',
+    'List the group libraries the current API key can access, with each group\'s id, name, type, item count, and edit permissions. Use a returned group id with the `library_id`/`library_type:"group"` parameters of other tools to operate on that group library; `library_type` alone does not address a group. Requires a cloud API key. Writing to a group always goes through the cloud, even when the Zotero desktop app holds that group, and needs a key with write access to it; `libraryEditing` says whether the group itself lets ordinary members edit its library.',
   inputSchema: {},
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (_args, ctx): Promise<ToolHandlerResult> => {

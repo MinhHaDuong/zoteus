@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 
 const SYNC_TYPES = ['items', 'collections', 'searches', 'tags'] as const;
 
@@ -18,9 +18,7 @@ const sync: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const lib = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : ctx.router.defaultLibrary();
+    const lib = optionalLibrary(args) ?? ctx.router.defaultLibrary();
     const since = args.since ?? 0;
     const types = (args.types ?? SYNC_TYPES) as readonly (typeof SYNC_TYPES)[number][];
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 
 const getItem: ToolDefinition = {
   name: 'zotero_get_item',
@@ -21,9 +21,7 @@ const getItem: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const library = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : undefined;
+    const library = optionalLibrary(args);
     // Both were accepted and neither was forwarded, so every style rendered the same (#58).
     // The alias table turns "Chicago" into an id; a bare id or a URL passes through.
     const item = await ctx.router.getItem(args.item_key, {

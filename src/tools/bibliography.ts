@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
+import { optionalLibrary } from '../registry/registry.js';
 
 const bibliography: ToolDefinition = {
   name: 'zotero_bibliography',
@@ -16,9 +17,7 @@ const bibliography: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const lib = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : ctx.router.defaultLibrary();
+    const lib = optionalLibrary(args) ?? ctx.router.defaultLibrary();
     const style = args.style ? ctx.styles.resolveId(args.style) : undefined;
     // Routed, not ctx.web: in key-free local mode the default library is users/0, which
     // only the desktop app can answer, and it renders format=bib just as the cloud does.

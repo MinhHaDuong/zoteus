@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
+import { optionalLibrary } from '../registry/registry.js';
 import { formatBibliography } from '../features/citation/citeproc-engine.js';
 
 function err(text: string): ToolHandlerResult {
@@ -25,9 +26,7 @@ const formatBib: ToolDefinition = {
     let cslItems: any[] | undefined = args.items;
     if (!cslItems?.length) {
       if (!args.item_keys?.length) return err('Provide `items` (CSL-JSON) or `item_keys`.');
-      const lib = args.library_id
-        ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-        : ctx.router.defaultLibrary();
+      const lib = optionalLibrary(args) ?? ctx.router.defaultLibrary();
       // Routed like every other library read, so a desktop-served library exports with no
       // cloud key (#64); the cloud path is unchanged for everything else.
       const text = await ctx.router.exportItems({

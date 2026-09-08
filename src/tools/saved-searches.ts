@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, requireCloudLibrary } from '../registry/registry.js';
+import { ok, requireCloudLibrary, resolveLibrary } from '../registry/registry.js';
 
 function err(text: string): ToolHandlerResult {
   return { content: [{ type: 'text', text }], isError: true };
@@ -25,7 +25,8 @@ const savedSearches: ToolDefinition = {
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     if (args.action === 'list') {
-      const lib = ctx.router.defaultLibrary();
+      // The caller's library_type/library_id, like every other action here (#74).
+      const lib = resolveLibrary(ctx, args);
       const r = await ctx.web.listSearches(lib);
       const searches = r.data.map((s: any) => ({
         key: s.key ?? s.data?.key,

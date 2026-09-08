@@ -65,6 +65,35 @@ All notable changes to Zoteus are documented here. The format is based on
   handle that indexed nothing leaves an artifact it did not write alone. A reset still writes
   its zeroed row whole, because the rows the old stamp described have just been deleted, and
   each case that keeps another process's values says so once in the log.
+- **A group library write now says what is missing instead of failing at the cloud (#74).**
+  Group writes have always been cloud-only (the desktop app's local API and the connector
+  protocol both address the personal library and nothing else, even for a group the app is
+  holding and reading key-free), but three things made that hard to act on. A call naming
+  `library_type:"group"` without a `library_id` fell through to the default library, so a
+  request that plainly said "the group" read from, or wrote to, the personal library and
+  reported success; it is now refused, pointing at `zotero_groups` for the id. A key that
+  cannot write the target group only found out at api.zotero.org, as a 403 reading "your
+  API key may lack permission for this library or operation"; the key's own access map is
+  now checked first, so a read-only or group-less key is refused locally by name, with the
+  settings page to fix it. And the 403 that remains (the group's own Library Editing
+  setting, which no key overrides) now names all three causes rather than none.
+- **The `list` sub-actions of the manage tools read the library they were given (#74).**
+  `zotero_manage_collections`, `zotero_manage_tags` and `zotero_saved_searches` all accept
+  `library_type`/`library_id` and all ignored them when `action:"list"`, answering from the
+  personal library: a model looking for a group's collection keys got the wrong library's,
+  and the write that followed used a collection key that does not exist there.
+- **A file moved to or from cloud storage gets a file's time budget, not a query's (#74).**
+  Attachment uploads and downloads over the Web API ran on the 25 s budget meant for a JSON
+  request, so a large PDF (the cloud path is the only one a group library has for files)
+  timed out with "narrow the query, lower the limit". They now allow five minutes, matching
+  the desktop upload path.
+
+### Documentation
+- **A "Group libraries" section in `docs/writing.md`**: that group writes work but are
+  cloud-only whatever the desktop app is doing, the three separate permissions a group
+  write needs (a key, group write access on the key, and a group that lets you edit its
+  library), how a numeric library id differs from a collection key, and that a group's
+  collection keys must come from that group.
 
 ## [1.16.0] - 2026-09-07
 

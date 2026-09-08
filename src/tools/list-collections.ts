@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { ok, optionalLibrary } from '../registry/registry.js';
 
 const listCollections: ToolDefinition = {
   name: 'zotero_list_collections',
@@ -14,9 +14,7 @@ const listCollections: ToolDefinition = {
   },
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
-    const library = args.library_id
-      ? { type: (args.library_type ?? 'group') as 'user' | 'group', id: args.library_id }
-      : undefined;
+    const library = optionalLibrary(args);
     const r = await ctx.router.listCollections({ top: args.top, library });
     const collections = r.data.map((c: any) => ({
       key: c.key ?? c.data?.key,
