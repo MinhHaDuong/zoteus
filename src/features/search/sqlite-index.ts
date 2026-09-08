@@ -215,9 +215,8 @@ const RESCORE_BATCH = 512;
 /**
  * Vectors the corpus mean is averaged over before the sign bits are taken. The mean only
  * has to be close: it recentres the codes so the sign bits carry more information (measured
- * at +2.7 recall points at a quarter width, and Zotero's own semantic search centres the
- * same way, zotero/zotero#6012 `modelCalibration.meanVector`), and every score the search
- * returns comes from the exact rescore afterwards. So it is taken from a strided sample
+ * at +2.7 recall points at a quarter width), and every score the search returns comes from
+ * the exact rescore afterwards. So it is taken from a strided sample
  * rather than from a second full pass over a corpus this exists to stop reading.
  */
 const MEAN_SAMPLE = 20_000;
