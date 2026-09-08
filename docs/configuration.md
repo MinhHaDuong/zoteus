@@ -34,7 +34,8 @@ A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, 
 | `ZOTEUS_INDEX_ANN_MIN_CANDIDATES` | `500` | Floor on that pool, so a small `limit` still rescores a real neighbourhood. It doubles as the size below which an index is simply scanned exactly and carries no codes at all. |
 | `ZOTEUS_SCHOLAR_PROVIDERS` | `openalex` | Comma list of scholarly-graph providers (`openalex`, `crossref`, `semanticscholar`). |
 | `ZOTEUS_DATA_DIR` | OS data dir | Index + caches location. |
-| `ZOTEUS_CONTACT_EMAIL` | — | Polite-pool contact for external scholarly APIs. |
+| `ZOTEUS_CONTACT_EMAIL` | — | Contact address for external scholarly APIs: Crossref's polite-pool `mailto=`, and the User-Agent on OpenAlex requests. |
+| `ZOTEUS_OPENALEX_API_KEY` | — | Free OpenAlex API key for `zotero_scholar`, sent as a bearer header and never in a URL. Optional: keyless calls work on a small daily budget, a key raises it. OpenAlex ignores the old polite-pool parameter since early 2026. |
 | `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose `zotero_delete_items` (permanent delete). Trash is always available. |
 | `ZOTEUS_READ_ONLY` | `false` | Expose only non-mutating tools. Recommended for public/remote endpoints. |
 | `ZOTEUS_CONFIRM_BULK_WRITES` | `0` (off) | Items above which a bulk write refuses unless the call also passes `confirm: true`: `zotero_trash_items` (trashing, not restoring), `zotero_manage_tags` add/remove, `zotero_manage_collections action:"remove_items"`. Single-item edits stay fluent. A deliberation step at the scale where a bad decision does real damage, not a human in the loop, since the model can re-call with `confirm: true`. See [the threat model](./threat-model.md). |

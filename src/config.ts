@@ -82,6 +82,8 @@ export interface ZoteusConfig {
    */
   zoteroDataDir: string;
   contactEmail?: string;
+  /** An OpenAlex API key for `zotero_scholar`, sent as a bearer header. Optional (#76). */
+  openalexApiKey?: string;
   allowDelete: boolean;
   readOnly: boolean;
   /**
@@ -274,6 +276,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_DATA_DIR: z.string().min(1).optional(),
         ZOTERO_DATA_DIR: z.string().min(1).optional(),
         ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
+        ZOTEUS_OPENALEX_API_KEY: z.string().min(1).optional(),
         ZOTEUS_ALLOW_DELETE: bool(false),
         ZOTEUS_READ_ONLY: bool(false),
         ZOTEUS_CONFIRM_BULK_WRITES: z.coerce.number().int().nonnegative().default(0),
@@ -484,6 +487,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     dataDir: parsed.ZOTEUS_DATA_DIR ?? defaultDataDir(env),
     zoteroDataDir: parsed.ZOTERO_DATA_DIR ?? defaultZoteroDataDir(env),
     contactEmail: parsed.ZOTEUS_CONTACT_EMAIL,
+    openalexApiKey: parsed.ZOTEUS_OPENALEX_API_KEY,
     allowDelete: parsed.ZOTEUS_ALLOW_DELETE,
     readOnly: parsed.ZOTEUS_READ_ONLY,
     confirmBulkWrites: parsed.ZOTEUS_CONFIRM_BULK_WRITES,

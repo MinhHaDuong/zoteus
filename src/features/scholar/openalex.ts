@@ -11,6 +11,27 @@ export interface ScholarWork {
   inLibrary?: boolean;
 }
 
+/**
+ * A page of works together with the size of the list it was cut from, so a caller can tell
+ * twenty references from twenty of a hundred and fifty (#76).
+ */
+export interface ScholarList {
+  works: ScholarWork[];
+  total: number;
+}
+
+export interface OpenAlexOptions {
+  /**
+   * An OpenAlex API key. Optional: keyless requests still work on a small daily budget, and a
+   * key raises it. Before February 2026 a `mailto=` parameter selected a faster "polite
+   * pool"; OpenAlex has replaced that with keys and now ignores the parameter, so it is no
+   * longer sent (#76).
+   */
+  apiKey?: string;
+  /** A contact address, carried in the User-Agent the way the Zotero client carries it. */
+  contact?: string;
+}
+
 const BASE = 'https://api.openalex.org';
 
 function stripDoi(doi: string): string {
@@ -28,21 +49,20 @@ function chunk<T>(arr: T[], n: number): T[][] {
 }
 
 export class OpenAlexClient {
+  private readonly headers: Record<string, string>;
+
   constructor(
     private readonly fetcher: RateLimitedFetcher,
-    private readonly mailto?: string,
-  ) {}
-
-  private mailtoParam(extra = ''): string {
-    const m = this.mailto ? `mailto=${encodeURIComponent(this.mailto)}` : '';
-    if (extra && m) return `?${extra}&${m}`;
-    if (extra) return `?${extra}`;
-    if (m) return `?${m}`;
-    return '';
+    opts: OpenAlexOptions = {},
+  ) {
+    this.headers = { 'User-Agent': opts.contact ? `zoteus (mailto:${opts.contact})` : 'zoteus' };
+    // A header rather than `?api_key=`: every error this client throws quotes the URL, and
+    // those messages reach logs and tool output. A header does not.
+    if (opts.apiKey) this.headers.Authorization = `Bearer ${opts.apiKey}`;
   }
 
   private async getJson(url: string): Promise<any> {
-    const res = await this.fetcher.fetch(url, { method: 'GET' }, { maxRetries: 1 });
+    const res = await this.fetcher.fetch(url, { method: 'GET', headers: this.headers }, { maxRetries: 1 });
     if (!res.ok) throw new Error(`OpenAlex ${res.status} for ${url}`);
     return res.json();
   }
@@ -67,7 +87,7 @@ export class OpenAlexClient {
     const path = /^10\./.test(doiOrId) || /doi\.org/i.test(doiOrId)
       ? `works/doi:${stripDoi(doiOrId)}`
       : `works/${bareId(doiOrId)}`;
-    return this.getJson(`${BASE}/${path}${this.mailtoParam()}`);
+    return this.getJson(`${BASE}/${path}`);
   }
 
   /** Resolve many OpenAlex ids to normalized works. */
@@ -75,8 +95,7 @@ export class OpenAlexClient {
     const out: ScholarWork[] = [];
     for (const group of chunk(ids.map(bareId), 50)) {
       if (!group.length) continue;
-      const filter = `filter=openalex_id:${group.join('|')}&per-page=50`;
-      const json = await this.getJson(`${BASE}/works${this.mailtoParam(filter)}`);
+      const json = await this.getJson(`${BASE}/works?filter=openalex_id:${group.join('|')}&per-page=50`);
       for (const w of json.results ?? []) out.push(this.normalize(w));
     }
     return out;
@@ -84,8 +103,9 @@ export class OpenAlexClient {
 
   /** Works that cite the given OpenAlex id. */
   async citedBy(openalexId: string, perPage = 25): Promise<ScholarWork[]> {
-    const filter = `filter=cites:${bareId(openalexId)}&per-page=${Math.min(perPage, 200)}&sort=cited_by_count:desc`;
-    const json = await this.getJson(`${BASE}/works${this.mailtoParam(filter)}`);
+    const json = await this.getJson(
+      `${BASE}/works?filter=cites:${bareId(openalexId)}&per-page=${Math.min(perPage, 200)}&sort=cited_by_count:desc`,
+    );
     return (json.results ?? []).map((w: any) => this.normalize(w));
   }
 }

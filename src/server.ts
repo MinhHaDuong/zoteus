@@ -165,7 +165,11 @@ export async function buildContext(
   const stale = search.buildStatus().vectorsStaleReason;
   if (stale) logger.warn(stale);
   logger.debug(`search index backend: ${search.storage} (${searchIndexPath})`);
-  const scholar = new ScholarGraph({ fetcher, mailto: config.contactEmail });
+  const scholar = new ScholarGraph({
+    fetcher,
+    mailto: config.contactEmail,
+    openalexApiKey: config.openalexApiKey,
+  });
 
   /**
    * Replace the held search index with a freshly opened one.

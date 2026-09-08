@@ -27,6 +27,17 @@ All notable changes to Zoteus are documented here. The format is based on
   is a deliberation step at the scale where a bad decision does real damage, not a human in
   the loop: a model can re-call with `confirm: true`.
 
+- **`ZOTEUS_OPENALEX_API_KEY`, and `zotero_scholar` says when a list was cut (#76).** OpenAlex
+  replaced its "polite pool" with free API keys before February 2026 and now ignores the
+  `mailto=` parameter Zoteus appended to every request, so the parameter is gone from the
+  OpenAlex calls (Crossref still reads it) and an optional key takes its place, sent as a
+  bearer header and never in a URL that an error message would quote. Keyless calls still
+  work on OpenAlex's small daily budget. `references`, `related` and `citations` answers now
+  carry `total`, the size of the list the results were cut from, and `truncated` when `limit`
+  dropped some: a review with 150 references used to come back as twenty works and nothing
+  else, and a citation-gap pass had no way to know it saw a seventh of the list. The tool
+  description also says what the tool is not, a thin helper around one DOI, and points at the
+  OpenAlex API for full querying.
 ### Changed
 - **`pdfjs-dist` is pinned to exactly 5.6.205 (#69).** It is the last release that runs on
   the Node 20.19 floor the package declares: 5.7.284 and the whole 6.x line require
