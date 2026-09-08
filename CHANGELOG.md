@@ -49,6 +49,22 @@ All notable changes to Zoteus are documented here. The format is based on
   stamp, and a gap in the catch-up withholds the full-text cursor. The status carries one
   `fulltextReason` sentence saying so, and the next `action:"update"` retries. This is the
   full-text sibling of #63, and it follows the same rule.
+- **A second Zoteus process no longer undoes a finished index on its way out (#68).** Two
+  processes sharing one `ZOTEUS_DATA_DIR` is the recommended setup for a first build: run one
+  headlessly and let Claude Desktop read the result. The desktop app's index handle, open
+  since before that build started, wrote its whole in-memory meta row back over the finished
+  one when the app quit, putting the library version to 0, the library and embedder identity
+  to empty, the full-text cursor to 0 and the checkpoint to nothing. Nothing errored and
+  nothing logged, and the next `action:"update"` then found no stamp, fell back to a full
+  build, found no checkpoint to resume from, and cleared the store: hours of crawling and
+  embedding gone, by the same end state as #59 through another route. A flush now writes only
+  the fields that handle changed itself and leaves every other field as it is on disk, and a
+  durable pause writes its one flag instead of the whole row. The same handle also re-reads
+  the store before deciding that a delta is impossible, so an index another process finished
+  is no longer rebuilt from scratch by the session that never saw it; on the JSON backend a
+  handle that indexed nothing leaves an artifact it did not write alone. A reset still writes
+  its zeroed row whole, because the rows the old stamp described have just been deleted, and
+  each case that keeps another process's values says so once in the log.
 
 ## [1.16.0] - 2026-09-07
 

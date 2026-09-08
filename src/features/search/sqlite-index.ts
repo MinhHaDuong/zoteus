@@ -349,6 +349,32 @@ export class SqliteSearchIndex extends SearchIndexBase {
   private stmts!: Statements;
   /** True while a write transaction is open; save() is what commits it. */
   private inTransaction = false;
+  /**
+   * The meta row as this handle last read or wrote it. What differs from it is what THIS
+   * handle changed, and a flush writes only that: two Zoteus processes legitimately share
+   * a data dir (see BUSY_TIMEOUT_MS), and the meta row is the one thing they both write
+   * whole. An idle handle used to put its opening state back over another process's
+   * finished stamp on the way out, which sent the next action:"update" into a full
+   * rebuild that cleared the store (#68).
+   */
+  private metaBaseline = new Map<string, string>();
+  /**
+   * Set when this handle emptied the store, so the next flush writes the whole row rather
+   * than only what it can see it changed. A reset zeroes the stamp, and zeroing a value
+   * that was already zero when this handle read it is invisible to the merge above, yet
+   * it is exactly what has to reach disk: the rows the other process's stamp described
+   * have just been deleted.
+   */
+  private metaRewrite = false;
+  /** Meta keys already reported as moved underneath this handle, so the note is said once. */
+  private readonly metaDiverged = new Set<string>();
+  /**
+   * The database's change counter as this handle last saw it. `PRAGMA data_version` moves
+   * only when ANOTHER connection commits, so comparing it costs one statement and answers
+   * the question an idle handle cannot answer for itself: whether what it holds in memory
+   * still describes the file (#68).
+   */
+  private dataVersion = 0;
   private c: IndexCounts = {
     documents: 0,
     vectors: 0,
@@ -1120,25 +1146,101 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // process runs a build of its own (same rule as the JSON backend's load).
     this.fulltextEnabled = this.c.fulltextPassages > 0;
     this.ownWordsEnabled = this.c.ownWordsPassages > 0;
+    // Before the reconcile below, which may clear the embedder identity this row carries:
+    // the baseline is what the FILE said, so a field this handle then changes is written.
+    this.metaBaseline = this.metaRow();
+    this.metaRewrite = false;
+    this.dataVersion = this.readDataVersion();
     this.reconcileVectorProvenance();
   }
 
-  private writeMeta(paused = this.paused): void {
-    const set = this.stmts.setMeta;
-    set.run('builtFromVersion', String(this.builtFromVersion));
-    set.run('itemsTotal', String(this.itemsTotal));
-    set.run('itemsAvailable', String(this.itemsAvailable));
-    set.run('embedderId', this.vectorEmbedderId ?? '');
-    set.run('libraryVersion', String(this.libraryVersion));
-    set.run('libraryBackend', this.libraryBackend ?? '');
-    set.run('fulltextVersion', String(this.fulltextVersion));
-    // One JSON row rather than a column per field, deliberately: the checkpoint's shape
-    // belongs to the build loop and will grow with it, and the meta table is exactly the
-    // place a value can be added without a schema version bump: an older build ignores a
-    // key it does not know, so a database written here still opens there.
-    set.run('checkpoint', this.checkpoint ? JSON.stringify(this.checkpoint) : '');
-    set.run('paused', String(paused));
-    set.run('library', this.library ?? '');
+  /** The index-level state as it would be written, one string per meta key. */
+  private metaRow(): Map<string, string> {
+    return new Map([
+      ['builtFromVersion', String(this.builtFromVersion)],
+      ['itemsTotal', String(this.itemsTotal)],
+      ['itemsAvailable', String(this.itemsAvailable)],
+      ['embedderId', this.vectorEmbedderId ?? ''],
+      ['libraryVersion', String(this.libraryVersion)],
+      ['libraryBackend', this.libraryBackend ?? ''],
+      ['fulltextVersion', String(this.fulltextVersion)],
+      // One JSON row rather than a column per field, deliberately: the checkpoint's shape
+      // belongs to the build loop and will grow with it, and the meta table is exactly the
+      // place a value can be added without a schema version bump: an older build ignores a
+      // key it does not know, so a database written here still opens there.
+      ['checkpoint', this.checkpoint ? JSON.stringify(this.checkpoint) : ''],
+      ['paused', String(this.paused)],
+      ['library', this.library ?? ''],
+    ]);
+  }
+
+  /**
+   * Write the index-level state, merging with the row on disk rather than replacing it.
+   *
+   * Only the fields this handle changed since it read the row are written; a field it
+   * never touched is left exactly as it is, because on a shared data dir that value may
+   * belong to another process that finished a build while this handle sat idle (#68).
+   * The exception is a handle that emptied the store, which writes the whole row: see
+   * metaRewrite.
+   */
+  private writeMeta(): void {
+    const row = this.metaRow();
+    const kept: string[] = [];
+    for (const [key, value] of row) {
+      const loaded = this.metaBaseline.get(key);
+      if (this.metaRewrite || value !== loaded) {
+        this.stmts.setMeta.run(key, value);
+        continue;
+      }
+      // Untouched here. Whatever is on disk is either this same value or a newer one
+      // another process wrote, and neither is this handle's to put back.
+      const stored = this.meta(key);
+      if (stored !== undefined && stored !== loaded && !this.metaDiverged.has(key)) kept.push(key);
+    }
+    if (kept.length) {
+      for (const key of kept) this.metaDiverged.add(key);
+      // Said once per key, at info: this is how `status` (via the log) can account for an
+      // index whose stamp moved without this process moving it.
+      this.opts.logger?.info(
+        `search index: ${kept.join(', ')} changed in ${this.file} after this handle opened it, so the stored ` +
+          'value(s) were kept and this handle wrote only what it changed itself. Another Zoteus process is ' +
+          'sharing this ZOTEUS_DATA_DIR.',
+      );
+    }
+    this.metaBaseline = row;
+    this.metaRewrite = false;
+  }
+
+  /** SQLite's own "has another connection committed?" counter; see `dataVersion`. */
+  private readDataVersion(): number {
+    const row = this.handle.prepare('PRAGMA data_version').get() as { data_version?: number } | undefined;
+    return Number(row?.data_version ?? 0) || 0;
+  }
+
+  /**
+   * Re-read what another process has committed, before a decision turns on it.
+   *
+   * The counterpart to the merge in `writeMeta`, and the other half of #68: an idle handle
+   * holds whatever the file said when it opened, so a headless build that finished in the
+   * meantime is invisible to it. `updateBlocker` would then find no stamp (and no rows),
+   * fall back to a full build, and clear a finished index. One pragma answers whether
+   * anything moved at all, so a handle nobody else shares a file with pays a statement.
+   */
+  protected override refreshFromStore(): void {
+    // Never over a job of this handle's own. A running build owns the in-memory counters
+    // and cursors (its crawl is between two commits for most of its life, so `inTransaction`
+    // alone would not say so), and a pause transition owns `paused` until it resolves:
+    // re-reading either from disk would hand the file's older answer back to the writer.
+    if (!this.db || this.inTransaction || this.fault || this.isBuilding || this.pauseTransition) return;
+    const current = this.readDataVersion();
+    if (current === this.dataVersion) return;
+    this.refreshCounts();
+    // Sets dataVersion (and the meta baseline) from what the file says now.
+    this.loadMeta();
+    this.opts.logger?.info(
+      `search index: ${this.file} was written by another process since this handle read it; its state was ` +
+        're-read before deciding what this job has to do.',
+    );
   }
 
   private refreshCounts(): void {
@@ -1232,6 +1334,9 @@ export class SqliteSearchIndex extends SearchIndexBase {
 
   protected clearStore(): void {
     this.begin();
+    // The rows any stamp on disk described are about to go, so this handle's whole meta
+    // row is now its own to write, including the fields it zeroes back to what it read.
+    this.metaRewrite = true;
     // 'delete-all' is how an external-content FTS5 index is emptied; deleting the content
     // rows alone would leave the index pointing at rowids that no longer exist.
     this.handle.exec("INSERT INTO passages_fts(passages_fts) VALUES('delete-all')");
@@ -2084,8 +2189,15 @@ export class SqliteSearchIndex extends SearchIndexBase {
   protected override async persistPaused(paused: boolean): Promise<void> {
     this.refuseIfFaulted();
     this.begin();
-    this.writeMeta(paused);
+    // The one flag, not the whole row. A durable hold is the state most likely to be set
+    // by one process while another holds the same file open, and writing the rest of the
+    // row for it was how an idle handle undid a build it had never seen (#68).
+    const value = String(paused);
+    this.stmts.setMeta.run('paused', value);
     this.commit();
+    // In step with the row on disk: `setPaused` only adopts `paused` once this resolves,
+    // and a failed write leaves both the field and the baseline as they were.
+    this.metaBaseline.set('paused', value);
   }
 
   /** Commit the build's open transaction: this is what makes the last passages durable. */

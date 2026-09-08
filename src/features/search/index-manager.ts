@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import { BM25Index } from './bm25.js';
 import { VectorStore } from './vector-store.js';
 import { chunkText } from './chunker.js';
@@ -418,6 +419,13 @@ export abstract class SearchIndexBase implements SearchIndex {
   abstract readonly storage: StorageBackend;
   /** Live sizes of the store. Must not walk the passages: status() is called per progress tick. */
   protected abstract counts(): IndexCounts;
+  /**
+   * Adopt anything another process has committed to the same store since this handle read
+   * it, where the backend can tell. Called before a decision that turns on the index's own
+   * state rather than on the library's, and a no-op for a store nobody else can be writing
+   * (the JSON one is rewritten whole, so there is nothing to merge in). See #68.
+   */
+  protected refreshFromStore(): void {}
   /** Drop every passage and vector. */
   protected abstract clearStore(): void;
   /** Register an indexed item. Called for every item, including ones with no text at all. */
@@ -1528,6 +1536,11 @@ export abstract class SearchIndexBase implements SearchIndex {
    */
   updateBlocker(backend: VersionBackend): string | undefined {
     if (this.fault) return UNREADABLE_STORE;
+    // Every refusal below is read out of this object's memory, and on a shared data dir
+    // that memory can be older than the file: a handle held open across another process's
+    // headless build still holds the empty, unstamped state it opened on, and every
+    // refusal here sends the caller to a full build that clears the store (#68).
+    this.refreshFromStore();
     if (!this.supportsDelete) {
       return `the ${this.storage} index cannot remove rows, so deleted items could never leave it`;
     }
@@ -2645,10 +2658,61 @@ export class MemorySearchIndex extends SearchIndexBase {
    * newer durable state (notably a pause asserted while a build save is in flight).
    */
   private saveTail: Promise<void> = Promise.resolve();
+  /**
+   * The state this handle last read from, or last wrote to, the artifact. This backend
+   * rewrites the file WHOLE, so it has nothing to merge: what it can do is notice that it
+   * has nothing of its own to put there. An index handle held open across another
+   * process's build otherwise replaced that process's finished artifact with the state it
+   * loaded when it started, on the save every shutdown runs (#68).
+   */
+  private artifactState: string;
+  /**
+   * The artifact's mtime and size as this handle last read or wrote it, or undefined where
+   * there was no file. Together with `artifactState` it separates the two cases a whole-file
+   * rewrite has to tell apart: this handle is behind the file (leave it alone), or the file
+   * is simply what this handle put there (rewrite it, exactly as before).
+   */
+  private artifactStamp: string | undefined;
 
   constructor(opts: MemorySearchIndexOptions) {
     super(opts);
     this.path = opts.path;
+    this.artifactState = this.stateSignature();
+    this.artifactStamp = this.stampOfArtifact();
+  }
+
+  /** Cheap identity of the file on disk: what changes when somebody else replaces it. */
+  private stampOfArtifact(): string | undefined {
+    if (!this.path) return undefined;
+    try {
+      const s = statSync(this.path);
+      return `${s.mtimeMs}:${s.size}`;
+    } catch {
+      return undefined; // no artifact yet, which is itself a state worth remembering
+    }
+  }
+
+  /**
+   * Everything a save would put in the file, as one comparable string: the row counts and
+   * the index-level fields. Cheap by construction (sizes, not contents), because it is
+   * taken on every save.
+   */
+  private stateSignature(paused = this.paused): string {
+    return [
+      this.chunks.size,
+      this.vectors.size,
+      this.items.size,
+      this.builtFromVersion,
+      this.itemsTotal,
+      this.itemsAvailable,
+      this.libraryVersion,
+      this.libraryBackend ?? '',
+      this.fulltextVersion,
+      this.vectorEmbedderId ?? '',
+      this.library ?? '',
+      paused,
+      this.checkpoint ? JSON.stringify(this.checkpoint) : '',
+    ].join('|');
   }
 
   protected counts(): IndexCounts {
@@ -2839,7 +2903,10 @@ export class MemorySearchIndex extends SearchIndexBase {
   }
 
   protected override async persistPaused(paused: boolean): Promise<void> {
+    const written = this.stateSignature(paused);
     await this.enqueueSnapshot({ ...this.toJSON(), paused });
+    this.artifactState = written;
+    this.artifactStamp = this.stampOfArtifact();
   }
 
   async save(): Promise<void> {
@@ -2855,11 +2922,29 @@ export class MemorySearchIndex extends SearchIndexBase {
     // value after a successful clear (or the transient clear after a failed one).
     const pauseTransition = this.pauseTransition;
     if (pauseTransition) await pauseTransition.catch(() => {});
+    // Nothing of this handle's own to write, and the file is no longer the one it read. On
+    // a shared data dir that is another process's finished index, and this backend replaces
+    // the file WHOLE: an idle handle's shutdown save would put back the state it loaded
+    // (or, having loaded nothing, an empty index) over a build that finished meanwhile
+    // (#68). Skipping is safe by construction, because an unchanged handle can only write
+    // back what it already read. Both halves matter: a handle that indexed something still
+    // writes, and so does one whose artifact nobody else has touched.
+    if (this.stateSignature() === this.artifactState && this.stampOfArtifact() !== this.artifactStamp) {
+      this.opts.logger?.info(
+        `search index: ${this.path} was replaced by another process and this handle has indexed nothing since ` +
+          'it read the file, so its own (older) state was NOT written over it. Another Zoteus process is sharing ' +
+          'this ZOTEUS_DATA_DIR.',
+      );
+      return;
+    }
     // Capture now, not when the queued write gets its turn. A later setter may roll its
     // in-memory value back after a failed write; no earlier save may publish that transient
     // value merely because it observed mutable `this` late.
     const snapshot = this.toJSON();
+    const written = this.stateSignature();
     await this.enqueueSnapshot(snapshot);
+    this.artifactState = written;
+    this.artifactStamp = this.stampOfArtifact();
   }
 
   /** No handle to release, but do not report closed while a durable write is outstanding. */
@@ -2930,5 +3015,9 @@ export class MemorySearchIndex extends SearchIndexBase {
     // Absent in files written before the library stamp existed: an unstamped index
     // refuses nothing (assertLibrary), which is the only workable answer for it.
     this.library = data.library;
+    // What the file said, and which file it was, so a later save can tell whether this
+    // handle has anything of its own to put back into it (#68).
+    this.artifactState = this.stateSignature();
+    this.artifactStamp = this.stampOfArtifact();
   }
 }
