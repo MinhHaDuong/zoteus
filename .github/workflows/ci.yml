@@ -11,7 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # pdfjs-dist (optional dep behind get_fulltext page extraction) requires Node >=20.19.
+        # pdfjs-dist (optional dep behind get_fulltext page extraction) is pinned to 5.6.205,
+        # the last release that runs on Node 20.19, which is why 20 is still here (#69).
+        # tests/node-floor.test.ts fails if that pin, the lockfile and this matrix drift apart.
         node-version: [20, 22]
     steps:
       - uses: actions/checkout@v5

@@ -4,6 +4,21 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **`pdfjs-dist` is pinned to exactly 5.6.205 (#69).** It is the last release that runs on
+  the Node 20.19 floor the package declares: 5.7.284 and the whole 6.x line require
+  `>=22.13.0 || >=24`. The declared range was `^5.6.205`, which admitted all of them, so any
+  resolve that ignored the lockfile (`npm update`, a deleted lockfile, a project depending on
+  `@oscardvs/zoteus` and resolving its own tree) could take a build that cannot start on Node
+  20, and exact-page extraction would have degraded to approximate pages with no error to
+  read. The pin closes that, `tests/node-floor.test.ts` fails if the pin, the lockfile,
+  `mcpb/manifest.json` and the CI matrix ever stop naming the same floor, and
+  [`SECURITY.md`](./SECURITY.md) now records why the parser is frozen and why the advisory
+  `npm audit` reports against it (GHSA-hq66-cqwq-w95j, a viewer-scripting flaw) does not
+  reach a text extractor that builds no viewer.
+
 ## [1.16.0] - 2026-09-07
 
 ### Fixed
