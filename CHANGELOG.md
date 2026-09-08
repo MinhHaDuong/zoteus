@@ -4,6 +4,22 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The first `action:"update"` after a build no longer costs every later semantic query the
+  two-stage vector path (#30).** An update runs two catch-up passes that replace one item's
+  passages wholesale — the full-text pass that picks up newly extracted attachment text
+  (#26), and the own-words pass that re-reads an edited note or annotation (#33). Both
+  removed those passages and their vectors and left the binary codes taken from them behind,
+  where a whole-item delete had always taken them with it. One code per replaced passage
+  then described a row the index no longer held; the coverage check that reads the codes
+  counts one per stored vector, found more codes than vectors, and sent every semantic query
+  back to the exact scan the codes exist to avoid — the 42x this path was landed for — until
+  someone noticed and ran a full `action:"build"`. Nothing said so beyond the scan notice on
+  `zotero_index action:"status"`. Both clears now drop the codes of the passages they remove,
+  scoped by source so the item's other passages keep theirs.
+
 ## [1.16.0] - 2026-09-07
 
 ### Fixed

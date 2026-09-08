@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { createSearchIndex, nodeSqliteAvailable, sqliteIndexPath } from '../../src/features/search/factory.js';
-import type { SearchIndex } from '../../src/features/search/backend.js';
+import type { OwnWordsAccess, OwnWordsEntry, SearchIndex } from '../../src/features/search/backend.js';
 import type { EmbeddingProvider } from '../../src/features/search/embeddings.js';
 
 /**
@@ -42,6 +42,25 @@ class DenseEmbedder implements EmbeddingProvider {
   constructor(private readonly dim = DIM) {}
   async embed(texts: string[]): Promise<number[][]> {
     return texts.map((t) => vectorFor(t, this.dim));
+  }
+}
+
+/**
+ * The same embedder, with one hook: a callback runs inside the next `embed` call and then
+ * disarms itself. That is the only place a test can stand in the middle of a catch-up — the
+ * pass clears an item's passages, inserts their replacements, and awaits the embedder before
+ * any of them has a vector, which is exactly the window a live query arrives in.
+ */
+class ProbingEmbedder extends DenseEmbedder {
+  private probe: (() => void) | undefined;
+  probeOnce(fn: () => void): void {
+    this.probe = fn;
+  }
+  override async embed(texts: string[]): Promise<number[][]> {
+    const probe = this.probe;
+    this.probe = undefined;
+    probe?.();
+    return super.embed(texts);
   }
 }
 
@@ -89,6 +108,55 @@ async function corpus(opts: CorpusOptions = {}): Promise<{ index: SearchIndex; j
   return { index, jsonPath };
 }
 
+/** The body text a full-text pass serves for one item, and the text it replaces it with. */
+const bodyOf = (key: string) => `the body of ${key}, on widgets and the gears they drive`;
+const revisedBodyOf = (key: string) => `the revised body of ${key}, on sprockets and escapements`;
+
+/**
+ * A corpus whose items carry body text, built through the incremental path so the index
+ * stores a full-text cursor. Both are what an `action:"update"` catch-up needs: without a
+ * cursor the pass is narrowed to items holding no body passages at all, which is the one
+ * shape where the clear it runs has nothing to remove.
+ */
+async function bodyCorpus(
+  count: number,
+  embedder: EmbeddingProvider = new DenseEmbedder(),
+): Promise<{ index: SearchIndex; jsonPath: string; keys: string[] }> {
+  const dir = mkdtempSync(join(tmpdir(), 'zoteus-ann-body-'));
+  const jsonPath = join(dir, 'search-index.json');
+  const all = items(count);
+  const keys = all.map((i) => i.key as string);
+  const index = await createSearchIndex({
+    backend: 'sqlite',
+    jsonPath,
+    embedder,
+    logger: silentLogger,
+  });
+  await index.buildIncremental(
+    async (start: number) =>
+      start === 0 ? { items: all, totalResults: count, lastModifiedVersion: 7 } : { items: [], totalResults: count },
+    {
+      fulltextFor: async (key: string) => bodyOf(key),
+      fulltextKeys: async () => new Set(keys),
+      // A stored cursor, so a later update asks the full-text sequence what has been
+      // extracted since it rather than treating the whole library as a coverage gap.
+      fulltextVersion: () => 100,
+    },
+  );
+  await index.save();
+  return { index, jsonPath, keys };
+}
+
+/** One item's notes and annotations, as the update's census serves them. */
+function ownWordsAccess(noteVersion: number, text: string, itemKey: string): OwnWordsAccess {
+  return {
+    childVersions: async () => new Map([[`${itemKey}N`, noteVersion]]),
+    itemsFor: async () => new Set([itemKey]),
+    textsFor: async (key: string) =>
+      key === itemKey ? [{ key: `${itemKey}N`, kind: 'note', text }] : ([] as OwnWordsEntry[]),
+  };
+}
+
 /** The protected ranker, as the fusion calls it: ids and scores, best first. */
 function rank(index: SearchIndex, query: number[], topK: number): Array<{ id: string; score: number }> {
   return (index as unknown as { vectorSearch(q: number[], k: number): Array<{ id: string; score: number }> }).vectorSearch(
@@ -104,6 +172,22 @@ function codeRows(dbPath: string): { codes: number; vectors: number; dim: string
   const dim = (db.prepare("SELECT value FROM meta WHERE key = 'codeDim'").get() as { value?: string } | undefined)?.value;
   db.close();
   return { codes, vectors, dim };
+}
+
+/**
+ * Codes naming a passage the index no longer holds. Nothing can fill them in, and SQLite
+ * hands their rowids to the next inserts, so this count is the invariant the two
+ * catch-up passes below are asserted against.
+ */
+function orphanCodes(dbPath: string): number {
+  const db = new DatabaseSync(dbPath);
+  const n = (
+    db
+      .prepare('SELECT count(*) AS n FROM vector_codes c LEFT JOIN passages p ON p.pid = c.pid WHERE p.pid IS NULL')
+      .get() as { n: number }
+  ).n;
+  db.close();
+  return n;
 }
 
 /** Strip an index back to what a build before this feature wrote: no codes, no mean. */
@@ -313,6 +397,135 @@ describe('the codes stay level with the vectors', () => {
       const afterDelete = codeRows(dbPath);
       expect(afterDelete.vectors).toBe(600);
       expect(afterDelete.codes).toBe(600);
+    } finally {
+      await index.close();
+    }
+  });
+
+  sqliteIt('takes the codes with the body passages a full-text catch-up replaces', async () => {
+    const { index, jsonPath, keys } = await bodyCorpus(600);
+    const dbPath = sqliteIndexPath(jsonPath);
+    try {
+      expect(codeRows(dbPath).codes).toBe(1200);
+      // Opening a PDF makes Zotero extract its text and touches no item version, so this
+      // is the pass that reaches that item: its body passages are replaced wholesale
+      // (their ids are reused by the new text) while its metadata passages stay put.
+      await index.updateIncremental({
+        backend: 'local',
+        fetchChanged: async () => ({ items: [], totalResults: 0, lastModifiedVersion: 8 }),
+        liveKeys: async () => new Set(keys),
+        fulltextFor: async (key: string) => revisedBodyOf(key),
+        fulltextKeys: async () => new Set(keys),
+        fulltextCatchUp: async () => ({ itemKeys: new Set(['K0001']), version: 101 }),
+      });
+      await index.save();
+
+      const rows = codeRows(dbPath);
+      expect(rows.codes).toBe(rows.vectors);
+      expect(orphanCodes(dbPath)).toBe(0);
+      // And the point of keeping them level: the next semantic query is still served by
+      // the codes, instead of falling back to the exact scan this path exists to avoid.
+      const hits = rank(index, vectorFor('a query after the catch-up'), 10);
+      expect(hits).toHaveLength(10);
+      expect(index.buildStatus().vectorScan).toBe('codes');
+      expect(index.buildStatus().vectorScanNotice).toBeUndefined();
+    } finally {
+      await index.close();
+    }
+  });
+
+  sqliteIt('takes the codes with the own words an update rewrites', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zoteus-ann-notes-'));
+    const jsonPath = join(dir, 'search-index.json');
+    const all = items(600);
+    const keys = all.map((i) => i.key as string);
+    const index = await createSearchIndex({
+      backend: 'sqlite',
+      jsonPath,
+      embedder: new DenseEmbedder(),
+      logger: silentLogger,
+    });
+    const dbPath = sqliteIndexPath(jsonPath);
+    try {
+      await index.buildIncremental(
+        async (start: number) =>
+          start === 0 ? { items: all, totalResults: 600, lastModifiedVersion: 7 } : { items: [], totalResults: 600 },
+        { ownWords: ownWordsAccess(5, 'a note on widgets and the gears they drive', 'K0001') },
+      );
+      await index.save();
+      expect(codeRows(dbPath).codes).toBe(601);
+
+      // The own-words twin of the pass above: a note edited after the build appears in no
+      // item delta, so this is the only thing that re-reads it, and it too replaces the
+      // item's passages wholesale. That this case is red at all depends on the note NOT
+      // holding the largest rowid, which is true because indexItem interleaves an item's
+      // own words with its metadata during the build. Were own words ever moved to a pass
+      // of their own after the items, the replacement would reuse the note's rowid and
+      // putVector would clear the inherited code, leaving this green over a store that
+      // still leaks.
+      await index.updateIncremental({
+        backend: 'local',
+        fetchChanged: async () => ({ items: [], totalResults: 0, lastModifiedVersion: 8 }),
+        liveKeys: async () => new Set(keys),
+        ownWords: ownWordsAccess(9, 'the same note, rewritten around sprockets', 'K0001'),
+      });
+      await index.save();
+
+      const rows = codeRows(dbPath);
+      expect(rows.codes).toBe(rows.vectors);
+      expect(orphanCodes(dbPath)).toBe(0);
+      const hits = rank(index, vectorFor('a query after the note was rewritten'), 10);
+      expect(hits).toHaveLength(10);
+      expect(index.buildStatus().vectorScan).toBe('codes');
+      expect(index.buildStatus().vectorScanNotice).toBeUndefined();
+    } finally {
+      await index.close();
+    }
+  });
+
+  sqliteIt('forgets the resident codes a catch-up clears, so a query racing it cannot read a cleared row', async () => {
+    // A semantic query is not refused while an update runs: zotero_semantic_search only
+    // declines on an empty index, so on a populated one the two overlap by design. The
+    // resident codes name rowids, the catch-up frees the largest of them, and SQLite hands
+    // that rowid straight back to the passage the same pass inserts — which has no vector
+    // yet, because it is the batch this await is embedding. A cache that outlives the clear
+    // therefore offers the rescore a candidate whose vector is NULL, and the rescore selects
+    // by rowid with no `vector IS NOT NULL` filter to catch it.
+    const embedder = new ProbingEmbedder();
+    const { index, jsonPath, keys } = await bodyCorpus(600, embedder);
+    try {
+      // Warm the codes, so the query below has a resident cache to be served from.
+      rank(index, vectorFor('warm the cache'), 10);
+      expect(index.buildStatus().vectorScan).toBe('codes');
+
+      let raced: { error?: unknown; scan?: string; notice?: string; hits?: number } = {};
+      embedder.probeOnce(() => {
+        try {
+          const hits = rank(index, vectorFor(bodyOf('K0599')), 10);
+          const status = index.buildStatus();
+          raced = { scan: status.vectorScan, notice: status.vectorScanNotice, hits: hits.length };
+        } catch (e) {
+          raced = { error: e };
+        }
+      });
+      await index.updateIncremental({
+        backend: 'local',
+        fetchChanged: async () => ({ items: [], totalResults: 0, lastModifiedVersion: 8 }),
+        liveKeys: async () => new Set(keys),
+        fulltextFor: async (key: string) => revisedBodyOf(key),
+        fulltextKeys: async () => new Set(keys),
+        // The LAST item indexed, whose body passage holds the largest rowid.
+        fulltextCatchUp: async () => ({ itemKeys: new Set(['K0599']), version: 101 }),
+      });
+      await index.save();
+
+      expect(raced.error).toBeUndefined();
+      // The clear dropped the cache, so the query found none and declined rather than
+      // building one over rows the running update is still writing.
+      expect(raced.scan).toBe('exact');
+      expect(raced.notice).toContain('update is running');
+      expect(raced.hits).toBe(10);
+      expect(codeRows(sqliteIndexPath(jsonPath)).codes).toBe(1200);
     } finally {
       await index.close();
     }
