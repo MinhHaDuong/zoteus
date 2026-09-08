@@ -100,6 +100,7 @@ const skeleton = [
   'manifest.json',
   'icon.png',
   'dist/index.js',
+  'THIRD_PARTY_NOTICES.md',
   'node_modules/@modelcontextprotocol/sdk/package.json',
   'node_modules/pdfjs-dist/legacy/build/pdf.mjs',
   'node_modules/@napi-rs/canvas/js-binding.js',
@@ -283,6 +284,21 @@ describe('auditBundle', () => {
       'missing dist/index.js (the server entry point)',
       'missing node_modules/pdfjs-dist/legacy/build/pdf.mjs (pdfjs-dist)',
       'missing node_modules/@napi-rs/canvas/js-binding.js (the canvas loader)',
+    ]);
+  });
+
+  // #70: `npm ci --omit=dev` in the staging directory puts node_modules/citeproc in every
+  // bundle, and citeproc is CPAL licensed, so the notices file has to be packed with it.
+  // The release gate is what proves the staging step did not quietly stop copying it.
+  it('refuses a bundle that carries citeproc without the third-party notices', () => {
+    const { problems } = auditBundle({
+      platform: 'linux',
+      manifest: platformManifest(template, 'linux'),
+      entries: complete.linux.filter((e) => e !== 'THIRD_PARTY_NOTICES.md'),
+      lock,
+    });
+    expect(problems).toEqual([
+      'missing THIRD_PARTY_NOTICES.md (the third-party attribution notices)',
     ]);
   });
 

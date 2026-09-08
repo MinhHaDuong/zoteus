@@ -113,3 +113,5 @@ Contributions are welcome; see [`CONTRIBUTING.md`](./CONTRIBUTING.md). Zoteus is
 ## Acknowledgements
 
 Built on the [Model Context Protocol](https://modelcontextprotocol.io), the [Zotero Web API](https://www.zotero.org/support/dev/web_api/v3/basics), [citeproc-js](https://citeproc-js.readthedocs.io), and the [Citation Style Language](https://citationstyles.org). Not affiliated with or endorsed by the Corporation for Digital Scholarship / Zotero.
+
+citeproc-js implements the Citation Style Language. (c) Frank Bennett, used under the Common Public Attribution License 1.0. <https://citationstyles.org/> Dependency notices are collected in [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md).

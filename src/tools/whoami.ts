@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
+import { ATTRIBUTION_LINE, CITEPROC_ATTRIBUTION } from '../lib/notices.js';
 
 const whoami: ToolDefinition = {
   name: 'zotero_whoami',
@@ -38,6 +39,13 @@ const whoami: ToolDefinition = {
         ...(ctx.search.embedderReason ? { reason: ctx.search.embedderReason } : {}),
       },
       update,
+      // The bibliography formatter is citeproc-js, redistributed under the CPAL, whose
+      // Exhibit B asks for its attribution where a session begins (#70). This is the tool
+      // the server's instructions tell every client to call first, so it is the one place
+      // in the protocol that reliably reaches a person once per session; the startup log
+      // line in src/index.ts is per process, which is not the same thing over HTTP.
+      // THIRD_PARTY_NOTICES.md carries the full text.
+      attribution: CITEPROC_ATTRIBUTION,
     };
     // Naming the remedy beside the symptom: an unavailable local API is nearly always the
     // one Zotero setting, and the answer is re-checked on every call now, so there is no
@@ -60,6 +68,9 @@ const whoami: ToolDefinition = {
           : '';
       summary += ` Zoteus ${update.latest} is available (installed: ${update.current}): ${update.url}.${bundleHint}`;
     }
+    // Last, so it never displaces the answer the caller asked for, and unconditional, so it
+    // is displayed whatever the identity turns out to be.
+    summary += ` ${ATTRIBUTION_LINE}`;
     return ok(structured, summary);
   },
 };

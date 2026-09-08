@@ -13,6 +13,7 @@ import { startStdio } from './transports/stdio.js';
 import { startHttp } from './transports/http.js';
 import { buildOAuth } from './auth/router.js';
 import { createLogger } from './lib/logger.js';
+import { ATTRIBUTION_LINE } from './lib/notices.js';
 import { createMetrics } from './lib/metrics.js';
 import { makeReadiness, storeCheck, zoteroPingCheck } from './lib/health.js';
 import { installShutdownHandlers } from './lib/lifecycle.js';
@@ -39,6 +40,12 @@ async function main(): Promise<void> {
   // Held by loadConfig rather than printed there: it runs before this logger exists, and a
   // setting it could not use must not be the reason the server never starts (#18).
   for (const warning of config.warnings) logger.warn(`Configuration: ${warning}`);
+  // citeproc-js is redistributed under the CPAL, whose Exhibit B asks for this line when a
+  // session begins (#70). Written before either transport is chosen, so both carry it, and
+  // through the logger, which writes to stderr: stdout is the JSON-RPC stream on stdio.
+  // `zotero_whoami` returns it too, for the HTTP server whose one process serves many
+  // sessions and for hosts that never show the operator a log at all.
+  logger.info(ATTRIBUTION_LINE);
 
   // Opened before anything is built, so a context can be handed the recorder rather than
   // reaching for a global, and so the first request is already being counted.

@@ -74,6 +74,24 @@ describe('zotero_whoami', () => {
     expect(res.content[0].text).not.toMatch(/degraded/i);
   });
 
+  // #70: citeproc-js's CPAL asks for its Exhibit B attribution when a session begins. The
+  // startup log line is once per process, which over HTTP is not once per session, so the
+  // "call this first" tool carries it too, whatever the identity turns out to be.
+  it('carries the citeproc-js attribution in the summary and the structured answer', async () => {
+    for (const ctx of [ctxWith({ userID: 1, username: 'oscardvs' }), ctxWith(null)]) {
+      const res = await whoami.handler({}, ctx);
+      expect(res.content[0].text).toContain('citeproc-js implements the Citation Style Language');
+      expect(res.content[0].text).toContain('(c) Frank Bennett');
+      expect(res.content[0].text).toContain('https://citationstyles.org/');
+      expect(res.structuredContent?.attribution).toEqual({
+        copyright: '(c) Frank Bennett',
+        phrase: 'citeproc-js implements the Citation Style Language',
+        url: 'https://citationstyles.org/',
+        license: 'Common Public Attribution License 1.0',
+      });
+    }
+  });
+
   it('omits the update notice when no newer release is known', async () => {
     const res = await whoami.handler({}, ctxWith(null));
     expect(res.structuredContent?.update).toBeNull();

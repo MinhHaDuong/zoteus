@@ -85,6 +85,10 @@ const ALWAYS_REQUIRED: ReadonlyArray<{ entry: string; proves: string }> = [
   { entry: 'node_modules/@modelcontextprotocol/sdk/package.json', proves: 'the MCP SDK' },
   { entry: 'node_modules/pdfjs-dist/legacy/build/pdf.mjs', proves: 'pdfjs-dist' },
   { entry: 'node_modules/@napi-rs/canvas/js-binding.js', proves: 'the canvas loader' },
+  // The bundle carries node_modules/citeproc, which is CPAL licensed and asks for an
+  // attribution notice to travel with it (#70). Checked here rather than trusted, because
+  // this is the one artefact where the obligation is created by the packing step itself.
+  { entry: 'THIRD_PARTY_NOTICES.md', proves: 'the third-party attribution notices' },
 ];
 
 /**
@@ -247,7 +251,9 @@ export function stage(dir: string, platform: Platform): void {
   );
   copyFileSync(join(root, 'mcpb', 'icon.png'), join(dir, 'icon.png'));
   cpSync(join(root, 'dist'), join(dir, 'dist'), { recursive: true });
-  for (const file of ['package.json', 'package-lock.json'])
+  // package.json and package-lock.json are what the `npm ci` below reads;
+  // THIRD_PARTY_NOTICES.md rides along because that install puts citeproc in the bundle.
+  for (const file of ['package.json', 'package-lock.json', 'THIRD_PARTY_NOTICES.md'])
     copyFileSync(join(root, file), join(dir, file));
 
   const [first, ...rest] = BUNDLES[platform].cpus;

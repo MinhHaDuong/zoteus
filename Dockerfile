@@ -20,7 +20,10 @@ ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
-COPY --chown=node:node package.json ./
+# THIRD_PARTY_NOTICES.md travels with package.json because the node_modules copied above
+# include citeproc, which is CPAL licensed and asks for its attribution to be carried with
+# any redistribution (#70). The server also writes the attribution line to its log at startup.
+COPY --chown=node:node package.json THIRD_PARTY_NOTICES.md ./
 
 # Configure at deploy time (TLS is terminated by your proxy/tunnel in front of this):
 #   ZOTERO_API_KEY=...                 (operator's Zotero key — single tenant)
