@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok, optionalLibrary } from '../registry/registry.js';
+import { okLibraryContent, optionalLibrary } from '../registry/registry.js';
 
 const getItem: ToolDefinition = {
   name: 'zotero_get_item',
@@ -37,7 +37,7 @@ const getItem: ToolDefinition = {
       structured.children = children.data;
       summary += ` (+${children.data.length} child item(s))`;
     }
-    return ok(structured, summary);
+    return okLibraryContent(structured, summary);
   },
 };
 

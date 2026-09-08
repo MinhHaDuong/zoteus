@@ -7,6 +7,7 @@ import {
   requireCloud,
   isLocalWritesUnavailable,
   ensureLocalApi,
+  requireBulkConfirm,
 } from '../registry/registry.js';
 
 function versionOf(item: any): number | undefined {
@@ -17,16 +18,25 @@ const trashItems: ToolDefinition = {
   name: 'zotero_trash_items',
   title: 'Trash or restore Zotero items',
   description:
-    'Move items to the trash (the safe, REVERSIBLE default) or restore them. This sets the `deleted` flag (1=trash, 0=restore) — it is NOT a permanent delete, so trashed items can be recovered here or in the Zotero app. Use this instead of zotero_delete_items unless you truly need irreversible removal. Provide `item_keys` and optional `action` (default "trash"). Writes go to the running Zotero desktop app for your personal library (via its local-API writes where available), otherwise to the cloud Web API.',
+    'Move items to the trash (the safe, REVERSIBLE default) or restore them. This sets the `deleted` flag (1=trash, 0=restore) — it is NOT a permanent delete, so trashed items can be recovered here or in the Zotero app. Use this instead of zotero_delete_items unless you truly need irreversible removal. Provide `item_keys` and optional `action` (default "trash"). Writes go to the running Zotero desktop app for your personal library (via its local-API writes where available), otherwise to the cloud Web API. When the server sets a bulk-write threshold (ZOTEUS_CONFIRM_BULK_WRITES, off by default), trashing more items than that in one call also needs `confirm: true`.',
   inputSchema: {
     item_keys: z.array(z.string()).min(1).describe('Item keys to trash or restore.'),
     action: z.enum(['trash', 'restore']).optional().describe('Default "trash".'),
+    confirm: z
+      .boolean()
+      .optional()
+      .describe('Required to trash more items in one call than the server\'s bulk-write threshold.'),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   handler: async (args, ctx) => {
     const deleted = args.action === 'restore' ? 0 : 1;
+    // Restore puts items back, so only the trashing direction is gated.
+    if (deleted) {
+      const refusal = requireBulkConfirm(ctx, args.item_keys.length, 'trash', args.confirm);
+      if (refusal) return refusal;
+    }
     const lib = resolveLibrary(ctx, args);
     // Local-first for the personal library when the desktop app supports writes.
     if (ctx.localWrites && isPersonalLibrary(lib) && (await ensureLocalApi(ctx))) {

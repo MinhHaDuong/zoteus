@@ -72,6 +72,7 @@ Local API keys have nothing to do with zotero.org keys: they never leave your ma
 - **Validation before create.** New items are checked against the live Zotero schema (valid `itemType`, valid fields, valid creator types). Notes/attachments/annotations are exempt from field checks by design.
 - **Batch limits & partial failure.** Requests auto-chunk to Zotero's 50-object limit. Batch responses are parsed per-object — a request that returns HTTP 200 with some failures reports exactly which objects failed and why.
 - **Trash by default, delete gated.** "Removing" defaults to the reversible trash. Permanent deletion is double-gated: the server must be started with `ZOTEUS_ALLOW_DELETE=true` **and** each call must pass `confirm:true`.
+- **An optional bulk threshold.** `ZOTEUS_CONFIRM_BULK_WRITES=<n>` (default `0`, off) makes `zotero_trash_items` (trashing, not restoring), `zotero_manage_tags` add/remove, and `zotero_manage_collections action:"remove_items"` refuse above `n` items in one call unless it also passes `confirm:true`. Single-item edits stay fluent. It is a deliberation step at the scale where a bad decision does real damage, not a human in the loop: the model can re-call with `confirm:true`. Read [the threat model](./threat-model.md) for why that distinction matters, and for what a write-enabled deployment is actually trusting.
 
 ## Examples
 

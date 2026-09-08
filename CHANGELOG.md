@@ -6,6 +6,27 @@ All notable changes to Zoteus are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+- **The threat model is written down, and library text says where it came from (#71).** A
+  Zotero library is not a trusted corpus: titles, abstracts, creator names, tags, note HTML,
+  annotation text and extracted PDF/EPUB body text arrive from PDFs downloaded off the open
+  web, from group libraries, and from items other people shared, and they reached the
+  calling model unmarked. [`docs/threat-model.md`](./docs/threat-model.md) now states the
+  boundary Zoteus does and does not draw, names the three deployment postures, and links
+  from `SECURITY.md` and the README. `zotero_search_items`, `zotero_get_item`,
+  `zotero_get_fulltext` and `zotero_semantic_search` carry one added `provenance` field
+  (`source: "library-content"`, `trust: "untrusted"`) alongside their unchanged payload,
+  which rides `ok()`'s text mirror so it reaches clients that surface only text. The marker
+  makes the boundary expressible; it does not sanitise anything and it does not stop prompt
+  injection.
+- **`ZOTEUS_CONFIRM_BULK_WRITES`: an optional bulk-write threshold (#71).** Above `n` items
+  in one call, `zotero_trash_items` (trashing, not restoring), `zotero_manage_tags`
+  add/remove, and `zotero_manage_collections action:"remove_items"` refuse unless the call
+  also passes `confirm: true`, following the `ZOTEUS_ALLOW_DELETE` + `confirm` idiom.
+  Single-item edits stay fluent. Default `0`, meaning off, so no existing call changes. It
+  is a deliberation step at the scale where a bad decision does real damage, not a human in
+  the loop: a model can re-call with `confirm: true`.
+
 ### Changed
 - **`pdfjs-dist` is pinned to exactly 5.6.205 (#69).** It is the last release that runs on
   the Node 20.19 floor the package declares: 5.7.284 and the whole 6.x line require

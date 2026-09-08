@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, optionalLibrary, requireCloudLibrary } from '../registry/registry.js';
+import { ok, optionalLibrary, requireCloudLibrary, requireBulkConfirm } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
 
 function err(text: string): ToolHandlerResult {
@@ -16,13 +16,17 @@ const manageCollections: ToolDefinition = {
   name: 'zotero_manage_collections',
   title: 'Manage Zotero collections',
   description:
-    'List, create, rename, reparent, or delete collections, and move items into or out of a collection. Set `action` to one of: "list" (all collections with key/name/parent), "create" (needs `name`, optional `parent_collection` key — omit for top-level), "rename" (needs `collection_key` + `name`), "reparent" (needs `collection_key`; `parent_collection` key, or omit to move to top level), "delete" (needs `collection_key`), "add_items" / "remove_items" (need `collection_key` + `item_keys`; collection membership lives on each item). All actions except "list" write to the cloud Web API.',
+    'List, create, rename, reparent, or delete collections, and move items into or out of a collection. Set `action` to one of: "list" (all collections with key/name/parent), "create" (needs `name`, optional `parent_collection` key — omit for top-level), "rename" (needs `collection_key` + `name`), "reparent" (needs `collection_key`; `parent_collection` key, or omit to move to top level), "delete" (needs `collection_key`), "add_items" / "remove_items" (need `collection_key` + `item_keys`; collection membership lives on each item). All actions except "list" write to the cloud Web API. When the server sets a bulk-write threshold (ZOTEUS_CONFIRM_BULK_WRITES, off by default), removing more items than that from a collection in one call also needs `confirm: true`.',
   inputSchema: {
     action: z.enum(['list', 'create', 'rename', 'reparent', 'delete', 'add_items', 'remove_items']),
     name: z.string().optional().describe('Collection name (create/rename).'),
     collection_key: z.string().optional().describe('Target collection key (all actions except list/create).'),
     parent_collection: z.string().optional().describe('Parent collection key; omit for top-level.'),
     item_keys: z.array(z.string()).optional().describe('Item keys (add_items/remove_items).'),
+    confirm: z
+      .boolean()
+      .optional()
+      .describe("Required to remove more items in one call than the server's bulk-write threshold."),
     library_type: z.enum(['user', 'group']).optional(),
     library_id: z.number().int().optional(),
   },
@@ -90,6 +94,11 @@ const manageCollections: ToolDefinition = {
     // add_items / remove_items
     if (!args.collection_key || !args.item_keys?.length) {
       return err('`collection_key` and `item_keys` are required.');
+    }
+    // add_items only widens membership; remove_items is the lossy direction.
+    if (args.action === 'remove_items') {
+      const refusal = requireBulkConfirm(ctx, args.item_keys.length, 'remove from a collection', args.confirm);
+      if (refusal) return refusal;
     }
     const updated: string[] = [];
     const failed: Array<{ key: string; message: string }> = [];

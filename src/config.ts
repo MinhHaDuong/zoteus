@@ -84,6 +84,12 @@ export interface ZoteusConfig {
   contactEmail?: string;
   allowDelete: boolean;
   readOnly: boolean;
+  /**
+   * Number of items above which a bulk write (trash, tag add/remove, collection removal)
+   * refuses unless the call also passes `confirm: true`. `0` (the default) disables the
+   * gate entirely, so an existing working call keeps working. See docs/threat-model.md.
+   */
+  confirmBulkWrites: number;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   logFormat: 'text' | 'json';
   /** A file every log line is appended to as well as stderr (ZOTEUS_LOG_FILE). */
@@ -270,6 +276,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTEUS_CONTACT_EMAIL: z.string().email().optional(),
         ZOTEUS_ALLOW_DELETE: bool(false),
         ZOTEUS_READ_ONLY: bool(false),
+        ZOTEUS_CONFIRM_BULK_WRITES: z.coerce.number().int().nonnegative().default(0),
         ZOTEUS_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
         ZOTEUS_LOG_FORMAT: z.enum(['text', 'json']).default('text'),
         ZOTEUS_LOG_FILE: z.string().min(1).optional(),
@@ -479,6 +486,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     contactEmail: parsed.ZOTEUS_CONTACT_EMAIL,
     allowDelete: parsed.ZOTEUS_ALLOW_DELETE,
     readOnly: parsed.ZOTEUS_READ_ONLY,
+    confirmBulkWrites: parsed.ZOTEUS_CONFIRM_BULK_WRITES,
     logLevel: parsed.ZOTEUS_LOG_LEVEL,
     logFormat: parsed.ZOTEUS_LOG_FORMAT,
     logFile: parsed.ZOTEUS_LOG_FILE,

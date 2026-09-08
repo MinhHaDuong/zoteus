@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolContext, ToolDefinition, ToolHandlerResult } from '../registry/registry.js';
-import { ok, optionalLibrary } from '../registry/registry.js';
+import { okLibraryContent, optionalLibrary } from '../registry/registry.js';
 import type { LibraryRef } from '../api/web-client.js';
 import { rankPassages, approxPage, type Passage } from '../features/fulltext/passages.js';
 import {
@@ -233,7 +233,7 @@ const getFulltext: ToolDefinition = {
         : truncated
           ? `Only the first ${MAX_OUTLINE_ENTRIES} of ${outline.length} headings are listed.`
           : undefined;
-      return ok(
+      return okLibraryContent(
         {
           ...identity,
           mode: 'outline',
@@ -391,7 +391,7 @@ const getFulltext: ToolDefinition = {
         (truncated ? ' Some lower-ranked passages omitted (max_chars).' : '') +
         sourceNotice +
         degradeNotice;
-      return ok(
+      return okLibraryContent(
         { ...base, mode: 'passages', pageSource, passages, truncated, notice: (sourceNotice + degradeNotice).trim() || undefined },
         summary,
       );
@@ -421,7 +421,7 @@ const getFulltext: ToolDefinition = {
       const text = truncated ? slice.slice(0, maxChars) : slice;
       const emptyNotice =
         !text && totalPages ? ` Pages ${args.page_range} appear to be beyond the document (~${totalPages} pages).` : '';
-      return ok(
+      return okLibraryContent(
         {
           ...base,
           mode: 'page_range',
@@ -448,14 +448,14 @@ const getFulltext: ToolDefinition = {
       ? ` Truncated to ${maxChars} of ${content.length} chars — pass query (for relevant passages), page_range, or a larger max_chars.`
       : '';
     const notice = (sourceNotice + truncNotice).trim() || undefined;
-    const provenance =
+    const textOrigin =
       fulltextSource === 'zotero'
         ? 'from the Zotero full-text index'
         : `extracted from the ${fulltextSource === 'epub' ? 'EPUB' : 'PDF'} directly`;
-    return ok(
+    return okLibraryContent(
       { ...base, mode: 'document', pageSource, text, truncated, omittedChars: truncated ? content.length - maxChars : 0, notice },
       `Full text of ${args.item_key}: ${content.length} chars${truncated ? `, returned first ${maxChars}` : ''} ` +
-        `(${provenance}).`,
+        `(${textOrigin}).`,
     );
   },
 };

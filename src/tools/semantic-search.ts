@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
-import { ok } from '../registry/registry.js';
+import { okLibraryContent } from '../registry/registry.js';
 import {
   embedderNotice,
   fulltextNotice,
@@ -144,7 +144,7 @@ const semanticSearch: ToolDefinition = {
       truncationNotice(after) +
       // Same for an index that never reached disk: these results exist only until restart.
       persistNotice(after);
-    return ok(
+    return okLibraryContent(
       {
         hits,
         embedder: ctx.search.embedderName,

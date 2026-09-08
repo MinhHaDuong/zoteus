@@ -1,5 +1,20 @@
 # Security policy
 
+## Threat model
+
+Read [`docs/threat-model.md`](./docs/threat-model.md) before deciding how to deploy Zoteus.
+Two things in it are worth knowing even if you read nothing else:
+
+- **A Zotero library is untrusted input to the model that reads it.** Titles, abstracts,
+  creator names, tags, note HTML, annotation text and extracted PDF/EPUB body text come
+  from PDFs downloaded off the open web, from group libraries, and from items other people
+  shared. That text reaches the calling model through the ordinary read tools. Zoteus marks
+  it as library content, which makes the boundary expressible; it does not sanitise it, and
+  nothing here stops prompt injection.
+- **A write-enabled deployment trusts the calling model with your library.** Set
+  `ZOTEUS_READ_ONLY=true` for anything reachable by someone other than you. See the
+  deployment postures in the threat model for the rest.
+
 ## Reporting a vulnerability
 
 Please do not open a public issue for a security problem. Use one of these two channels:

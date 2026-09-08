@@ -242,3 +242,71 @@ describe('zotero_saved_searches', () => {
     expect(ctx.web.writeSearches).toHaveBeenCalled();
   });
 });
+
+// The bulk-write gate (ZOTEUS_CONFIRM_BULK_WRITES). Off by default, so every test above
+// runs unchanged; these set a threshold explicitly and check both sides of it.
+describe('bulk-write confirmation gate', () => {
+  const keys = (n: number) => Array.from({ length: n }, (_, i) => `K${i}`);
+
+  it('is off by default: a large trash still goes through', async () => {
+    const ctx = makeCtx();
+    const res = await trashItems.handler({ item_keys: keys(500) }, ctx);
+    expect(res.isError).toBeUndefined();
+    expect(ctx.web.writeItems).toHaveBeenCalled();
+  });
+
+  it('refuses a bulk trash above the threshold without confirm', async () => {
+    const ctx = makeCtx({ config: { confirmBulkWrites: 10 } });
+    const res = await trashItems.handler({ item_keys: keys(11) }, ctx);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toMatch(/ZOTEUS_CONFIRM_BULK_WRITES/);
+    expect(res.content[0].text).toMatch(/confirm:true/);
+    expect(ctx.web.writeItems).not.toHaveBeenCalled();
+  });
+
+  it('lets the same call through with confirm:true', async () => {
+    const ctx = makeCtx({ config: { confirmBulkWrites: 10 } });
+    const res = await trashItems.handler({ item_keys: keys(11), confirm: true }, ctx);
+    expect(res.isError).toBeUndefined();
+    expect(ctx.web.writeItems).toHaveBeenCalled();
+  });
+
+  it('leaves a call at or below the threshold fluent', async () => {
+    const ctx = makeCtx({ config: { confirmBulkWrites: 10 } });
+    const res = await trashItems.handler({ item_keys: keys(10) }, ctx);
+    expect(res.isError).toBeUndefined();
+    expect(ctx.web.writeItems).toHaveBeenCalled();
+  });
+
+  it('does not gate restore, which puts items back', async () => {
+    const ctx = makeCtx({ config: { confirmBulkWrites: 10 } });
+    const res = await trashItems.handler({ item_keys: keys(50), action: 'restore' }, ctx);
+    expect(res.isError).toBeUndefined();
+  });
+
+  it('gates a bulk retag, in both directions', async () => {
+    for (const action of ['add', 'remove'] as const) {
+      const ctx = makeCtx({ config: { confirmBulkWrites: 10 } });
+      const res = await manageTags.handler({ action, tags: ['t'], item_keys: keys(40) }, ctx);
+      expect(res.isError).toBe(true);
+      expect(ctx.web.patchItem).not.toHaveBeenCalled();
+    }
+  });
+
+  it('gates removing items from a collection, but not adding them', async () => {
+    const ctx = makeCtx({ config: { confirmBulkWrites: 10 } });
+    const removed = await manageCollections.handler(
+      { action: 'remove_items', collection_key: 'C1', item_keys: keys(40) },
+      ctx,
+    );
+    expect(removed.isError).toBe(true);
+    expect(ctx.web.patchItem).not.toHaveBeenCalled();
+
+    const added = await manageCollections.handler(
+      { action: 'add_items', collection_key: 'C1', item_keys: keys(40) },
+      ctx,
+    );
+    expect(added.isError).toBeUndefined();
+    expect(ctx.web.patchItem).toHaveBeenCalled();
+  });
+});
