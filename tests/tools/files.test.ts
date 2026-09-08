@@ -30,6 +30,9 @@ function makeCtx(overrides: any = {}): any {
     ctx.web.getFullText(opts.library ?? ctx.router.defaultLibrary(), key);
   ctx.router.fullTextSince ??= (version: number, opts: any = {}) =>
     ctx.web.fullTextSince(opts.library ?? ctx.router.defaultLibrary(), version);
+  // Exports are routed the same way (#75).
+  ctx.router.exportItems ??= ({ library, ...rest }: any) =>
+    ctx.web.exportItems(library ?? ctx.router.defaultLibrary(), rest);
   return ctx;
 }
 
@@ -50,6 +53,8 @@ describe('zotero_export', () => {
   it('returns the exported text', async () => {
     const ctx = makeCtx();
     const res = await exportTool.handler({ format: 'bibtex', limit: 5 }, ctx);
+    // Routed read: the default library reaches the cloud double only because these
+    // doubles have no local API.
     expect(ctx.web.exportItems).toHaveBeenCalledWith(
       { type: 'user', id: 19552201 },
       expect.objectContaining({ format: 'bibtex', limit: 5 }),

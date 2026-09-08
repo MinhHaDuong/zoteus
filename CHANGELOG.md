@@ -124,6 +124,12 @@ All notable changes to Zoteus are documented here. The format is based on
   through the existing notice, and the next query ranks again as soon as it recovers,
   without an index rebuild.
 
+- **Stock `zotero_export` reads a desktop-served library with no cloud key (#75).** Every
+  stock format, and the `biblatex` that `better-biblatex` degrades to, went to api.zotero.org
+  unconditionally, which in key-free local mode is `users/0` and a refusal. Both calls now
+  take the same routed read as `zotero_format_bibliography` (#64): the desktop app renders the
+  export for any library it serves, the Web API for everything else, with selectors and limit
+  forwarded unchanged. The Better BibTeX branch and explicit cloud libraries behave as before.
 ### Documentation
 - **A "Group libraries" section in `docs/writing.md`**: that group writes work but are
   cloud-only whatever the desktop app is doing, the three separate permissions a group
