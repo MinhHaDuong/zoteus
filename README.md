@@ -98,7 +98,7 @@ Full table in [`docs/configuration.md`](./docs/configuration.md). To run a share
 
 In this repository: [Getting started](./docs/getting-started.md) · [Configuration](./docs/configuration.md) · [Import & resolver](./docs/resolver.md) · [Architecture](./docs/architecture.md) · [Safe writes](./docs/writing.md) · [Threat model](./docs/threat-model.md) · [Citations](./docs/citations.md) · [Semantic search](./docs/semantic-search.md) · [Scholarly context](./docs/scholar.md) · [Code execution](./docs/code-execution.md) · [Deployment](./docs/deployment.md) · [Uninstall](./docs/uninstall.md)
 
-Zoteus is listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.oscardvs/zoteus`.
+Zoteus is listed in the [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.oscardvs/zoteus`, on [mcpservers.org](https://mcpservers.org), and in the Citation Styler [overview of Zotero MCP projects](https://citationstyler.com/en/knowledge/zotero-and-mcp-all-projects-at-a-glance-to-connect-your-library-with-ai/).
 
 ## Uninstall
 
