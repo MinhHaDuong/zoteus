@@ -44,3 +44,6 @@ data/
 
 # Internal planning artifacts (superpowers specs/plans/handoff briefs) — kept local, not published
 docs/superpowers/
+
+# Working notes and drafts: local only, never published.
+.claude/drafts/

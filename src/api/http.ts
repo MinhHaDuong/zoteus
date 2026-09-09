@@ -48,9 +48,19 @@ export class RateLimitedFetcher {
   ): Promise<Response> {
     const maxRetries = opts?.maxRetries ?? 4;
     const deadlineMs = opts?.deadlineMs ?? this.defaultDeadlineMs;
-    const start = Date.now();
-    const remaining = () => deadlineMs - (Date.now() - start);
     return this.sem.run(async () => {
+      // The clock starts HERE, once a permit is held, not when the call was made. The
+      // budget is a statement about Zotero (its error says so in as many words), and time
+      // spent queued behind this process's own other requests is not Zotero being slow. A
+      // busy fetcher used to spend a request's whole budget in the queue and then report a
+      // desktop app answering in under a second as a hung one (#78).
+      //
+      // What this costs is tail latency: a request that used to fail while queued now runs,
+      // so on a saturated fetcher the time a caller waits can grow by the queue wait on top
+      // of the budget. Nothing waits longer per request, and the semaphore is what bounds
+      // the queue.
+      const start = Date.now();
+      const remaining = () => deadlineMs - (Date.now() - start);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.max(0, remaining()));
       (timer as { unref?: () => void }).unref?.();

@@ -22,6 +22,49 @@ describe('LocalApiClient', () => {
     expect(await makeLocal(fetchImpl).ping()).toBe(false);
   });
 
+  // The desktop app gets its own per-read budget (ZOTEUS_ZOTERO_DEADLINE_MS), so a machine
+  // whose local API answers a listing in 40 s can be given room to finish an index build's
+  // attachment map without letting every cloud call hang that long too (#78).
+  it('spends its configured budget on an ordinary read', async () => {
+    const hang = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+          );
+        }),
+    );
+    const local = new LocalApiClient({
+      port: 23119,
+      fetcher: new RateLimitedFetcher({ fetchImpl: hang, maxConcurrency: 4 }),
+      deadlineMs: 80,
+    });
+    await expect(local.listItems({ limit: 5 })).rejects.toThrow(/budget/);
+    expect(hang).toHaveBeenCalledTimes(1);
+  }, 1500);
+
+  // The probe is the one read that must not inherit it: it answers now or not at all, and a
+  // raised budget would turn every tool call's liveness check into a wait that long.
+  it('leaves the liveness probe its own budget', async () => {
+    const hang = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () =>
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+          );
+        }),
+    );
+    const local = new LocalApiClient({
+      port: 23119,
+      fetcher: new RateLimitedFetcher({ fetchImpl: hang, maxConcurrency: 4 }),
+      probeFetcher: new RateLimitedFetcher({ fetchImpl: hang, maxConcurrency: 2 }),
+      deadlineMs: 60_000,
+    });
+    const started = Date.now();
+    expect(await local.probe(200)).toEqual({ up: false, timedOut: true });
+    expect(Date.now() - started).toBeLessThan(1000);
+  }, 1500);
+
   it('lists items against users/0', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       expect(url).toContain('/api/users/0/items');

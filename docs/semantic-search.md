@@ -29,7 +29,9 @@ can never time out the MCP client, even on very large libraries.
   **effective** `embedder`, `libraryVersion` / `libraryBackend` (the version stamp an
   update diffs from), `fulltextVersion` (how far into Zotero's separate full-text sequence
   the index has read, see [Text extracted after the
-  build](#text-extracted-after-the-build)), `resumedFrom` (items inherited when a build
+  build](#text-extracted-after-the-build)), `fulltextPartial` (present only when this
+  index's body text was gathered over an attachment map that never reached the end of the
+  library, so a full re-read is still owed), `resumedFrom` (items inherited when a build
   resumed an interrupted one), `updateNotice` (what the last update did, or why a rebuild
   replaced it), `localApiDegradedAt` (present only when this job saturated Zotero's local
   API and the session fell back to the Web API; see [Full-text
@@ -196,9 +198,42 @@ unchanged item(s) gained newly extracted attachment full text."*
 - **An index written before 1.10 has no cursor.** The first update that wants full text
   cannot tell which text is new, so it catches up its **coverage gap** instead: the items
   holding no body passages at all. That runs once, because the same update stores a real
-  cursor. An index that holds no body text at all is left alone entirely: turning
+  cursor. An index that holds no body text at all is left alone entirely, and keeps its
+  cursor at 0 rather than being stamped for coverage it never indexed: turning
   `action:"update"` into the hours-long full-text crawl that was never asked for is not an
   update. Run `action:"build"` with `fulltext:true` for that.
+- **A build whose attachment map stopped early has no cursor either, and a coverage gap is
+  not enough to describe it.** The map is a paged crawl of every attachment in the library,
+  and one that does not reach the end leaves items holding *some* of their body text:
+  Zotero lists attachments newest-modified first, so an item's own attachments are not
+  adjacent in that crawl. Such a build records no cursor and marks its coverage partial, in
+  the index and on disk. The first update asked for full text whose **own** attachment map
+  reaches the end of the library then runs its catch-up in **full** rather than gap-only
+  mode: every indexed item that update's census names is re-read, once. While the mark
+  stands that catch-up asks Zotero's full-text sequence **from the start**, whatever cursor
+  the index holds, since the text a truncated map missed was extracted before that cursor
+  and no `?since=` delta would ever name it. (A delta can raise the mark too: an ordinary
+  `action:"update"` that re-indexes a changed item's body text over a map that stopped short
+  writes only part of that item's text, and it does so on an index that already carries a
+  cursor.) Only such a run, with every read succeeding, stamps the cursor and clears the
+  mark, so an update that stops halfway is repeated rather than sealed. An update whose map
+  stops short again cannot make the coverage whole whatever it reads, so it does not try: it
+  fills in the items holding no body text at all, says so, and leaves the mark and the
+  withheld cursor where they are.
+- **The recovery is bounded, and visible.** Read failures are caught per attachment, so one
+  file that can never be read (moved, a 403, a linked file the server will not serve) would
+  otherwise buy a whole body crawl on every update forever. After three full re-reads that
+  are paid over a complete map and still end on unreadable text, the crawl stops being paid:
+  each update then fills in only the items holding no body text at all. Nothing is claimed
+  for that: the mark stands, the cursor stays withheld, and `fulltextReason` says the
+  re-read keeps failing, so the index never reports coverage it does not have. It only
+  stops re-buying the body crawl that cannot finish; the cheaper attachment listing crawl
+  continues, because a withheld cursor makes every later update ask the sequence from the
+  start. `action:"status"` reports the mark itself as
+  `fulltextPartial: true`, which is what survives a restart when a pass's `fulltextReason`
+  does not, together with a sentence saying what the next full-text update may cost.
+  `action:"refresh"` with `fulltext:true` (a build with `fresh:true`) rebuilds the index and
+  clears both (#78).
 - **`fulltext` must be on for the update too.** An update not asked for full text never
   consults the other sequence at all.
 

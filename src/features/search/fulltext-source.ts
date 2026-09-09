@@ -60,8 +60,10 @@ export interface FulltextSource {
   unavailable?: string;
   /**
    * Set when this source holds only part of the library's body text, or none of it because
-   * it never opened: the attachment map stopped early, or the census behind it failed. The
-   * cause alone, short enough to sit inside a sentence the caller composes.
+   * it never opened: the attachment crawl did not reach the end of the library (a failed
+   * request, its page ceiling, or a listing that stopped serving pages short of its own
+   * total), or the census behind it failed. The cause alone, short enough to sit inside a
+   * sentence the caller composes.
    *
    * What it does NOT mean is a library with nothing extracted in it, which is a complete
    * answer. An incomplete source cannot tell "this item has no text" from "this item is on
@@ -164,9 +166,37 @@ export async function createFulltextSource(
   let mapped = 0;
   /** What this map is missing, if anything; becomes `incomplete` on the source. */
   let incomplete: string | undefined;
+  /**
+   * Whether the crawl below got to the end of what it was walking, which is the only thing
+   * that makes "this item is not in the map" mean "this item has no extracted text".
+   *
+   * It is tracked rather than inferred because the loop has four exits and only one of them
+   * throws. Two of them are ends: every attachment that HAS text has been located (the
+   * usual one, and it does not need the rest of the library), or the listing has been
+   * walked to its own stated total. The other two are truncations that raise no error at
+   * all: the page ceiling, and a page that comes back empty while the listing's own total
+   * says there is more to come. Deriving the flag from the `catch` alone left
+   * both of those stamping a census-wide cursor over a map that covered a fraction of the
+   * library (#78).
+   */
+  let reachedEnd = false;
+  /** Why the crawl stopped short, when it did so without a request failing. */
+  let stoppedShort: string | undefined;
   try {
     let start = 0;
-    for (let page = 0; page < MAX_ATTACHMENT_PAGES && mapped < total; page++) {
+    for (let page = 0; ; page++) {
+      // Every attachment with text is located. The rest of the library holds none, so
+      // there is nothing further this map could learn: a complete answer, not a truncation.
+      if (mapped >= total) {
+        reachedEnd = true;
+        break;
+      }
+      if (page >= MAX_ATTACHMENT_PAGES) {
+        stoppedShort =
+          `the crawl hit its ceiling of ${MAX_ATTACHMENT_PAGES} pages of ` +
+          `${ATTACHMENT_PAGE_SIZE} attachments without reaching the end of the library`;
+        break;
+      }
       const res = await ctx.router.searchItems({
         library,
         backend,
@@ -175,7 +205,17 @@ export async function createFulltextSource(
         start,
       });
       const items = res.data ?? [];
-      if (items.length === 0) break;
+      if (items.length === 0) {
+        // Nothing left to read. Against the listing's own total that is either the end of
+        // it, or Zotero stopping short of what it said it had; with no total to check it
+        // against, an empty page is the only end there is.
+        if (res.totalResults && start < res.totalResults) {
+          stoppedShort = `Zotero stopped serving the attachment listing at ${start} of ${res.totalResults}`;
+        } else {
+          reachedEnd = true;
+        }
+        break;
+      }
       for (const it of items) {
         const d = it.data ?? it;
         const key = it.key ?? d.key;
@@ -189,7 +229,10 @@ export async function createFulltextSource(
         mapped++;
       }
       start += items.length;
-      if (res.totalResults && start >= res.totalResults) break;
+      if (res.totalResults && start >= res.totalResults) {
+        reachedEnd = true;
+        break;
+      }
     }
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
@@ -200,10 +243,17 @@ export async function createFulltextSource(
         `attachments could not be listed: ${why}`,
       );
     }
+    stoppedShort = why;
+  }
+  if (!reachedEnd) {
     // Usable, but no longer able to say that an item it does not hold has no text: the item
-    // may simply sit on the pages this crawl never reached (#67).
-    incomplete = `the attachment map stopped early after ${mapped}/${total} attachment(s): ${why}`;
-    ctx.logger.warn(`Full-text mapping stopped early after ${mapped}/${total} attachments: ${why}`);
+    // may simply sit on the pages this crawl never reached (#67). Same sentence whichever
+    // door the crawl left by, and the same one it has always had when a request threw,
+    // because that text is what a report of this quotes.
+    incomplete = `the attachment map stopped early after ${mapped}/${total} attachment(s): ${stoppedShort}`;
+    ctx.logger.warn(
+      `Full-text mapping stopped early after ${mapped}/${total} attachments: ${stoppedShort}`,
+    );
   }
 
   let failures = 0;

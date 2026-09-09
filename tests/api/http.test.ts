@@ -38,6 +38,25 @@ describe('RateLimitedFetcher', () => {
     expect(maxActive).toBe(2);
   });
 
+  // The budget is a promise about ZOTERO, and the message it fails with says so ("Zotero
+  // took longer than the 25s budget to answer a single request"). Time spent queued behind
+  // this process's own other requests is not Zotero being slow, and charging it here made a
+  // busy fetcher report a healthy desktop app as a hung one (#78).
+  it('charges only real request time to the budget, not time queued behind another request', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.endsWith('/slow')) await new Promise((r) => setTimeout(r, 150));
+      return jsonResponse(200, { ok: true });
+    });
+    const f = new RateLimitedFetcher({ fetchImpl, maxConcurrency: 1 });
+    const slow = f.fetch('https://example.test/slow');
+    // Queued behind it, with a budget its own service time (immediate) fits inside twice
+    // over, and which the wait in front of it does not.
+    const queued = f.fetch('https://example.test/quick', undefined, { deadlineMs: 100 });
+    const [, res] = await Promise.all([slow, queued]);
+    expect(res.status).toBe(200);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  }, 2000);
+
   it('gives up after maxRetries and returns the last response', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(503, 'down', { 'retry-after': '0' }));
     const f = new RateLimitedFetcher({ fetchImpl, maxConcurrency: 4 });

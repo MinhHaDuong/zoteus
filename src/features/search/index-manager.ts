@@ -96,6 +96,28 @@ const PAGE_GROUP = 100;
 const VECTOR_BACKFILL_GROUP = 500;
 
 /**
+ * How many whole-census recovery passes may be paid over a complete map before the index
+ * stops paying them (#78).
+ *
+ * The recovery a truncated attachment map owes is one full body crawl: every indexed item
+ * Zotero's full-text census names is re-read, because over such a map "this item holds
+ * passages" does not mean "this item holds all of its body text". Read failures are caught
+ * per item, so one attachment that can never be read (its file was moved, a linked file the
+ * server will not serve, a 403) leaves the pass incomplete however often it runs, and
+ * without a bound that is a full body crawl on every single update, forever, on precisely
+ * the libraries big enough for the map to have truncated in the first place.
+ *
+ * Three, because the failure this is meant to survive is a transient one (the desktop app
+ * restarting mid-pass, a file on a volume that was not mounted yet) and three updates is
+ * generous for that, while a permanent one is answered before its cost is paid a fourth
+ * time. What is NOT traded away is honesty: the mark stays standing and the cursor stays
+ * withheld past the bound, so the index never claims coverage it does not have. It only
+ * stops re-buying a crawl that cannot finish. A `action:"refresh"` (a build with
+ * `fresh:true`), or any build that starts the coverage over, clears the count with the mark.
+ */
+const FULLTEXT_RECOVERY_ATTEMPTS = 3;
+
+/**
  * Characters per token, for the rate arithmetic on `IndexBuildStatus.embedRate`. The rule
  * of thumb every provider publishes for English prose; a real count would need this side to
  * ship a tokenizer per model, and the answer is being compared against limits quoted in
@@ -263,6 +285,31 @@ export abstract class SearchIndexBase implements SearchIndex {
    * `?since=` delta, and was invisible to every later update (#26).
    */
   protected fulltextVersion = 0;
+  /**
+   * Whether the body text this index holds was gathered over an attachment map that never
+   * reached the end of the library, which makes its full-text coverage partial in a way no
+   * cursor can describe: an item may hold the text of one attachment and not of another
+   * that sat on a page the map never listed (Zotero lists attachments newest-modified
+   * first, so an item's own attachments are not adjacent in that crawl).
+   *
+   * Persisted, because it is what the recovery depends on: while it is set, a catch-up that
+   * is asked for full text, still holds no cursor, and runs against a map that reaches the
+   * end of the library re-reads the body text of every item that census names instead of
+   * skipping the ones that already hold passages. Nothing less clears it: a pass that read
+   * a delta of the sequence, missed a read, or ran against a map that stopped short again
+   * leaves it standing, and the last of those falls back to filling the coverage gap alone.
+   * Without it the recovering update sealed the gap it was supposed to close, stamping a
+   * census-wide cursor over items it had skipped (#78).
+   */
+  protected fulltextPartial = false;
+  /**
+   * Recovery passes that were paid in full over a map reaching the end of the library and
+   * still ended on body text they could not read. Persisted beside the mark, because what
+   * it bounds spans updates: at FULLTEXT_RECOVERY_ATTEMPTS the whole-census re-read stops
+   * being paid and each update fills only the items holding no body text at all, with the
+   * mark and the withheld cursor still standing and the status saying so (#78).
+   */
+  protected fulltextRecoveryAttempts = 0;
   /**
    * Where an interrupted build stopped, or undefined when there is nothing to resume.
    * Written in the same commit as the rows it describes, which is what bounds the work a
@@ -879,9 +926,58 @@ export abstract class SearchIndexBase implements SearchIndex {
     if (this.vectorScan) s.vectorScan = this.vectorScan;
     if (this.vectorScanNotice) s.vectorScanNotice = this.vectorScanNotice;
     if (this.storeNotice) s.storageNotice = this.storeNotice;
+    // The one piece of full-text state that outlives the job that recorded it, so it is
+    // reported as a fact about the index rather than as a job's reason: an index holding
+    // partial coverage still holds it after a restart, when `fulltextReason` (set by a pass,
+    // never persisted) has gone (#78). Absent, not false, on the indexes that are whole:
+    // this is a flag for the rare damaged one, not a field every caller has to read.
+    if (this.fulltextPartial) s.fulltextPartial = true;
     if (this.fulltextEnabled && this.fulltextUnavailable) s.fulltextReason = this.fulltextUnavailable;
+    // And a sentence to go with it when no pass in this process has left one. It has to say
+    // what the mark costs as well as what it means: the next full-text update may pay a
+    // whole body crawl, which on a large library is the thing a caller wants to know before
+    // starting one.
+    else if (this.fulltextPartial) s.fulltextReason = this.partialCoverageNotice();
     if (this.ownWordsUnavailable) s.ownWordsReason = this.ownWordsUnavailable;
     return s;
+  }
+
+  /**
+   * What the status says about partial coverage when no pass in this process has said
+   * anything: after a restart, or on any status poll between updates (#78).
+   *
+   * Two sentences, because the mark is two facts. What the index holds (body text gathered
+   * over a map that never reached the end of the library, so an item holding passages may
+   * still be missing an attachment's text, and no cursor was stamped), and what the next
+   * full-text update will do about it (one whole body re-read, or, past the bound, only the
+   * items holding no body text at all).
+   */
+  protected partialCoverageNotice(): string {
+    const stuck = this.fulltextRecoveryAttempts >= FULLTEXT_RECOVERY_ATTEMPTS;
+    return (
+      "This index's attachment full text is PARTIAL: it was gathered over an attachment map that never " +
+      'reached the end of the library, so an item holding body passages may still be missing the text of an ' +
+      'attachment on a page that map never listed, and nothing in either of Zotero\'s version sequences will ' +
+      'ever name it. ' +
+      // Which of the two shapes this index is in. A build over a truncated map earned no
+      // cursor at all; a delta that rewrote an item's body text over one damaged coverage an
+      // earlier pass had already stamped a cursor for, and that cursor stands (#78). Saying
+      // "fulltextVersion 0" on the second shape would contradict the number printed beside it.
+      (this.fulltextVersion === 0
+        ? 'No full-text cursor was recorded because of it (fulltextVersion 0). '
+        : `This index still holds the cursor it earned before the gap (fulltextVersion ${this.fulltextVersion}), ` +
+          'which is why the next full-text update asks the sequence from the start rather than from there. ') +
+      (stuck
+        ? `The re-read that would make this coverage whole has failed ${this.fulltextRecoveryAttempts} time(s) on ` +
+          'body text that could not be read, so it is no longer attempted: each zotero_index action:"update" now ' +
+          'fills in only the items holding no body text at all. Run zotero_index action:"refresh" with ' +
+          'fulltext:true to rebuild this index and clear the mark.'
+        : 'The next zotero_index action:"update" asked for full text re-reads the body text of every indexed ' +
+          "item Zotero's full-text census names, once, as soon as its own attachment map reaches the end of the " +
+          'library: one whole body crawl, which on a large library takes as long as the full-text pass of a ' +
+          'build. zotero_index action:"refresh" with fulltext:true rebuilds instead, though a library whose ' +
+          'attachment map cannot reach the end at all will be marked again by that build.')
+    );
   }
 
   get isEmpty(): boolean {
@@ -904,6 +1000,14 @@ export abstract class SearchIndexBase implements SearchIndex {
     // Both cursors go for the same reason: the full-text one names text that is no longer
     // indexed, and the checkpoint names a crawl whose committed rows have just been erased.
     this.fulltextVersion = 0;
+    // An emptied store holds no body text at all, so it holds no partial coverage either:
+    // whatever build follows this defines its coverage from nothing. The recovery count
+    // goes with it: it counts attempts at a debt this store no longer owes, and an index
+    // that kept it would arrive at its bound having never re-read anything (#78). This is
+    // what makes action:"refresh" (a build with fresh:true), and any other build that does
+    // not resume a checkpoint, the way out of a recovery that keeps failing.
+    this.fulltextPartial = false;
+    this.fulltextRecoveryAttempts = 0;
     this.checkpoint = undefined;
     // And the library stamp: an emptied store holds nobody's rows. The build that called
     // this restamps its own library immediately after (the guard already ran before it).
@@ -1139,6 +1243,8 @@ export abstract class SearchIndexBase implements SearchIndex {
     /** Set when the full-text pass could not read anything at all; see where it is used. */
     let fulltextPassFailed = false;
     let fulltextFailures = 0;
+    /** Set when the attachment map behind that pass covered only part of the library. */
+    let fulltextMapIncomplete = false;
     // Where the crawl reads next, and the one number a resume needs: it was committed with
     // the rows, so what a resume redoes is bounded by the last persistence interval.
     let start = resume ? resume.crawlOffset : 0;
@@ -1426,6 +1532,12 @@ export abstract class SearchIndexBase implements SearchIndex {
         // never read are unchanged in Zotero, so no `?since=` delta will ever revisit them.
         const failures = opts.fulltextFailures?.() ?? 0;
         fulltextFailures = failures;
+        // The other half of the same question, and it cannot be derived from the count
+        // above. `servable` narrowed the worklist to the keys the attachment map reached,
+        // so the attachments on the pages that map never listed were never asked for and
+        // never failed: from in here a build over a sixth of a library is indistinguishable
+        // from a complete one (#78).
+        fulltextMapIncomplete = opts.fulltextMapIncomplete?.() ?? false;
         if (failures > 0 && !token.cancelled) {
           fulltextPassFailed = failures >= todo.length;
           this.fulltextUnavailable =
@@ -1435,6 +1547,23 @@ export abstract class SearchIndexBase implements SearchIndex {
               ? ' No version stamp was recorded, so the next zotero_index action:"update" rebuilds rather than' +
                 ' treating this index as current.'
               : ' Re-run zotero_index action:"build" with fulltext:true to fill them in.');
+          this.opts.logger?.warn(this.fulltextUnavailable);
+        }
+        // Folded onto whatever sentence stands rather than replacing it: the cause is
+        // already there (the source's own "the attachment map stopped early after N/M", or
+        // the read failures just described) and what it does not say is the consequence.
+        // A caller reading the status needs both, because this is the one thing about this
+        // build that outlives it.
+        if (fulltextMapIncomplete && !token.cancelled) {
+          const cause = (this.fulltextUnavailable ?? '').trim();
+          const lead = cause ? (/[.!?]$/.test(cause) ? `${cause} ` : `${cause}. `) : '';
+          this.fulltextUnavailable =
+            `${lead}No full-text cursor was recorded, because the version it would carry is the whole ` +
+            "library's and this map is not. A later zotero_index action:\"update\" asked for full text " +
+            "therefore starts from the beginning of Zotero's full-text sequence: the first one whose own " +
+            'attachment map reaches the end of the library re-reads the body text of every indexed item that ' +
+            'sequence names, including the ones whose attachments this map reached only some of. Until then ' +
+            'each update fills in only the items holding no body text at all, and this notice stands.';
           this.opts.logger?.warn(this.fulltextUnavailable);
         }
       }
@@ -1474,9 +1603,33 @@ export abstract class SearchIndexBase implements SearchIndex {
       // The other sequence's cursor, and it is withheld one notch more strictly than the
       // stamp: an item whose body could not be read holds no passages, and leaving the
       // cursor where it was is exactly what sends the next update back for it (#26).
-      if (!token.cancelled && worklist && fulltextFailures === 0) {
+      //
+      // An attachment map that stopped early withholds it for the same reason one notch
+      // earlier (#78). The version this would stamp is the high-water mark of the WHOLE
+      // full-text census, taken before the map was walked, so a build that mapped 1696 of
+      // 8953 attachments would claim the other 7257 as covered, and they are then named by
+      // no `?since=` on either sequence, because their items never changed. It is
+      // exactly the silent gap #26 and #67 closed on the update path, reached by the one
+      // door the build path left open.
+      //
+      // Only this cursor is withheld: `libraryVersion` above is stamped as usual. The
+      // metadata pass really did finish, and withholding the item stamp would turn every
+      // subsequent action:"update" into a full rebuild on precisely the libraries too big
+      // to finish one. It is not needed either: with no cursor a later update asked for full
+      // text asks `/fulltext?since=0`, which names every attachment Zotero has extracted, and
+      // the flag set just below is what makes the first such update whose own map reaches the
+      // end of the library read all of them rather than only the items holding no passages at
+      // all. An update over a map that stops short again fills that gap and no more.
+      if (!token.cancelled && worklist && fulltextFailures === 0 && !fulltextMapIncomplete) {
         this.fulltextVersion = opts.fulltextVersion?.() ?? this.fulltextVersion;
       }
+      // Withholding the cursor is only half of it. An update with no cursor asks `?since=0`
+      // and gets the whole census back, but it narrows that to the index's coverage GAP (the
+      // items holding no body passages at all), and an item whose attachments straddled the
+      // cut holds passages already, so it would be skipped and then stamped past. What the
+      // recovery needs to know is that this build's coverage cannot be read off the
+      // passages it left behind, and that is what this records, durably (#78).
+      if (!token.cancelled && worklist && fulltextMapIncomplete) this.fulltextPartial = true;
       // A finished build has nothing left to resume; a stopped one is the whole point of
       // keeping this, and its checkpoint has to reach disk in the same write as its rows.
       //
@@ -1664,6 +1817,26 @@ export abstract class SearchIndexBase implements SearchIndex {
     let fulltextStale: string | undefined;
     /** Items either of the two could not read, for the sentence that reports the gap. */
     let fulltextFailed = 0;
+    /** Set when this delta indexed body text off a map that stopped short of the library. */
+    let fulltextPartialWrite = false;
+    /**
+     * Set when the catch-up re-read every item the census named, so the index's body text
+     * is no longer the partial thing an incomplete map left behind (#78).
+     */
+    let fulltextRecovered = false;
+    /**
+     * Set when such a re-read was paid for and still ended on body text it could not read.
+     * Counted on the index, because it is what stops a permanently unreadable attachment
+     * from buying that crawl again on every update, forever (#78).
+     */
+    let fulltextRecoveryFailed = false;
+    /**
+     * A sentence for the status that stands on its own: nothing failed and nothing was
+     * withheld, there is simply something the caller has to know (an index holding no body
+     * text will never gain any from an update). Kept apart from the gaps above so it is
+     * never folded into a "NOT fully updated" report that would then be false.
+     */
+    let fulltextNotice: string | undefined;
 
     const maybeLog = (): void => {
       if (itemsSinceLog < progressEveryItems && Date.now() - lastLogAt < progressEveryMs) return;
@@ -1694,6 +1867,15 @@ export abstract class SearchIndexBase implements SearchIndex {
           fulltextGap ??= `the attachment text of the changed items could not be read (${[...failedText.values()][0]})`;
         }
         const keptText = failedText.size ? this.fulltextRecords(failedText.keys()) : undefined;
+        // Body text read off a map that never reached the end of the library may be only
+        // part of an item's: the map answers for the attachments it listed and knows
+        // nothing of the rest, and no read failed to say so. The item is written here all
+        // the same (some of its text beats none), and the index records that its full-text
+        // coverage is partial, so nothing later mistakes the passages it holds for the whole
+        // of its body text: the flag stands until a catch-up over a complete map re-reads
+        // the census from the start, whenever this index next has no cursor to work from
+        // (#78).
+        if (texts?.some((t) => t) && opts.fulltextMapIncomplete?.()) fulltextPartialWrite = true;
         // This page's own words, or undefined when they cannot be trusted: the read threw, or
         // the census opened degraded under it (see noteOwnWordsUnavailable). A degraded
         // census answers "no own words" for an item exactly as it would for a reader who
@@ -1760,6 +1942,9 @@ export abstract class SearchIndexBase implements SearchIndex {
         caughtUp = catchUp.items;
         fulltextStale ??= catchUp.gap;
         fulltextFailed += catchUp.failed;
+        fulltextRecovered = catchUp.recovered;
+        fulltextRecoveryFailed = catchUp.recoveryFailed;
+        fulltextNotice ??= catchUp.notice;
       }
 
 
@@ -1847,6 +2032,13 @@ export abstract class SearchIndexBase implements SearchIndex {
           `Attachment full text was NOT fully updated${scope}: ${parts.join('; ')}. ` +
           'The body text already indexed was left as it was.';
         this.opts.logger?.warn(this.fulltextUnavailable);
+      } else if (fulltextNotice && !token.cancelled) {
+        // Nothing failed and nothing was withheld: this update simply has something to say
+        // about full text, and the one moment it does is the one where it leaves a
+        // metadata-only index exactly as it found it. Said only when no gap sentence stands,
+        // because a gap is the more urgent half of the same subject.
+        this.fulltextUnavailable = fulltextNotice;
+        this.opts.logger?.info(fulltextNotice);
       }
 
       if (!token.cancelled && reconciled && crawlVersion && !ownWordsGap && !fulltextGap) {
@@ -1862,7 +2054,26 @@ export abstract class SearchIndexBase implements SearchIndex {
       // text of a changed item: the two sequences are independent (#26) and those items come
       // back with the delta. What DOES hold it back is a read the catch-up itself missed,
       // and `fulltextCatchUp` holds it by handing back the cursor it was given (#67).
-      if (!token.cancelled && reconciled) this.fulltextVersion = fulltextCursor;
+      if (!token.cancelled && reconciled) {
+        this.fulltextVersion = fulltextCursor;
+        // And the coverage mark beside it, committed under the same condition and for the
+        // same reason: it says whether this cursor can be trusted to name what is missing.
+        // Only a catch-up that entered in recovery mode and finished it earns its removal
+        // (`fulltextCatchUp` decides that, and nothing weaker counts); a delta that wrote
+        // text off a map which stopped short puts it back (#78).
+        if (fulltextRecovered) {
+          this.fulltextPartial = false;
+          // With the debt paid there is nothing left for the bound to bound, and an index
+          // that kept the count would meet it having never re-read anything.
+          this.fulltextRecoveryAttempts = 0;
+        } else if (fulltextRecoveryFailed) {
+          // A whole-census re-read was paid and still could not finish. Counted rather than
+          // acted on here: a transient failure is answered by the next update paying it
+          // again, and only a failure that repeats runs the count out (#78).
+          this.fulltextRecoveryAttempts++;
+        }
+        if (fulltextPartialWrite) this.fulltextPartial = true;
+      }
       // Inside the update's single transaction, like every other write it made: a delta
       // adds codes for the passages it added and nothing else, and a failure below rolls
       // them back with the rest.
@@ -1947,11 +2158,14 @@ export abstract class SearchIndexBase implements SearchIndex {
    * Costs one request on a library where nothing has been extracted since. Items the delta
    * already refreshed are skipped: they were re-read whole, body text included.
    *
-   * Returns the cursor to store, how many items it re-indexed, and, when a read in the loop
-   * failed or the map behind it was incomplete, why. The cursor it returns is then the one
-   * it was given: an item whose text this pass could not read is in no item delta (its
-   * attachment did not change), so `/fulltext?since=` is the only thing that will ever
-   * offer it again, and a cursor moved past it makes the miss permanent (#67).
+   * Returns the cursor to store, how many items it re-indexed, whether it made a partial
+   * index's coverage whole (which is what retires `fulltextPartial`; see the return below
+   * for the whole of that predicate), whether a recovery it did pay for ended on unreadable
+   * text (which is what bounds the next one), and, when a read in the loop failed or the map
+   * behind it was incomplete, why. The cursor it returns is then the one it was
+   * given: an item whose text this pass could not read is in no item delta (its attachment
+   * did not change), so `/fulltext?since=` is the only thing that will ever offer it again,
+   * and a cursor moved past it makes the miss permanent (#67).
    */
   private async fulltextCatchUp(
     opts: IncrementalUpdateOptions,
@@ -1960,11 +2174,37 @@ export abstract class SearchIndexBase implements SearchIndex {
     pending: ChunkRecord[],
     token: { cancelled: boolean },
     limit: Semaphore,
-  ): Promise<{ version: number; items: number; failed: number; gap?: string }> {
+  ): Promise<{
+    version: number;
+    items: number;
+    failed: number;
+    recovered: boolean;
+    recoveryFailed: boolean;
+    gap?: string;
+    notice?: string;
+  }> {
     const since = this.fulltextVersion;
+    // While the mark stands, this pass asks Zotero's full-text sequence from the START,
+    // whatever cursor is stored (#78). The mark says this index's body text was gathered
+    // over a map that never reached the end of the library, and a `?since=<cursor>` delta of
+    // that sequence can never repair that: it names what Zotero extracted AFTER the cursor,
+    // and the text the map missed was extracted before it. Keying the recovery on
+    // `since === 0` instead left the mark unreachable whenever a cursor was already stamped,
+    // which is precisely the case a delta raises it in (a delta runs on a stamped index, and
+    // the cursor only ever moves forward), so it stood forever: no update ever acted on it,
+    // and nothing on the status said so.
+    //
+    // What it costs while the mark stands: the census answer is the whole of Zotero's
+    // full-text index rather than a delta of it, and resolving its keys to items opens the
+    // attachment map, so an update that would otherwise have cost one probe pays a listing
+    // crawl too. That is the price of the recovery being reachable at all; it is a listing
+    // crawl and not a body crawl, the body reads below stay bounded by `gapOnly`, and it
+    // ends the moment a pass earns the cursor back.
+    const partial = this.fulltextPartial;
+    const from = partial ? 0 : since;
     let answer;
     try {
-      answer = await opts.fulltextCatchUp!(since);
+      answer = await opts.fulltextCatchUp!(from);
     } catch (e) {
       // A probe of the other sequence must not fail the delta: the items that DID change
       // are correctly indexed either way, and the cursor stays put so the next update asks
@@ -1973,20 +2213,139 @@ export abstract class SearchIndexBase implements SearchIndex {
         `Zotero's full-text index could not be consulted (${e instanceof Error ? e.message : String(e)}), so ` +
           'newly extracted attachment text was not picked up by this update.',
       );
-      return { version: since, items: 0, failed: 0 };
+      return { version: since, items: 0, failed: 0, recovered: false, recoveryFailed: false };
     }
+    // Never below the stored cursor: a from-the-start census over a library whose text was
+    // all extracted before that cursor answers with a version behind it.
     const version = Math.max(since, answer.version);
+    // Whether the attachment map behind THIS pass reached the end of the library, asked in
+    // the POSITIVE. `fulltextMapComplete` answers false both for a map that stopped short
+    // and for a map nobody opened, and those two are not the same thing (#78): an empty
+    // census returns before any map is crawled, so read as "not incomplete" this question
+    // answered "complete" for a pass that had crawled nothing, and such a pass then reported
+    // the index's coverage made whole and retired the mark having read nothing at all. It is
+    // the hinge of everything below: only over a map that reached the end of the library
+    // does "this item holds passages" mean "this item holds all of its body text".
+    const mapReachedEnd = !answer.incomplete && (opts.fulltextMapComplete?.() ?? false);
+    // Recovery mode: this index is known to hold body text gathered over a map that stopped
+    // short, and this pass asked Zotero's full-text sequence from the start (see `from`
+    // above), so it is the one kind of pass that can make that coverage whole.
+    const recovering = partial;
+    // The bound on what recovery may cost (#78). Read failures are caught per item, so one
+    // attachment that can never be read leaves the pass incomplete however often it runs,
+    // and each run is a whole body crawl. Past the bound the crawl is not paid again: the
+    // pass falls back to filling the coverage gap alone. The mark and the withheld cursor
+    // stand either way, so nothing is traded away except the repetition.
+    const exhausted = this.fulltextRecoveryAttempts >= FULLTEXT_RECOVERY_ATTEMPTS;
+    /**
+     * Why the whole-census re-read is not being paid although the mark stands, or undefined
+     * when it is. Ordered by what explains what: an empty census is why no map was opened,
+     * so it is asked before the map, and a bound already reached is asked before either
+     * because it settles the pass whatever the rest says.
+     */
+    const notPaid: 'exhausted' | 'nothing-named' | 'map' | undefined = !recovering
+      ? undefined
+      : exhausted
+        ? 'exhausted'
+        : !answer.itemKeys.size
+          ? 'nothing-named'
+          : !mapReachedEnd
+            ? 'map'
+            : undefined;
+    // The whole-census re-read itself: worth paying only when it can finish (a map that was
+    // opened and reached the end of the library), has something to read, and has not already
+    // failed its way through the bound.
+    const fullPass = recovering && !notPaid;
     // The map that turned attachment keys into item keys could not be read in full, so some
     // of what the probe named resolved to nothing for want of the map. Nothing is indexed
     // over, but the cursor waits: over a readable map those items are named again (#67).
-    if (answer.incomplete) return { version: since, items: 0, failed: 0, gap: answer.incomplete };
+    // A recovery is the one exception, handled below: it has a coverage gap of its own to
+    // fill, and its cursor is withheld by the flag whatever this pass manages to read.
+    if (answer.incomplete && !recovering) {
+      return { version: since, items: 0, failed: 0, recovered: false, recoveryFailed: false, gap: answer.incomplete };
+    }
     // An index written before this cursor existed cannot say which text is new, so the
-    // catch-up is narrowed to its coverage GAP: items holding no body passages at all. It
-    // is a one-off, because this update stores a cursor. And it is only run for an index
-    // that already holds body text: turning `action:"update"` into the days-long full-text
-    // crawl a metadata-only index has never had is not an update.
-    const gapOnly = since === 0;
-    if (gapOnly && this.counts().fulltextPassages === 0) return { version, items: 0, failed: 0 };
+    // catch-up is narrowed to its coverage GAP: items holding no body passages at all. That
+    // is also all an update will do for a metadata-only index: turning `action:"update"`
+    // into the days-long full-text crawl it has never had is not an update.
+    //
+    // The exception is an index whose body text came off a map that stopped short of the
+    // library, which is the whole of the recovery this cursor's absence promises (#78).
+    // "Holds body passages" means "has all of its body text" only over a complete map: an
+    // item with one attachment on a mapped page and another on a page the map never reached
+    // holds passages and is still missing text, and nothing in the item's own version, or in
+    // either sequence, will ever say so. So a recovery runs in FULL: every indexed item the
+    // census names is re-read, at the cost of one body crawl. That is the work a rebuild
+    // would do, without the metadata.
+    //
+    // Bounded twice, though, by the two things that make it worth paying. A full re-read can
+    // only make coverage whole over a map that reached the end of the library, so when this
+    // pass's own map stopped short again the expensive crawl cannot finish the job whatever
+    // it reads. And it can only make it whole if the reads succeed, so an attachment that
+    // can never be read would otherwise buy the crawl again on every update, forever
+    // (FULLTEXT_RECOVERY_ATTEMPTS). Either way the pass falls back to the cheap gap fill,
+    // the mark stands, and the cursor stays where it is: the debt is still recorded, it is
+    // simply not re-paid at the price of a body crawl per update.
+    const gapOnly = from === 0 && !fullPass;
+    /** What the status says when a recovery ran against a map that stopped short again. */
+    const mapGap = (): string =>
+      `${answer.incomplete ?? 'the attachment map did not reach the end of the library'}; only the ` +
+      'items holding no body text at all were filled in, and the ones already holding some were ' +
+      'left for a pass over a map that reaches the end of the library';
+    /** And when the re-read itself keeps failing on text that cannot be read (#78). */
+    const stuckGap = (): string =>
+      `the re-read that would make this index's partial full-text coverage whole has failed ` +
+      `${this.fulltextRecoveryAttempts} time(s) on body text that could not be read, so it is no longer ` +
+      'attempted: only the items holding no body text at all were filled in, the coverage mark stands, and ' +
+      'zotero_index action:"refresh" with fulltext:true is what clears it';
+    /** And when it named nothing to re-read, so the pass could not have recovered anything. */
+    const emptyGap = (): string =>
+      "Zotero's full-text index named no extracted attachment at all, so this pass re-read nothing and this " +
+      "index's partial full-text coverage stands: the items whose attachments the truncated map never listed " +
+      'are still owed a re-read';
+    /** Which of those describes a recovery that could not run in full, if any. */
+    const heldBack = (): string | undefined =>
+      notPaid === 'exhausted'
+        ? stuckGap()
+        : notPaid === 'nothing-named'
+          ? emptyGap()
+          : notPaid === 'map'
+            ? mapGap()
+            : undefined;
+    // Nothing indexed, so nothing to claim. Handing back the census's high-water mark here
+    // let the caller stamp a cursor over body text this index had never seen, and the next
+    // update then asked `?since=` past all of it: text extracted BEFORE that point was
+    // named by no `?since=` on either sequence, ever (#78). Leaving it where it was is not
+    // free: a cursor pinned at 0 makes every later update ask `?since=0`, take the whole
+    // census back and re-open the attachment map to resolve it, so it pays that listing
+    // crawl every time rather than once. No body text is read, and the alternative was a
+    // cursor that claimed coverage this index had never seen.
+    //
+    // It also says so, which it did not: this is the one moment an update leaves a
+    // metadata-only index exactly as it found it, and the status went on reporting nothing
+    // at all about full text. A caller who asked for `fulltext:true` and got no body text
+    // has one thing to do about it, and now reads it here (a `notice`, not a `gap`: nothing
+    // was withheld and nothing failed, so the sentence stands on its own rather than being
+    // folded into the "NOT fully updated" report).
+    if (gapOnly && this.counts().fulltextPassages === 0) {
+      const held = heldBack();
+      return {
+        version: since,
+        items: 0,
+        failed: 0,
+        recovered: false,
+        recoveryFailed: false,
+        ...(held
+          ? { gap: held }
+          : {
+              notice:
+                'This index holds no attachment body text at all, and an action:"update" does not start the ' +
+                'full-text crawl it has never had, so nothing was indexed for it and the full-text cursor stays ' +
+                'at 0. Open the PDFs you want searchable in Zotero (opening one is what makes Zotero extract its ' +
+                'text), then run zotero_index action:"build" with fulltext:true to index the whole library.',
+            }),
+      };
+    }
     const targets = [...answer.itemKeys].filter(
       (key) => known.has(key) && !refreshed.has(key) && !(gapOnly && this.hasFulltext(key)),
     );
@@ -2018,15 +2377,34 @@ export abstract class SearchIndexBase implements SearchIndex {
       await this.embedPending(pending, token, batchSize, delayMs, false);
     }
     if (!token.cancelled) await this.embedPending(pending, token, batchSize, delayMs, true);
+    // A recovery that could not run in full: over a map that stopped short again, or past
+    // the bound on a re-read that keeps failing. It filled what gap it could see and claims
+    // nothing for it. The cursor stays where it was and the mark stands, so the full re-read
+    // is still owed: by the first update whose map reaches the end in the first case, and by
+    // a rebuild in the second.
+    const held = heldBack();
+    if (held) return { version: since, items, failed: failed.size, recovered: false, recoveryFailed: false, gap: held };
     if (failed.size) {
       return {
         version: since,
         items,
         failed: failed.size,
+        recovered: false,
+        // A whole-census re-read was paid for and still ended on text it could not read.
+        // Counted, because that is what bounds the next one: a transient failure (the app
+        // restarting, a volume not mounted yet) is answered by the next update paying the
+        // crawl again, and a permanent one runs out of attempts instead of running forever.
+        recoveryFailed: fullPass && !token.cancelled,
         gap: `newly extracted attachment text could not be read (${[...failed.values()][0]})`,
       };
     }
-    return { version, items, failed: 0 };
+    // What makes the coverage whole again, and so retires the mark: this pass entered in
+    // recovery mode, ran over the whole census rather than a delta of it, read every item
+    // that census named without a single failure, ran against a map that was opened and
+    // reached the end of the library, and was not cancelled. Anything less leaves the mark
+    // standing, and only with the mark down does the cursor about to be stamped mean what it
+    // says.
+    return { version, items, failed: 0, recovered: fullPass && !token.cancelled, recoveryFailed: false };
   }
 
   /**
@@ -2708,6 +3086,8 @@ export class MemorySearchIndex extends SearchIndexBase {
       this.libraryVersion,
       this.libraryBackend ?? '',
       this.fulltextVersion,
+      this.fulltextPartial,
+      this.fulltextRecoveryAttempts,
       this.vectorEmbedderId ?? '',
       this.library ?? '',
       paused,
@@ -2972,6 +3352,14 @@ export class MemorySearchIndex extends SearchIndexBase {
       // The other sequence's cursor: what an update hands to `/fulltext?since=` to find
       // the text Zotero extracted after this index was built (#26).
       fulltextVersion: this.fulltextVersion,
+      // Whether that cursor's absence is the recoverable kind: body text gathered over an
+      // attachment map that never reached the end of the library, which the next catch-up
+      // has to re-read in full rather than skip (#78).
+      fulltextPartial: this.fulltextPartial,
+      // And how often the recovery it demands has been paid for and still failed, which is
+      // what bounds the next one: a count that reset on every restart would let a permanently
+      // unreadable attachment buy a whole body crawl on every update again (#78).
+      fulltextRecoveryAttempts: this.fulltextRecoveryAttempts,
       paused: this.paused,
     };
     if (this.libraryBackend) snapshot.libraryBackend = this.libraryBackend;
@@ -3008,6 +3396,12 @@ export class MemorySearchIndex extends SearchIndexBase {
     // and the first update that wants full text closes the coverage gap once and stores a
     // real cursor; see `fulltextCatchUp` (#26).
     this.fulltextVersion = data.fulltextVersion ?? 0;
+    // Absent in files written before #78, where false is the right reading: those indexes
+    // were built over a map nobody checked, and a spurious full re-read of every extracted
+    // attachment is not something to hand every existing index on upgrade. A build over a
+    // map that stops early sets it from here on.
+    this.fulltextPartial = data.fulltextPartial ?? false;
+    this.fulltextRecoveryAttempts = data.fulltextRecoveryAttempts ?? 0;
     // Absent in files written before resume existed, and in any file a finished build
     // wrote: both mean there is nothing to resume, which is what undefined says (#24).
     this.checkpoint = data.checkpoint;

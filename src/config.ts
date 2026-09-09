@@ -23,6 +23,13 @@ export interface ZoteusConfig {
   libraryType: 'user' | 'group';
   local: 'auto' | 'on' | 'off';
   localPort: number;
+  /**
+   * Per-request time budget for reads against the Zotero DESKTOP app, in milliseconds.
+   * Unset on purpose: the fetcher's own 25 s default stands, and only an explicit value
+   * overrides it, for a machine whose local API is slow enough that a build's attachment
+   * map cannot finish inside it (#78). Never applied to the cloud Web API.
+   */
+  zoteroDeadlineMs?: number;
   translationServerUrl: string;
   embeddings: 'local' | 'openai' | 'gemini' | 'off';
   /** Model for the active embedder, local included (unset = that provider's own default). */
@@ -219,6 +226,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
         ZOTERO_LIBRARY_TYPE: z.enum(['user', 'group']).default('user'),
         ZOTEUS_LOCAL: z.enum(['auto', 'on', 'off']).default('auto'),
         ZOTERO_LOCAL_PORT: z.coerce.number().int().positive().default(23119),
+        // Bounded at both ends, and unusable values are ignored rather than clamped. Below
+        // the floor every desktop read fails; above the ceiling a hung read outlives the
+        // MCP host's own per-call timeout, which is the failure this budget exists to turn
+        // into an actionable message (see DEFAULT_DEADLINE_MS in api/http.ts).
+        ZOTEUS_ZOTERO_DEADLINE_MS: z.coerce
+          .number()
+          .int()
+          .min(5_000)
+          .max(600_000)
+          .optional(),
         ZOTEUS_TRANSLATION_SERVER_URL: z.string().url().default('http://127.0.0.1:1969'),
         ZOTEUS_EMBEDDINGS: z.enum(['local', 'openai', 'gemini', 'off']).default('local'),
         ZOTEUS_EMBEDDING_MODEL: z.string().min(1).optional(),
@@ -461,6 +478,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ZoteusConfig {
     libraryType: parsed.ZOTERO_LIBRARY_TYPE,
     local: parsed.ZOTEUS_LOCAL,
     localPort: parsed.ZOTERO_LOCAL_PORT,
+    zoteroDeadlineMs: parsed.ZOTEUS_ZOTERO_DEADLINE_MS,
     translationServerUrl: parsed.ZOTEUS_TRANSLATION_SERVER_URL,
     embeddings: parsed.ZOTEUS_EMBEDDINGS,
     embeddingModel: parsed.ZOTEUS_EMBEDDING_MODEL?.trim() || undefined,

@@ -1130,6 +1130,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // Absent in databases written before the full-text cursor existed; 0 then means the
     // coverage gap is unknown, which the first update closes once (#26).
     this.fulltextVersion = Number(this.meta('fulltextVersion') ?? 0) || 0;
+    // Absent in databases written before #78: false, so an index built over a map nobody
+    // checked is not handed a full re-read of every extracted attachment on upgrade.
+    this.fulltextPartial = this.meta('fulltextPartial') === 'true';
+    // Same, and for the same reason it is persisted at all: the bound it enforces spans
+    // updates, so a count that reset when the process restarted would bound nothing (#78).
+    this.fulltextRecoveryAttempts = Number(this.meta('fulltextRecoveryAttempts') ?? 0) || 0;
     this.checkpoint = parseCheckpoint(this.meta('checkpoint'));
     this.paused = this.meta('paused') === 'true';
     // Absent in databases written before the library stamp: an unstamped index refuses
@@ -1163,6 +1169,12 @@ export class SqliteSearchIndex extends SearchIndexBase {
       ['libraryVersion', String(this.libraryVersion)],
       ['libraryBackend', this.libraryBackend ?? ''],
       ['fulltextVersion', String(this.fulltextVersion)],
+      // Whether the absence of that cursor is the recoverable kind: body text gathered over
+      // a map that stopped short, which the next catch-up re-reads in full (#78).
+      ['fulltextPartial', String(this.fulltextPartial)],
+      // And how often the re-read that mark demands has been paid for and still ended on
+      // unreadable body text, which is what stops it being paid forever (#78).
+      ['fulltextRecoveryAttempts', String(this.fulltextRecoveryAttempts)],
       // One JSON row rather than a column per field, deliberately: the checkpoint's shape
       // belongs to the build loop and will grow with it, and the meta table is exactly the
       // place a value can be added without a schema version bump: an older build ignores a
@@ -1317,6 +1329,8 @@ export class SqliteSearchIndex extends SearchIndexBase {
     // interrupted is resumable once it is in SQLite too, and one migrated mid-coverage
     // keeps knowing how far into Zotero's full-text sequence it read.
     this.fulltextVersion = snapshot.fulltextVersion ?? 0;
+    this.fulltextPartial = snapshot.fulltextPartial ?? false;
+    this.fulltextRecoveryAttempts = snapshot.fulltextRecoveryAttempts ?? 0;
     this.checkpoint = snapshot.checkpoint;
     this.paused = snapshot.paused ?? false;
     this.writeMeta();

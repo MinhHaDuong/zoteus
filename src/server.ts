@@ -95,7 +95,7 @@ export async function buildContext(
   // Per-user (hosted) contexts never touch the operator's desktop local API.
   const local =
     !perUser && config.local !== 'off'
-      ? new LocalApiClient({ port: config.localPort, fetcher })
+      ? new LocalApiClient({ port: config.localPort, fetcher, deadlineMs: config.zoteroDeadlineMs })
       : undefined;
 
   const capabilities = await probeCapabilities(config, { web, local, logger });

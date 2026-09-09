@@ -571,6 +571,17 @@ function crawlOptions(
   // caller is the end of the full-text pass, which got there by awaiting `fulltextFor`.
   const fulltextFailures = wantFulltext ? () => opened?.readFailures() ?? 0 : undefined;
   const fulltextVersion = wantFulltext ? () => opened?.maxVersion ?? 0 : undefined;
+  // Whether that map covers the whole library. `maxVersion` above is computed over the
+  // WHOLE census, so a build that mapped a fraction of the attachments would otherwise
+  // stamp a cursor for all of them (#78).
+  const fulltextMapIncomplete = wantFulltext ? () => Boolean(opened?.incomplete) : undefined;
+  // And the positive form, which is not the negation of it: a map nobody opened answers
+  // false to both. Only a source that was actually crawled, and reached the end of the
+  // library while doing it, can testify that an item holding passages holds all of its body
+  // text, which is the one thing that entitles a recovery pass to retire the mark (#78).
+  const fulltextMapComplete = wantFulltext
+    ? () => Boolean(opened) && !opened!.incomplete && !opened!.unavailable
+    : undefined;
   /**
    * What Zotero's full-text sequence has extracted since the cursor this index stored, and
    * which indexed items that text belongs to (#26).
@@ -626,6 +637,8 @@ function crawlOptions(
     fulltextFor,
     fulltextKeys,
     fulltextFailures,
+    fulltextMapIncomplete,
+    fulltextMapComplete,
     fulltextVersion,
     fulltextCatchUp,
     ...(ownWords ? { ownWords } : {}),

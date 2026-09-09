@@ -51,6 +51,7 @@ describe('loadConfig', () => {
       ZOTEUS_INDEX_ANN_OVERSAMPLE: '32',
       ZOTEUS_INDEX_ANN_MIN_CANDIDATES: '2000',
       ZOTEUS_INDEX_FULLTEXT_CONCURRENCY: '3',
+      ZOTEUS_ZOTERO_DEADLINE_MS: '120000',
     } as unknown as NodeJS.ProcessEnv);
     expect(cfg.apiKey).toBe('abc');
     expect(cfg.libraryId).toBe(19552201);
@@ -69,6 +70,23 @@ describe('loadConfig', () => {
     expect(cfg.indexAnnOversample).toBe(32);
     expect(cfg.indexAnnMinCandidates).toBe(2000);
     expect(cfg.indexFulltextConcurrency).toBe(3);
+    expect(cfg.zoteroDeadlineMs).toBe(120000);
+  });
+
+  it('leaves the desktop read budget unset unless it is asked for, and bounds it', () => {
+    // Unset is not "25000": the default lives in the fetcher, and only an explicit value
+    // overrides it, for a desktop app whose listings are slow enough to abort a build's
+    // attachment map (#78).
+    expect(loadConfig({} as unknown as NodeJS.ProcessEnv).zoteroDeadlineMs).toBeUndefined();
+    // Below the band a value would make every read fail; above it, a hung read outlives the
+    // MCP host's own per-call timeout, which is the failure the budget exists to prevent.
+    const bad = loadConfig({ ZOTEUS_ZOTERO_DEADLINE_MS: '250' } as unknown as NodeJS.ProcessEnv);
+    expect(bad.zoteroDeadlineMs).toBeUndefined();
+    expect(bad.warnings).toEqual(['ZOTEUS_ZOTERO_DEADLINE_MS="250" is not usable, ignoring it']);
+    expect(
+      loadConfig({ ZOTEUS_ZOTERO_DEADLINE_MS: '900000' } as unknown as NodeJS.ProcessEnv)
+        .zoteroDeadlineMs,
+    ).toBeUndefined();
   });
 
   it('leaves the full-text concurrency unset unless it is asked for, so the backend picks', () => {

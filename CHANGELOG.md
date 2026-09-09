@@ -4,6 +4,124 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **A build whose attachment map stopped early no longer stamps a full-text cursor over the
+  attachments it never reached (#78).** The map that turns Zotero's full-text keys into item
+  keys is a paged crawl of every attachment in the library, and on a large library it can
+  stop partway: one listing request past the per-request budget ends it, and it says so on
+  `zotero_index action:"status"`. An `action:"update"` already withheld its cursor when that
+  happened (#26, #67). A build did not. It narrowed its full-text worklist to the keys the
+  map had reached, so nothing ever asked about the rest and no read failed, and it then
+  stamped the high-water mark of the *whole* full-text census. The attachments the map never
+  listed were left named by no `?since=` on either sequence, ever: their items had not
+  changed in Zotero, so no later update went back for them, and the index claimed coverage
+  it did not have with only a status sentence to say otherwise. The cursor is now withheld
+  whenever the map did not reach the end of the library (a failed request, the crawl's page
+  ceiling, or a listing that stops serving pages before its own total), and the status says
+  both what stopped and what was withheld because of it. The item version stamp is
+  deliberately still recorded: the metadata pass really does finish, and withholding it
+  would turn every later update into a full rebuild on exactly the libraries that cannot
+  finish one.
+- **The update that recovers from such a build now reads the items it skipped, instead of
+  sealing them (#78).** With no cursor to work from, an update asks `/fulltext?since=0` and
+  gets the whole census back, and it narrows that to the index's coverage *gap*: the items
+  holding no body passages at all. Over a map that stopped early that filter is wrong.
+  Zotero lists attachments newest-modified first, so one item's attachments are not adjacent
+  in the crawl, and an item with one attachment on a mapped page and another on a page the
+  map never reached already holds passages, so it was skipped, and the same update then
+  stamped the census-wide cursor and cleared the reason, making that attachment's text
+  unreachable for good. A build (or an update) that indexes body text over an incomplete map
+  now records that its coverage is partial, in the index and on disk, and while that stands
+  the first `action:"update"` asked for full text whose own attachment map reaches the end of
+  the library runs its catch-up in **full** rather than gap-only mode: every indexed item that
+  update's census names is re-read, once. While the mark stands that catch-up asks Zotero's
+  full-text sequence **from the start**, whatever cursor the index holds, because the text a
+  truncated map missed was extracted before that cursor and no `?since=` delta will ever name
+  it. That is also what makes a mark raised by an *update* actionable: a delta that re-indexes
+  a changed item's body text over a truncated map writes only part of that item's text, and it
+  does so on an index that already carries a cursor. Only a run that was paid in full, over a
+  map that was opened and did reach the end of the library, with every read succeeding and
+  nothing cancelled, stamps the cursor and clears the mark: a pass that read nothing (an empty
+  full-text census, say) recovers nothing and says so, rather than retiring a mark that is the
+  index's only record of the missing text. An update whose map stops short again falls back to
+  filling the coverage gap alone (the items holding no body text at all), says so on
+  `action:"status"`, and leaves the mark and the withheld cursor standing, so the full re-read
+  is paid once rather than on every update. It costs one full body crawl, which is the work a
+  rebuild would do anyway, without re-crawling the metadata. **If you have run `action:"build"`
+  with full text on a library large enough for the map to stop early, your index is holding a
+  cursor from before this release, and nothing in the index can tell:** any `action:"build"`
+  that starts over clears it, which is what `action:"refresh"` is (it is exactly a build with
+  `fresh:true`) and what a plain `action:"build"` does too unless it is resuming an interrupted
+  build's checkpoint. From this release on, such a build records no cursor and the next
+  ordinary `action:"update"` fills the missing body text in by itself.
+- **That recovery is bounded, so one unreadable attachment cannot cost a body crawl on every
+  update (#78).** Body-text reads are caught per attachment, so a file that can never be read
+  (moved out from under Zotero, a 403, a linked file the server will not serve) leaves the
+  whole-census re-read unfinished however often it runs. With the mark standing and the map
+  complete, that meant re-reading the entire census on every single update, forever: on the
+  reporting library, a full body crawl of 8,953 attachments per update. After three such
+  re-reads have been paid and still ended on unreadable text, the body crawl stops being paid
+  and each update fills in only the items holding no body text at all. The cheaper attachment
+  listing crawl does continue, because the mark keeps the cursor withheld and every later
+  update therefore asks the sequence from the start. Nothing is claimed for
+  that: the mark stays standing, the cursor stays withheld, and the status says the re-read
+  keeps failing, so the index still never reports coverage it does not have. A transient
+  failure still recovers, because the count only rises on a re-read that was actually paid
+  for; `action:"refresh"` with `fulltext:true` (or any build that starts over) clears both the
+  count and the mark.
+- **`action:"status"` says when an index holds partial full-text coverage (#78).** The mark
+  is persisted and outlives the process that recorded it; the per-pass `fulltextReason` does
+  not, so after a restart an index that still owed a full body re-read said nothing about it.
+  Status now reports `fulltextPartial: true` for exactly those indexes, with a
+  `fulltextReason` saying what the mark means (including which of the two shapes it is: no
+  cursor was ever earned, or one earned before the gap still stands) and
+  what the next full-text update may cost (one whole body crawl), or that the re-read has
+  stopped being attempted. Indexes whose coverage is whole report neither.
+- **An update that indexed no body text no longer stamps a full-text cursor (#78).**
+  `action:"update"` deliberately leaves a metadata-only index alone rather than turning into
+  the hours-long full-text crawl nobody asked for, but it handed the whole census's
+  high-water mark back on its way past, and that was stamped. Everything Zotero had already
+  extracted was then behind the cursor, named by no `?since=` on either sequence, and the
+  first PDF opened afterwards would be indexed alone over a library whose body text never
+  was. The cursor now stays where it was. That is not free on a large library: while it
+  stays at 0, every later update asks `/fulltext?since=0`, gets the whole census back and
+  re-opens the attachment map to resolve it, so it pays that listing crawl (roughly 90
+  requests on a 9,000-attachment library) on every update rather than once. It reads no body
+  text, and the alternative was a cursor that lied.
+  **What this costs you:** an index holding no body text at all now gains none from
+  `action:"update"`, ever, including one built with `fulltext:true` over a library Zotero had
+  extracted nothing in yet. Before this release such an index picked up whatever was
+  extracted after its first update, on the strength of a cursor stamped for coverage it had
+  never indexed, and everything extracted before that point stayed missing with nothing to
+  say so. Such an update now also says so on `action:"status"`, which it did not: at exactly
+  the moment this describes, the reason had been cleared and the status said nothing about
+  full text at all. `fulltextReason` now tells the user what to do about it (open the PDFs
+  they want searchable in Zotero, which is what makes Zotero extract the text, then run
+  `action:"build"` with `fulltext:true`), and one build fills in the whole library rather
+  than the tail of it.
+- **Time queued behind Zoteus's own other requests is no longer charged to a request's
+  budget, or blamed on Zotero (#78).** The per-request time budget is a statement about how
+  long Zotero took to answer, and its error says so; the clock started when the call was
+  made, before the request had a slot on the four-permit semaphore every Zotero read shares.
+  A busy fetcher could therefore spend a request's whole budget waiting for its turn and
+  then report a desktop app answering in under a second as one that had hung. The clock now
+  starts when the request does. Abort behaviour is otherwise unchanged.
+
+### Added
+- **`ZOTEUS_ZOTERO_DEADLINE_MS`: the per-request budget for desktop reads is configurable
+  (#78).** The 25 s default is right for a local API that normally answers a listing in under
+  a second, and it is what turns a stuck read into an actionable message instead of a hang
+  until the MCP client's own timeout. It is not right everywhere: on a 9,000-attachment
+  library some machines answer an attachment listing slowly enough that an index build's map
+  aborts every time, at the same page every time. Accepted between `5000` and `600000` ms;
+  a value outside that is ignored with a warning and the default stands. It applies to
+  listings and item reads against the **desktop app** only, so raising it cannot make a cloud
+  Web API call hang that long, and it leaves the 1.5 s liveness probe, file uploads (which
+  pass their own, longer budgets) and attachment downloads (which stay on the 25 s default)
+  alone.
+
 ## [1.17.0] - 2026-09-09
 
 ### Added

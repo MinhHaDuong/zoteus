@@ -226,6 +226,18 @@ export interface SearchIndexStatus {
    */
   fulltextVersion: number;
   /**
+   * Set when this index's body text was gathered over an attachment map that never reached
+   * the end of the library, so an item holding body passages may still be missing the text
+   * of an attachment on a page that map never listed (#78). Absent when coverage is whole,
+   * which is every ordinary index. On an index built over a truncated map it is what
+   * `fulltextVersion: 0` means; a delta that damaged coverage an earlier pass had already
+   * stamped a cursor for leaves that cursor standing, so the mark is not tied to the number
+   * beside it. It outlives the process that recorded it, so `fulltextReason` alone (which does
+   * not) cannot report it: while it stands, the next `action:"update"` asked for full text
+   * may cost one whole body crawl, and no cursor is stamped until one succeeds.
+   */
+  fulltextPartial?: boolean;
+  /**
    * Canonical identity of the library whose rows this index holds (`user`, or
    * `group:<id>` — see canonicalLibraryToken). Absent in indexes written before the
    * stamp existed. One index file holds one library, and this is the stamp
@@ -447,6 +459,23 @@ export interface IncrementalBuildOptions {
    */
   fulltextFailures?: () => number;
   /**
+   * Whether the attachment map behind `fulltextFor` reached the end of the library, asked
+   * separately from the failure count because the two cannot be told apart from inside the
+   * pass. The pass only ever asks about the keys `fulltextKeys` handed it, so an attachment
+   * sitting on a page the map never listed is never read, never fails, and leaves a build
+   * over a third of the library looking exactly like a flawless one (#78).
+   */
+  fulltextMapIncomplete?: () => boolean;
+  /**
+   * The same question asked the other way round, and NOT the negation of the one above: it
+   * is true only when the attachment map was actually opened and did reach the end of the
+   * library. A map nobody opened is neither complete nor incomplete, and treating it as
+   * complete is what let a recovery pass that read nothing (an empty `/fulltext?since=0`
+   * answer returns before the map is ever crawled) report the index's coverage as made
+   * whole, retiring the mark that was the only record of the missing text (#78).
+   */
+  fulltextMapComplete?: () => boolean;
+  /**
    * Persist cadence for the full-text pass only. Body passages are far bulkier than
    * metadata ones (and on the JSON backend a persist re-serializes everything), so that
    * pass saves less often — while the metadata pass keeps the fast default, which is what
@@ -576,6 +605,20 @@ export interface IndexSnapshot {
   libraryBackend?: VersionBackend;
   /** Cursor into Zotero's full-text sequence (absent in files written before #26). */
   fulltextVersion?: number;
+  /**
+   * Whether this index's body text was gathered over an attachment map that never reached
+   * the end of the library, so an item holding passages may still be missing an
+   * attachment's text (absent in files written before #78 means false).
+   */
+  fulltextPartial?: boolean;
+  /**
+   * How many whole-census recovery passes have been paid over a complete map and still
+   * ended on unreadable body text (absent in files written before #78 means none). It is
+   * what bounds the recovery: an attachment whose read fails every time (a missing file, a
+   * 403, a linked file the server will not serve) must not buy a full body crawl on every
+   * update forever.
+   */
+  fulltextRecoveryAttempts?: number;
   /** Where an interrupted build stopped (absent in files written before #24, and once
    * a build has finished: a completed build has nothing to resume). */
   checkpoint?: BuildCheckpoint;

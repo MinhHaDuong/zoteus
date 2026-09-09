@@ -13,6 +13,14 @@ export interface LocalApiClientOptions {
    * own pages and times out on a Zotero that is answering perfectly well.
    */
   probeFetcher?: RateLimitedFetcher;
+  /**
+   * Per-request budget for this client's ordinary reads (ZOTEUS_ZOTERO_DEADLINE_MS).
+   * Unset leaves the fetcher's own default. Passed per call rather than set on the
+   * fetcher because that fetcher is shared with the cloud Web API: a desktop app given
+   * two minutes to answer a listing must not make every cloud tool call able to hang for
+   * two minutes inside an MCP host's own timeout (#78).
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -52,11 +60,28 @@ export class LocalApiClient {
   private readonly base: string;
   private readonly fetcher: RateLimitedFetcher;
   private readonly probeFetcher: RateLimitedFetcher;
+  private readonly deadlineMs: number | undefined;
 
   constructor(opts: LocalApiClientOptions = {}) {
     this.base = `http://127.0.0.1:${opts.port ?? 23119}/api`;
     this.fetcher = opts.fetcher ?? new RateLimitedFetcher();
     this.probeFetcher = opts.probeFetcher ?? new RateLimitedFetcher({ maxConcurrency: 2 });
+    this.deadlineMs = opts.deadlineMs;
+  }
+
+  /**
+   * The per-call options every ordinary read passes. `maxRetries: 0` because the desktop
+   * app has no rate limiter to retry against, and the budget only when one was configured,
+   * so an unset variable leaves the fetcher's default exactly where it was.
+   *
+   * Deliberately not applied to the two reads that must not inherit it. `probe` passes its
+   * own 1.5 s, which is the whole point of a liveness check. `downloadFileBytes` passes
+   * none and so keeps the fetcher's 25 s default: it is usually a redirect the desktop app
+   * answers at once and then bytes read straight off disk, not a query Zotero has to
+   * compute, so the budget this variable raises is not the budget it is spending.
+   */
+  private readOpts(): { maxRetries: number; deadlineMs?: number } {
+    return { maxRetries: 0, ...(this.deadlineMs !== undefined ? { deadlineMs: this.deadlineMs } : {}) };
   }
 
   private headers(): Record<string, string> {
@@ -80,7 +105,7 @@ export class LocalApiClient {
     const res = await this.fetcher.fetch(
       `${this.base}${path}${query}`,
       { method: 'GET', headers: this.headers() },
-      { maxRetries: 0 },
+      this.readOpts(),
     );
     if (!res.ok) throw new LocalApiError(res.status, `Local API ${res.status} for ${path}`);
     return { json: await res.json(), headers: res.headers };
@@ -96,7 +121,7 @@ export class LocalApiClient {
     const res = await this.fetcher.fetch(
       `${this.base}${path}${query}`,
       { method: 'GET', headers: this.headers() },
-      { maxRetries: 0 },
+      this.readOpts(),
     );
     if (!res.ok) {
       const body = (await res.text().catch(() => '')).trim();
