@@ -26,7 +26,7 @@ async function listAllTags(ctx: ToolContext, lib: LibraryRef): Promise<TagInfo[]
   let start = 0;
   const limit = 100;
   for (;;) {
-    const r = await ctx.web.listTags(lib, { limit, start });
+    const r = await ctx.router.listTags({ library: lib, limit, start });
     for (const t of r.data) {
       if (typeof t === 'string') out.push({ name: t, auto: false });
       else out.push({ name: t.tag, numItems: t.meta?.numItems, auto: t.meta?.type === 1 }); // Zotero: type 1 = automatic
@@ -62,7 +62,7 @@ const tagAudit: ToolDefinition = {
   name: 'zotero_tag_audit',
   title: 'Audit tags against a controlled vocabulary',
   description:
-    'Audit a library against a controlled tag vocabulary with priority tiers. Provide the vocabulary inline as `vocabulary` (or a JSON file via `vocabulary_path`): { tags:[{name,tier?}], tiers?:[{name,required?}] }. Reports (1) off-taxonomy tags (library tags not in the vocabulary; Zotero auto-applied tags are bucketed separately unless include_auto), (2) items missing a tag from each required tier, and (3) optional per-collection coverage when `scope.collection_keys` is given. Read-only. Tag/auto-tag enumeration uses the cloud Web API.',
+    'Audit a library against a controlled tag vocabulary with priority tiers. Provide the vocabulary inline as `vocabulary` (or a JSON file via `vocabulary_path`): { tags:[{name,tier?}], tiers?:[{name,required?}] }. Reports (1) off-taxonomy tags (library tags not in the vocabulary; Zotero auto-applied tags are bucketed separately unless include_auto), (2) items missing a tag from each required tier, and (3) optional per-collection coverage when `scope.collection_keys` is given. Read-only. Tag and item enumeration both follow the library route, so a running Zotero desktop app serves the whole audit with no cloud API key.',
   inputSchema: {
     vocabulary: vocabSchema.optional(),
     vocabulary_path: z.string().optional().describe('Path to a JSON file with the vocabulary.'),

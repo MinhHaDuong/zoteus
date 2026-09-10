@@ -250,6 +250,30 @@ All notable changes to Zoteus are documented here. The format is based on
   what is unaffected: the desktop app keeps its own full-text index, which `action:"get"`
   and `action:"since"` read with no key. The group refusal, which was already accurate, is
   unchanged.
+- **`zotero_list_tags`, `zotero_tag_audit` and `zotero_sync` read from the Zotero desktop
+  app instead of failing with "Invalid user ID" (same cause as #64, #26 and #67).** All
+  three called the cloud Web API directly rather than the router, and with no cloud key the
+  personal library is addressed as `users/0`, which api.zotero.org answers `400 Invalid user
+  ID`. On the majority setup, a running Zotero and no key, every one of them was unreachable
+  with ordinary arguments while the desktop app next door was serving the same data on
+  `http://127.0.0.1:23119`. Three separate faults, all fixed: the tools work; the error they
+  produced told the user to check their field names against the schema, which was neither
+  the cause nor anything they could act on; and a local-only install no longer makes an
+  unexpected request to zotero.org (it carried no key and no library content, but it is not
+  what a local-only user expects). Tags, the version census and the deletion log now route
+  like every other read, so a group the desktop holds is served locally too.
+- **What the desktop app cannot answer is named, never returned as an empty result.** Zotero
+  10.0.1 serves item and collection versions but answers `/tags?format=versions` with `{}`
+  while the same response's header counts every tag in the library, and it has no `/deleted`
+  endpoint at all (404). Reported as-is that is "0 tags changed, nothing deleted" for a
+  library where both may have changed: a success that did nothing. `zotero_sync` checks each
+  version map against the count the response itself gives, reports what could not be served
+  in `unavailable` with the reason and where the answer does live, and errors outright when
+  nothing it was asked for can be answered. It also reports which API served the delta, in
+  `backend`, and takes the whole delta from that one API: the desktop app and the cloud
+  number their library versions independently, so a delta answered half from each would be
+  handed back under a single `since` belonging to neither sequence.
+
 
 ## [1.17.0] - 2026-09-09
 

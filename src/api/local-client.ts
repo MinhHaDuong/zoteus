@@ -38,6 +38,30 @@ export class LocalApiError extends Error {
 }
 
 /**
+ * A read the desktop app cannot answer for a library it otherwise serves: an endpoint it
+ * does not implement, or one that answers 200 without the data it was asked for.
+ *
+ * Separate from LocalApiError because it is not a transport failure and must never be
+ * retried, and above all because the alternative is worse than an error. The reads this
+ * covers all answer in maps, and an absent map is indistinguishable from an empty one, so
+ * swallowing the gap would report "nothing changed" for a library where everything did.
+ * Whoever catches this has to say what is missing and where else it can be had.
+ */
+export class LocalApiUnsupportedError extends Error {
+  constructor(
+    /** What could not be served, in words a caller can put in a sentence: "tags". */
+    readonly what: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'LocalApiUnsupportedError';
+  }
+}
+
+/** The object types a sync delta asks about, as both Zotero APIs name them in a path. */
+export type SyncObjectType = 'items' | 'collections' | 'searches' | 'tags';
+
+/**
  * A group library the desktop app holds, carrying only what the local API really serves
  * for it.
  *
@@ -453,6 +477,114 @@ export class LocalApiClient {
       return true;
     } catch (e) {
       if (e instanceof LocalApiError && e.status === 404) return false;
+      throw e;
+    }
+  }
+
+  /**
+   * Tags in the library, in the same `{ tag, meta: { type, numItems } }` shape the cloud
+   * serves, paged with the same limit/start.
+   *
+   * `q` is the one parameter that does not survive the trip. Zotero 10.0.1 accepts it on
+   * /tags and then ignores it: `?q=zzzznotag` answers with the whole tag list and a
+   * Total-Results counting every tag, so passing it through would look like a filter that
+   * matched everything. It is applied here instead, as the case-insensitive substring
+   * match the tool documents, and over the WHOLE list rather than one page, because a tag
+   * matching at position 150 of 211 has to be findable from a first page of 100.
+   */
+  async listTags(
+    query: { q?: string; limit?: number; start?: number } = {},
+    lib?: LibraryRef,
+  ): Promise<ListResult> {
+    const path = `${localLibraryPrefix(lib)}/tags`;
+    if (!query.q) {
+      const { json, headers } = await this.getJson(path, this.buildQuery({ ...query, q: undefined }));
+      return this.toListResult(json, headers);
+    }
+    const all: any[] = [];
+    let lastModifiedVersion = 0;
+    const pageSize = 100;
+    for (let start = 0; ; ) {
+      const { json, headers } = await this.getJson(path, this.buildQuery({ limit: pageSize, start }));
+      if (!Array.isArray(json)) break;
+      all.push(...json);
+      lastModifiedVersion = numOrUndef(headers.get('last-modified-version')) ?? lastModifiedVersion;
+      start += json.length;
+      // Same fallback as toListResult: a MISSING total must be the page length, not 0.
+      const total = numOrUndef(headers.get('total-results')) ?? json.length;
+      if (!json.length || start >= total) break;
+    }
+    const needle = query.q.toLowerCase();
+    const matched = all.filter((t) =>
+      String(typeof t === 'string' ? t : (t?.tag ?? ''))
+        .toLowerCase()
+        .includes(needle),
+    );
+    const from = query.start ?? 0;
+    return {
+      data: matched.slice(from, query.limit === undefined ? undefined : from + query.limit),
+      totalResults: matched.length,
+      lastModifiedVersion,
+    };
+  }
+
+  /**
+   * Keys mapped to versions for one object type (`?format=versions`), the delta a sync
+   * runs on. Like every version this client returns, these belong to the desktop app's own
+   * sequence and are not comparable with the cloud's.
+   *
+   * Not every type is really served. Zotero 10.0.1 answers /users/0/tags?format=versions
+   * with `{}` for a library holding 211 tags, while the very same response's Total-Results
+   * header counts all 211: a 200 that reads as "no tag changed" for a library where every
+   * tag did. That header is therefore the check. A map holding fewer keys than the response
+   * says exist means the app declined the question, and the caller is told so rather than
+   * handed a silence it would report as an answer.
+   */
+  async objectVersions(
+    type: SyncObjectType,
+    since: number,
+    lib?: LibraryRef,
+  ): Promise<Record<string, number>> {
+    const { json, headers } = await this.getJson(
+      `${localLibraryPrefix(lib)}/${type}`,
+      this.buildQuery({ format: 'versions', since }),
+    );
+    const versions = (json ?? {}) as Record<string, number>;
+    const got = Object.keys(versions).length;
+    const total = numOrUndef(headers.get('total-results'));
+    if (total !== undefined && got < total) {
+      throw new LocalApiUnsupportedError(
+        type,
+        `The Zotero desktop app does not serve versions for ${type}: it answered with ${got} of ` +
+          `the ${total} ${type} its own response counted.`,
+      );
+    }
+    return versions;
+  }
+
+  /**
+   * The deletion log: object keys removed since a version, by type.
+   *
+   * Zotero 10.0.1 has no /deleted endpoint at all, for users/0 or for a group it holds; it
+   * answers 404 "No endpoint found". This asks anyway and translates the refusal, rather
+   * than hardcoding the absence: it costs one loopback request on a tool that already makes
+   * several, and it starts working by itself if a later Zotero serves it.
+   */
+  async deleted(since: number, lib?: LibraryRef): Promise<Record<string, string[]>> {
+    try {
+      const { json } = await this.getJson(
+        `${localLibraryPrefix(lib)}/deleted`,
+        this.buildQuery({ since }),
+      );
+      return json;
+    } catch (e) {
+      if (e instanceof LocalApiError && e.status === 404) {
+        throw new LocalApiUnsupportedError(
+          'the deletion log',
+          'The Zotero desktop app keeps no deletion log: it serves no /deleted endpoint (404). ' +
+            'Deletions can still be found by diffing a full key census against your own copy.',
+        );
+      }
       throw e;
     }
   }

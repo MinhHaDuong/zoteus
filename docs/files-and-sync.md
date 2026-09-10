@@ -24,6 +24,8 @@ Read or write attachment full text (only attachment items have it):
 ## `zotero_sync`
 The version-based delta the Zotero sync algorithm uses. Given `since` (a library version, 0 = everything), returns per-type maps of changed keys (items/collections/searches/tags) plus the deletion log. Fetch only the changed keys afterward — don't re-pull the whole library.
 
+> **Routed**, like every other read, and `backend` says which API answered. The whole delta comes from that one API: the desktop app and the cloud number their library versions independently, so a `since` taken from one means nothing to the other. The desktop app serves item and collection versions with no cloud key; it serves no tag versions and keeps no deletion log, and those are reported in `unavailable` (with the reason and where the answer does live) rather than as empty maps. A call whose every requested part is one the desktop app lacks returns an error instead. To get those parts, read the library from the cloud: a key in `ZOTERO_API_KEY`, and `ZOTEUS_LOCAL=off` if the desktop app is running.
+
 ## `zotero_attachment`
 Upload, download, or inspect attachment files. File bytes go to/from **disk**, never through the conversation.
 - `upload` — store a file via the full 5-step Zotero File Storage protocol (compute md5/mtime → request authorization → upload bytes → register). Give `url` to have Zoteus fetch the file itself, or `file_path` for a file on the machine running Zoteus. Optional `parent_item`, `title`, `content_type`. Returns the new attachment key (and whether the file already existed in storage).

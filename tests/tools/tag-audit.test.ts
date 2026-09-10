@@ -11,7 +11,10 @@ function ctx(over: Record<string, unknown> = {}) {
     config: { dataDir: tmpdir() },
     remoteCaller: false,
     ...over,
-    web: {
+    router: {
+      defaultLibrary: () => ({ type: 'user', id: 19552201 }),
+      // Tags come through the router like the items do, so a desktop-only install can run
+      // the audit at all; reading them off ctx.web asked api.zotero.org about users/0.
       listTags: vi.fn(async () => ({
         data: [
           { tag: 'ml', meta: { type: 0, numItems: 10 } },
@@ -20,9 +23,6 @@ function ctx(over: Record<string, unknown> = {}) {
         totalResults: 2,
         lastModifiedVersion: 1,
       })),
-    },
-    router: {
-      defaultLibrary: () => ({ type: 'user', id: 19552201 }),
       searchItems: vi.fn(async () => ({
         data: [
           { key: 'I1', data: { title: 'A', tags: [{ tag: 'ml' }] } },

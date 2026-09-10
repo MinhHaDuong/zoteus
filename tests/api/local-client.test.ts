@@ -454,3 +454,106 @@ describe('LocalApiClient bibliography and export reads', () => {
     });
   });
 });
+
+describe('LocalApiClient tag and sync-delta reads', () => {
+  it('pages tags straight through when there is nothing to filter', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      const u = new URL(url);
+      expect(u.origin + u.pathname).toBe('http://127.0.0.1:23119/api/groups/999/tags');
+      expect(u.searchParams.get('limit')).toBe('10');
+      expect(u.searchParams.get('start')).toBe('20');
+      expect(u.searchParams.has('q')).toBe(false);
+      return new Response(JSON.stringify([{ tag: 'ml', meta: { type: 1, numItems: 4 } }]), {
+        status: 200,
+        headers: { 'Total-Results': '211', 'Last-Modified-Version': '666' },
+      });
+    });
+    const r = await makeLocal(fetchImpl).listTags({ limit: 10, start: 20 }, { type: 'group', id: 999 });
+    expect(r.data[0]).toEqual({ tag: 'ml', meta: { type: 1, numItems: 4 } });
+    expect(r.totalResults).toBe(211);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  // Measured against Zotero 10.0.1: /tags?q=zzzznotag answers with every tag in the library
+  // and a Total-Results counting all of them, so a `q` passed through would read as a
+  // filter that matched everything.
+  it('applies q itself, over the whole list, because the desktop app ignores it', async () => {
+    const page = (tags: string[], total: number) =>
+      new Response(JSON.stringify(tags.map((tag) => ({ tag, meta: { numItems: 1 } }))), {
+        status: 200,
+        headers: { 'Total-Results': String(total), 'Last-Modified-Version': '666' },
+      });
+    const fetchImpl = vi.fn(async (url: string) => {
+      const start = Number(new URL(url).searchParams.get('start'));
+      return start === 0 ? page(['Accuracy', 'MPCC'], 3) : page(['nonlinear MPC'], 3);
+    });
+    const r = await makeLocal(fetchImpl).listTags({ q: 'mpc' });
+    expect(r.data.map((t: any) => t.tag)).toEqual(['MPCC', 'nonlinear MPC']);
+    // The total counts the MATCHES, as it does on the cloud, not the library's tags.
+    expect(r.totalResults).toBe(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads a version census for a type the desktop app really serves', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      const u = new URL(url);
+      expect(u.origin + u.pathname).toBe('http://127.0.0.1:23119/api/users/0/collections');
+      expect(u.searchParams.get('format')).toBe('versions');
+      expect(u.searchParams.get('since')).toBe('510');
+      return new Response(JSON.stringify({ SBHCJT8T: 512, RANF9BFV: 511 }), {
+        status: 200,
+        headers: { 'Total-Results': '2', 'Last-Modified-Version': '666' },
+      });
+    });
+    expect(await makeLocal(fetchImpl).objectVersions('collections', 510)).toEqual({
+      SBHCJT8T: 512,
+      RANF9BFV: 511,
+    });
+  });
+
+  // Zotero 10.0.1 answers /users/0/tags?format=versions with {} while the same response
+  // counts 211 tags. Passing that on as "no tag changed" is the failure this project fears
+  // most: a success that did nothing.
+  it('refuses to pass off a short version map as an answer', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response('{}', {
+          status: 200,
+          headers: { 'Total-Results': '211', 'Last-Modified-Version': '666' },
+        }),
+    );
+    await expect(makeLocal(fetchImpl).objectVersions('tags', 0)).rejects.toMatchObject({
+      name: 'LocalApiUnsupportedError',
+      what: 'tags',
+      message: expect.stringContaining('0 of the 211 tags'),
+    });
+  });
+
+  it('accepts an empty version map the response itself calls empty', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response('{}', { status: 200, headers: { 'Total-Results': '0' } }),
+    );
+    expect(await makeLocal(fetchImpl).objectVersions('searches', 0)).toEqual({});
+  });
+
+  // The desktop app answers /deleted with 404 "No endpoint found", for users/0 and for a
+  // group it holds. It is asked anyway, so a later Zotero that serves it just works.
+  it('names the deletion log as unavailable instead of reporting no deletions', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(new URL(url).pathname).toBe('/api/users/0/deleted');
+      return new Response('No endpoint found', { status: 404 });
+    });
+    await expect(makeLocal(fetchImpl).deleted(0)).rejects.toMatchObject({
+      name: 'LocalApiUnsupportedError',
+      what: 'the deletion log',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns a deletion log if the app ever serves one', async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ items: ['GONE1'], tags: [] }), { status: 200 }),
+    );
+    expect(await makeLocal(fetchImpl).deleted(12)).toEqual({ items: ['GONE1'], tags: [] });
+  });
+});

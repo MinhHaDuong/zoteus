@@ -6,7 +6,7 @@ const listTags: ToolDefinition = {
   name: 'zotero_list_tags',
   title: 'List Zotero tags (read-only)',
   description:
-    'List tags in a Zotero library with their usage count and whether each was auto-applied by Zotero. Optional `q` substring filter and `limit`. Read-only — available even when the connector runs in read-only mode (unlike zotero_manage_tags, which also writes). For taxonomy hygiene use zotero_tag_audit.',
+    'List tags in a Zotero library with their usage count and whether each was auto-applied by Zotero. Optional `q` substring filter and `limit`. Read-only: available even when the connector runs in read-only mode (unlike zotero_manage_tags, which also writes). For taxonomy hygiene use zotero_tag_audit. Served by the running Zotero desktop app for any library it holds, so it needs no cloud API key.',
   inputSchema: {
     q: z.string().optional().describe('Substring filter.'),
     limit: z.number().int().min(1).max(100).optional().describe('Max tags (default 100).'),
@@ -16,7 +16,7 @@ const listTags: ToolDefinition = {
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     const lib = optionalLibrary(args) ?? ctx.router.defaultLibrary();
-    const r = await ctx.web.listTags(lib, { q: args.q, limit: args.limit ?? 100 });
+    const r = await ctx.router.listTags({ library: lib, q: args.q, limit: args.limit ?? 100 });
     const tags = r.data.map((t: any) =>
       typeof t === 'string'
         ? { name: t, numItems: undefined, auto: false }

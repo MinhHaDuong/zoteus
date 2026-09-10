@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { LibraryRouter } from '../../src/router/library-router.js';
+import { LocalApiUnsupportedError } from '../../src/api/local-client.js';
 import { loadConfig } from '../../src/config.js';
 
 const cloudInfo = { userID: 19552201, username: 'oscardvs', access: {} };
@@ -23,6 +24,9 @@ function makeRouter(opts: {
     itemVersions: vi.fn(async () => ({ versions: { CLOUD: 2114 }, totalResults: 1, lastModifiedVersion: 2114 })),
     exportItems: vi.fn(async () => '{"items":[]}'),
     getBibliography: vi.fn(async () => '<div>CLOUD BIB</div>'),
+    listTags: vi.fn(async () => ({ data: [{ tag: 'CLOUDTAG' }], totalResults: 1, lastModifiedVersion: 1 })),
+    versions: vi.fn(async () => ({ CLOUD: 2114 })),
+    deleted: vi.fn(async () => ({ items: ['CLOUDGONE'] })),
   };
   const local = {
     listItems: vi.fn(async () => ({ data: [{ key: 'LOCAL' }], totalResults: 1, lastModifiedVersion: 1 })),
@@ -33,6 +37,11 @@ function makeRouter(opts: {
     itemVersions: vi.fn(async () => ({ versions: { LOCAL: 13 }, totalResults: 1, lastModifiedVersion: 13 })),
     exportItems: vi.fn(async () => '[]'),
     getBibliography: vi.fn(async () => '<div>LOCAL BIB</div>'),
+    listTags: vi.fn(async () => ({ data: [{ tag: 'LOCALTAG' }], totalResults: 1, lastModifiedVersion: 1 })),
+    objectVersions: vi.fn(async () => ({ LOCAL: 13 })),
+    deleted: vi.fn(async () => {
+      throw new LocalApiUnsupportedError('the deletion log', 'no /deleted endpoint');
+    }),
   };
   const cfg = loadConfig({ ZOTEUS_LOCAL: opts.local } as any);
   const capabilities: any = { cloud: cloudInfo, localApi: opts.localApi };
@@ -190,6 +199,61 @@ describe('LibraryRouter', () => {
     const held = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
     expect(held.router.servesLocally({ type: 'group', id: 999 })).toBe(true);
     expect(held.router.servesLocally({ type: 'group', id: 1000 })).toBe(false);
+  });
+
+  it('reads tags and the sync delta from the desktop app it serves from', async () => {
+    // The three tools these back went to api.zotero.org unconditionally, so on the majority
+    // setup (desktop app, no cloud key) every one of them asked the cloud about users/0 and
+    // came back "Invalid user ID".
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true });
+    expect((await router.listTags({ q: 'ml', limit: 10 })).data[0].tag).toBe('LOCALTAG');
+    expect(local.listTags).toHaveBeenCalledWith({ q: 'ml', limit: 10 }, defaultUserLib);
+    expect(await router.versions('items', 7)).toEqual({ LOCAL: 13 });
+    expect(local.objectVersions).toHaveBeenCalledWith('items', 7, defaultUserLib);
+    expect(web.listTags).not.toHaveBeenCalled();
+    expect(web.versions).not.toHaveBeenCalled();
+  });
+
+  it('surfaces what the desktop app cannot serve rather than falling back mid-delta', async () => {
+    // A cloud deletion log spliced into a local delta would be reported under one `since`
+    // that belongs to neither sequence, so the gap is raised, not filled.
+    const { router, web } = makeRouter({ local: 'auto', localApi: true });
+    await expect(router.deleted(0)).rejects.toBeInstanceOf(LocalApiUnsupportedError);
+    expect(web.deleted).not.toHaveBeenCalled();
+  });
+
+  it('reads tags and the sync delta from the cloud when the desktop app is closed', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: false });
+    expect((await router.listTags({ limit: 5 })).data[0].tag).toBe('CLOUDTAG');
+    expect(web.listTags).toHaveBeenCalledWith(defaultUserLib, { limit: 5 });
+    expect(await router.versions('tags', 3)).toEqual({ CLOUD: 2114 });
+    expect(web.versions).toHaveBeenCalledWith(defaultUserLib, 'tags', 3);
+    expect(await router.deleted(3)).toEqual({ items: ['CLOUDGONE'] });
+    expect(web.deleted).toHaveBeenCalledWith(defaultUserLib, 3);
+    expect(local.listTags).not.toHaveBeenCalled();
+  });
+
+  it('keeps tags and the sync delta on the cloud for a group the desktop lacks', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true, localGroupIds: [] });
+    const lib = { type: 'group' as const, id: 999 };
+    expect((await router.listTags({ library: lib })).data[0].tag).toBe('CLOUDTAG');
+    expect(await router.versions('items', 0, { library: lib })).toEqual({ CLOUD: 2114 });
+    expect(await router.deleted(0, { library: lib })).toEqual({ items: ['CLOUDGONE'] });
+    expect(local.listTags).not.toHaveBeenCalled();
+    expect(local.objectVersions).not.toHaveBeenCalled();
+    expect(web.listTags).toHaveBeenCalledWith(lib, {});
+  });
+
+  it('reads a held group tags and delta from the desktop, and honours a pinned backend', async () => {
+    const { router, web, local } = makeRouter({ local: 'auto', localApi: true, localGroupIds: [999] });
+    const lib = { type: 'group' as const, id: 999 };
+    expect((await router.listTags({ library: lib })).data[0].tag).toBe('LOCALTAG');
+    expect(local.listTags).toHaveBeenCalledWith({}, lib);
+    // A pinned read repeats a decision already made, so it goes to the cloud even here.
+    expect(await router.versions('items', 0, { library: lib, backend: 'cloud' })).toEqual({
+      CLOUD: 2114,
+    });
+    expect(web.versions).toHaveBeenCalledWith(lib, 'items', 0);
   });
 
   it('renders bibliographies and exports through the desktop app it serves from (#64)', async () => {

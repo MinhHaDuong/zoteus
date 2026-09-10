@@ -33,6 +33,13 @@ function makeCtx(overrides: any = {}): any {
   // Exports are routed the same way (#75).
   ctx.router.exportItems ??= ({ library, ...rest }: any) =>
     ctx.web.exportItems(library ?? ctx.router.defaultLibrary(), rest);
+  // So is the sync delta, which additionally comes wholly from the ONE API that serves
+  // the library, since the two number their library versions independently.
+  ctx.router.servesLocally ??= () => Boolean(ctx.capabilities?.localApi && ctx.local);
+  ctx.router.versions ??= (type: string, since: number, opts: any = {}) =>
+    ctx.web.versions(opts.library ?? ctx.router.defaultLibrary(), type, since);
+  ctx.router.deleted ??= (since: number, opts: any = {}) =>
+    ctx.web.deleted(opts.library ?? ctx.router.defaultLibrary(), since);
   return ctx;
 }
 
@@ -203,5 +210,7 @@ describe('zotero_sync', () => {
     const changed = res.structuredContent?.changed as any;
     expect(changed.items.count).toBe(2);
     expect((res.structuredContent?.deleted as any).items).toEqual(['DEL1']);
+    // Which API answered is part of the result: a `since` from one means nothing to the other.
+    expect(res.structuredContent?.backend).toBe('cloud');
   });
 });

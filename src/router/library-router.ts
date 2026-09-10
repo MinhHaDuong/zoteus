@@ -8,7 +8,7 @@ import type {
   KeyInfo,
   VersionsResult,
 } from '../api/web-client.js';
-import type { LocalApiClient } from '../api/local-client.js';
+import type { LocalApiClient, SyncObjectType } from '../api/local-client.js';
 import type { VersionBackend } from '../features/search/backend.js';
 
 export interface LibraryRouterOptions {
@@ -151,6 +151,53 @@ export class LibraryRouter {
     const lib = opts.library ?? this.defaultLibrary();
     if (this.useLocal(lib, opts.backend)) return this.local!.fullTextSince(version, lib);
     return this.web.fullTextSince(lib, version);
+  }
+
+  /**
+   * Tags with their usage counts, routed like every other read. Before this existed,
+   * zotero_list_tags and zotero_tag_audit read tags from api.zotero.org unconditionally,
+   * and in key-free local mode that is users/0, which the cloud rejects: on the majority
+   * setup (desktop app, no cloud key) both tools were unreachable, and the desktop had
+   * been serving /users/0/tags all along.
+   */
+  async listTags(
+    opts: ReadOpts & { q?: string; limit?: number; start?: number } = {},
+  ): Promise<ListResult> {
+    const { library, backend, ...rest } = opts;
+    const lib = library ?? this.defaultLibrary();
+    if (this.useLocal(lib, backend)) return this.local!.listTags(rest, lib);
+    return this.web.listTags(lib, rest);
+  }
+
+  /**
+   * Object keys mapped to their versions for one type, routed like every other read: the
+   * sync delta zotero_sync reports (#64, #26, #67, same cause as the tag reads above).
+   *
+   * Throws LocalApiUnsupportedError where the desktop app serves the library but has no
+   * answer for that type. Deliberately NOT a per-type fallback to the cloud: the two APIs
+   * number their library versions independently, so a delta answered half from each would
+   * be handed back under a single `since` that belongs to neither sequence. A caller that
+   * wants the whole delta from one API asks that one for all of it.
+   */
+  async versions(
+    type: SyncObjectType,
+    since: number,
+    opts: ReadOpts = {},
+  ): Promise<Record<string, number>> {
+    const lib = opts.library ?? this.defaultLibrary();
+    if (this.useLocal(lib, opts.backend)) return this.local!.objectVersions(type, since, lib);
+    return this.web.versions(lib, type, since);
+  }
+
+  /**
+   * The deletion log since a version, routed like every other read. Cloud-only in
+   * practice: the desktop app keeps none, so a locally served library throws
+   * LocalApiUnsupportedError here for the caller to report.
+   */
+  async deleted(since: number, opts: ReadOpts = {}): Promise<Record<string, string[]>> {
+    const lib = opts.library ?? this.defaultLibrary();
+    if (this.useLocal(lib, opts.backend)) return this.local!.deleted(since, lib);
+    return this.web.deleted(lib, since);
   }
 
   async listCollections(
