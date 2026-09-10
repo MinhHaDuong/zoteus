@@ -294,9 +294,40 @@ export function foldSpec(spec: Record<string, unknown> | null | undefined, item:
 }
 
 /** Map an OpenAlex/Crossref scholar work to a draft Zotero item (DOI lookups). */
-export function fromScholarWork(w: { title?: string; authors?: string[]; year?: number; venue?: string }, doi: string): ResolvedItem {
+/**
+ * OpenAlex work types that have an unambiguous Zotero counterpart.
+ *
+ * Anything absent from this table, and anything OpenAlex declines to type, becomes
+ * `document`: Zotero's own "some other kind of thing". The fallback here used to be
+ * `generic`, which is not a Zotero item type at all, so Zotero refused every such save with
+ * 400 "Unknown itemType 'generic'". That was not the rare path it looks like: OpenAlex
+ * reports no venue for most conference papers and many books, so anyone importing
+ * conference literature by DOI hit it on every item, and the refusal surfaced only as
+ * `Imported 0 of 1` because the save reported no error of its own (#77).
+ */
+const SCHOLAR_ITEM_TYPES: Record<string, string> = {
+  article: 'journalArticle',
+  review: 'journalArticle',
+  book: 'book',
+  'book-chapter': 'bookSection',
+  'conference-paper': 'conferencePaper',
+  dataset: 'dataset',
+  dissertation: 'thesis',
+  preprint: 'preprint',
+  report: 'report',
+  standard: 'standard',
+  letter: 'letter',
+};
+
+export function fromScholarWork(
+  w: { title?: string; authors?: string[]; year?: number; venue?: string; type?: string },
+  doi: string,
+): ResolvedItem {
+  // OpenAlex's declared type wins where we can map it; a venue is the next best signal, and
+  // `document` carries the honest unknown rather than inventing a shape for the record.
+  const mapped = w.type ? SCHOLAR_ITEM_TYPES[w.type] : undefined;
   const item: ResolvedItem = {
-    itemType: w.venue ? 'journalArticle' : 'generic',
+    itemType: mapped ?? (w.venue ? 'journalArticle' : 'document'),
     title: w.title ?? `DOI ${bareDoi(doi)}`,
     creators: (w.authors ?? []).map((a) => ({ creatorType: 'author' as const, ...nameParts(a) })),
     date: w.year ? String(w.year) : undefined,

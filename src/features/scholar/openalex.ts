@@ -8,6 +8,8 @@ export interface ScholarWork {
   citationCount?: number;
   openalexId?: string;
   venue?: string;
+  /** OpenAlex's own work type ("article", "book", "conference-paper", ...), when it reports one. */
+  type?: string;
   inLibrary?: boolean;
 }
 
@@ -79,6 +81,7 @@ export class OpenAlexClient {
       citationCount: w.cited_by_count,
       openalexId: w.id ? bareId(w.id) : undefined,
       venue: w.primary_location?.source?.display_name ?? w.host_venue?.display_name,
+      type: w.type,
     };
   }
 
