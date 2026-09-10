@@ -38,6 +38,31 @@ export class LocalApiError extends Error {
 }
 
 /**
+ * A group library the desktop app holds, carrying only what the local API really serves
+ * for it.
+ *
+ * Zotero 10 answers /users/0/groups out of its own database, and a group's response JSON
+ * there is `{ id, version, links, meta: { numItems }, data: { id, version, name,
+ * description } }`. The cloud's `type` (PublicOpen/PublicClosed/Private) and
+ * `libraryEditing` are membership facts the desktop never stores, so they are absent
+ * here rather than guessable, and anything reporting a local group has to leave them out.
+ */
+export interface LocalGroup {
+  id: number;
+  name?: string;
+  description?: string;
+  /**
+   * Items in the group library as the DESKTOP counts them: `SELECT COUNT(*) FROM items
+   * WHERE libraryID = ?`, so every row, child attachments, notes, annotations and
+   * trashed items included. The cloud computes its own numItems separately, so the two
+   * need not agree; callers that show this number must say where it came from.
+   */
+  numItems?: number;
+  /** The group's synced METADATA version, not the version of its contents. */
+  version?: number;
+}
+
+/**
  * Path prefix for a library on the local API. The personal library is always `users/0`
  * whatever its cloud id; a group keeps its real id, exactly as on the Web API.
  *
@@ -357,12 +382,14 @@ export class LocalApiClient {
   }
 
   /**
-   * Group libraries the desktop app holds. Used to decide whether a group read can be
-   * served locally: a group the cloud key can see but the desktop does not have must
-   * still go to the Web API. Returns [] when the endpoint is absent (pre-Zotero-10).
+   * Group libraries the desktop app holds, with the metadata it serves for them. Used
+   * both to decide whether a group read can be served locally (a group the cloud key can
+   * see but the desktop does not have must still go to the Web API) and to answer
+   * zotero_groups for a user who has no cloud key at all. Returns [] when the endpoint is
+   * absent (pre-Zotero-10).
    */
-  async listLocalGroupIds(): Promise<number[]> {
-    const ids: number[] = [];
+  async listLocalGroups(): Promise<LocalGroup[]> {
+    const groups: LocalGroup[] = [];
     // Both Zotero APIs page groups 100 at a time, so a user in more than 100 groups needs
     // the same start/limit loop every other list read uses; without it the tail of the
     // list is invisible here and those groups route to the cloud for no reason.
@@ -374,25 +401,27 @@ export class LocalApiClient {
           '/users/0/groups',
           this.buildQuery({ limit, start }),
         );
-        if (!Array.isArray(json)) return ids;
+        if (!Array.isArray(json)) return groups;
         for (const g of json as any[]) {
-          // Group JSON is often data-wrapped ({ data: { id } }); read both shapes, exactly
-          // as the zotero_groups parser does. Reading only `g.id` against the wrapped
-          // shape makes every id NaN, so no group is ever recognised as local.
-          const n = Number(g?.id ?? g?.data?.id);
-          if (Number.isFinite(n)) ids.push(n);
+          const parsed = parseLocalGroup(g);
+          if (parsed) groups.push(parsed);
         }
         start += json.length;
         // A MISSING total-results must fall back to the page length, not parse as 0
         // (same trap as toListResult), which here simply stops after one page.
         const total = numOrUndef(headers.get('total-results')) ?? json.length;
-        if (!json.length || start >= total) return ids;
+        if (!json.length || start >= total) return groups;
       }
     } catch {
       // Whatever pages already came back are still true; only a first-page failure
       // (endpoint absent, app down) yields [].
-      return ids;
+      return groups;
     }
+  }
+
+  /** Just the ids, for the router's "does this desktop hold that group" question. */
+  async listLocalGroupIds(): Promise<number[]> {
+    return (await this.listLocalGroups()).map((g) => g.id);
   }
 
   async listCollections(
@@ -427,6 +456,29 @@ export class LocalApiClient {
       throw e;
     }
   }
+}
+
+/**
+ * One entry of a group list, from either API. Group JSON is often data-wrapped
+ * ({ data: { id, name } }) and sometimes flat; read both shapes. Reading only `g.id`
+ * against the wrapped shape makes every id NaN, so no group is ever recognised as local,
+ * and the same tolerance keeps this usable against the cloud's list, whose entries carry
+ * the desktop's fields plus more. An entry with no usable id is dropped: it could not be
+ * addressed anyway.
+ */
+function parseLocalGroup(g: any): LocalGroup | undefined {
+  const id = Number(g?.id ?? g?.data?.id);
+  if (!Number.isFinite(id)) return undefined;
+  const group: LocalGroup = { id };
+  const name = g?.data?.name ?? g?.name;
+  if (typeof name === 'string') group.name = name;
+  const description = g?.data?.description ?? g?.description;
+  if (typeof description === 'string') group.description = description;
+  const numItems = Number(g?.meta?.numItems);
+  if (Number.isFinite(numItems)) group.numItems = numItems;
+  const version = Number(g?.version ?? g?.data?.version);
+  if (Number.isFinite(version)) group.version = version;
+  return group;
 }
 
 function numOrUndef(v: string | null): number | undefined {

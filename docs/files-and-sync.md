@@ -5,6 +5,8 @@ M4 rounds out library coverage with five tools; `zotero_attach_file` and `zotero
 ## `zotero_groups`
 Lists the group libraries your key can access (id, name, type, item count, edit permissions). Pass a returned id as `library_id` (with `library_type:"group"`) to other tools to operate on a group library. `library_type` alone does not address a group: without an id the call is refused rather than falling back to your personal library.
 
+With no key at all it lists the groups a running Zotero 10+ desktop app holds, since those are exactly the ones you can still read. The desktop serves a group's `id`, `name` and `description` plus its own item count, which counts child attachments, notes and trashed items; it does not store `type` or `libraryEditing`, so those are absent from such rows rather than guessed. Where a key and a desktop app are both present the two lists merge into one row per group, each marked `source: "cloud"`, `"local"` or `"both"`.
+
 Reading a group needs the key to have *read* access to it (or a Zotero 10+ desktop app that holds the group, which serves reads with no key at all). **Writing** to one always goes to the cloud Web API and needs a key with write access to that group, whatever the desktop app is doing: see [Group libraries](./writing.md#group-libraries).
 
 ## `zotero_export`

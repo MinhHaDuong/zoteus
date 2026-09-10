@@ -251,7 +251,6 @@ All notable changes to Zoteus are documented here. The format is based on
   and `action:"since"` read with no key. The group refusal, which was already accurate, is
   unchanged.
 
-
 ## [1.17.0] - 2026-09-09
 
 ### Added
