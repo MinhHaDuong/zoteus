@@ -158,7 +158,7 @@ export function optionalLibrary(args?: LibraryArgs): LibraryRef | undefined {
   if (args?.library_type === 'group') {
     throw new Error(
       'A group library is addressed by its numeric id: pass library_id as well as library_type:"group". ' +
-        'Call zotero_groups to list the groups this API key can reach, then use the `id` it returns. ' +
+        'Call zotero_groups to list the groups you can reach, then use the `id` it returns. ' +
         '(Without an id this would have used the personal library instead.)',
     );
   }

@@ -236,6 +236,50 @@ describe('LocalApiClient.listLocalGroupIds', () => {
     expect(ids[149]).toBe(1149);
   });
 
+  it('keeps the metadata the desktop serves for each group, and only that', async () => {
+    // The shape below is what Zotero 10.0.1 really answers with: read off
+    // Zotero.Group.prototype.toResponseJSON({ includeGroupDetails: true }) in the
+    // installed omni.ja, whose meta carries numItems and nothing else, and whose data
+    // carries no `type` and no `libraryEditing` (the desktop does not store them).
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify([
+            {
+              id: 4321,
+              version: 12,
+              links: { self: { href: 'http://localhost:23119/api/groups/4321' } },
+              meta: { numItems: 512 },
+              data: { id: 4321, version: 12, name: 'Lab', description: 'Reading group' },
+            },
+          ]),
+          { status: 200, headers: { 'Total-Results': '1' } },
+        ),
+    );
+    const [g] = await makeLocal(fetchImpl).listLocalGroups();
+    expect(g).toEqual({ id: 4321, name: 'Lab', description: 'Reading group', numItems: 512, version: 12 });
+  });
+
+  it('drops fields the response does not carry rather than inventing them', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify([{ id: 4321, data: { id: 4321, name: 'Lab' } }]), {
+          status: 200,
+          headers: { 'Total-Results': '1' },
+        }),
+    );
+    const [g] = await makeLocal(fetchImpl).listLocalGroups();
+    expect(g).toEqual({ id: 4321, name: 'Lab' });
+    expect('numItems' in g).toBe(false);
+  });
+
+  it('returns [] when the app is unreachable, so nothing is reported as locally held', async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    expect(await makeLocal(fetchImpl).listLocalGroups()).toEqual([]);
+  });
+
   it('reads the item key census from the desktop app, per library', async () => {
     const fetchImpl = vi.fn(async (url: string) => {
       expect(url).toContain('http://127.0.0.1:23119/api/groups/999/items/top');

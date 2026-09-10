@@ -36,16 +36,132 @@ function makeCtx(overrides: any = {}): any {
   return ctx;
 }
 
+/** A context whose desktop app is up and holds `held`, with or without a cloud key. */
+function makeGroupsCtx(opts: { key?: boolean; held?: any[]; localApi?: boolean } = {}) {
+  const ctx = makeCtx({
+    config: { dataDir: '/tmp/zoteus', local: 'auto' },
+    capabilities: {
+      cloud: opts.key === false ? null : { userID: 19552201 },
+      localApi: opts.localApi ?? true,
+      localGroupIds: [],
+    },
+    local: {
+      // `ensureLocalApi` re-probes whenever capabilities say the app is down, which is
+      // how a Zotero started after the server is picked up at all.
+      ping: vi.fn(async () => opts.localApi ?? true),
+      listLocalGroups: vi.fn(async () => opts.held ?? []),
+    },
+  });
+  if (opts.key === false) ctx.router.whoami = () => null;
+  return ctx;
+}
+
 describe('zotero_groups', () => {
   it('lists groups', async () => {
     const res = await groups.handler({}, makeCtx());
     expect((res.structuredContent?.groups as any[])[0].name).toBe('Lab');
   });
-  it('errors without a cloud key', async () => {
+
+  it('errors with no cloud key and no locally held group', async () => {
     const ctx = makeCtx();
     ctx.router.whoami = () => null;
     const res = await groups.handler({}, ctx);
     expect(res.isError).toBe(true);
+  });
+
+  // #77: a local-API-only user was told to get a cloud key to list groups their own
+  // desktop was already holding, and whose items the router already reads locally.
+  it('lists the desktop app\'s groups with no cloud key at all', async () => {
+    const ctx = makeGroupsCtx({
+      key: false,
+      held: [{ id: 88, name: 'Lab', description: 'Reading group', numItems: 512 }],
+    });
+    const res = await groups.handler({}, ctx);
+    expect(res.isError).toBeUndefined();
+    const listed = res.structuredContent?.groups as any[];
+    expect(listed).toEqual([
+      { id: 88, name: 'Lab', description: 'Reading group', numItems: 512, source: 'local' },
+    ]);
+    // Nothing the desktop cannot answer is invented for it.
+    expect('type' in listed[0]).toBe(false);
+    expect('libraryEditing' in listed[0]).toBe(false);
+    expect(res.structuredContent?.note).toMatch(/type.*libraryEditing|libraryEditing/);
+  });
+
+  it('makes a locally held group readable in the same session', async () => {
+    // The id is useless if the router still refuses to serve that group locally, and the
+    // startup snapshot may predate the group (or the Zotero holding it).
+    const ctx = makeGroupsCtx({ key: false, held: [{ id: 88, name: 'Lab' }] });
+    await groups.handler({}, ctx);
+    expect(ctx.capabilities.localGroupIds).toEqual([88]);
+  });
+
+  it('says which source was missing when there is nothing to list', async () => {
+    const up = await groups.handler({}, makeGroupsCtx({ key: false, held: [] }));
+    expect(up.isError).toBe(true);
+    expect(up.content[0].text).toMatch(/holds no group libraries/);
+    const down = await groups.handler({}, makeGroupsCtx({ key: false, held: [], localApi: false }));
+    expect(down.isError).toBe(true);
+    expect(down.content[0].text).toMatch(/no Zotero desktop app is answering locally/);
+    // Neither refusal claims a cloud key is what listing groups requires.
+    for (const res of [up, down]) expect(res.content[0].text).not.toMatch(/requires a cloud API key/i);
+  });
+
+  it('does not tell a user whose key was refused to set the key they already set', async () => {
+    // whoami is null both for a key that was never set and for one the cloud rejected.
+    const ctx = makeGroupsCtx({ key: false, held: [] });
+    ctx.web.hasKey = true;
+    const res = await groups.handler({}, ctx);
+    expect(res.content[0].text).toMatch(/did not identify a Zotero user/);
+    expect(res.content[0].text).not.toMatch(/there is no cloud API key/);
+  });
+
+  it('answers exactly as before when a key is present and the desktop holds nothing', async () => {
+    const ctx = makeGroupsCtx({ held: [] });
+    const res = await groups.handler({}, ctx);
+    expect(res.content[0].text).toBe('1 accessible group(s).');
+    expect(res.structuredContent).toEqual({
+      groups: [{ id: 7, name: 'Lab', type: 'PublicOpen', numItems: 3 }],
+    });
+    expect('source' in (res.structuredContent?.groups as any[])[0]).toBe(false);
+    expect(res.structuredContent?.note).toBeUndefined();
+  });
+
+  it('merges both sources into one row per group', async () => {
+    const ctx = makeGroupsCtx({
+      held: [
+        { id: 7, name: 'Lab (desktop copy)', numItems: 9 },
+        { id: 88, name: 'Local only', numItems: 512 },
+      ],
+    });
+    const res = await groups.handler({}, ctx);
+    const listed = res.structuredContent?.groups as any[];
+    expect(listed).toHaveLength(2);
+    // The cloud's fields win where a group is in both: they are a superset of the
+    // desktop's, so the richer row is the one a caller should act on.
+    expect(listed[0]).toEqual({
+      id: 7,
+      name: 'Lab',
+      type: 'PublicOpen',
+      numItems: 3,
+      description: undefined,
+      libraryEditing: undefined,
+      source: 'both',
+    });
+    expect(listed[1]).toEqual({
+      id: 88,
+      name: 'Local only',
+      numItems: 512,
+      description: undefined,
+      source: 'local',
+    });
+    expect(res.content[0].text).toMatch(/2 group\(s\).*1 held only by the Zotero desktop app/);
+  });
+
+  it('marks a cloud group the desktop does not hold as cloud-only', async () => {
+    const ctx = makeGroupsCtx({ held: [{ id: 88, name: 'Local only' }] });
+    const res = await groups.handler({}, ctx);
+    expect((res.structuredContent?.groups as any[])[0].source).toBe('cloud');
   });
 });
 

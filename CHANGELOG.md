@@ -4,6 +4,30 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`zotero_groups` lists the groups the Zotero desktop app holds, instead of demanding a
+  cloud key it does not need (found while investigating #77).** Group libraries have been readable without a cloud key
+  since Zotero 10 began serving `/groups/<id>` locally: the router sends a read for a group
+  the desktop holds to the desktop, keyless, and only a group it does not hold goes to the
+  Web API. The one tool that would tell a user a group's id refused outright without
+  `ZOTERO_API_KEY`, so a local-API-only user could not learn the id that every other tool
+  needs, and the refusal named a cloud key as the requirement. With no key the tool now
+  lists what the desktop serves: `id`, `name`, `description` and the desktop's own item
+  count. The cloud's `type` and `libraryEditing` are membership facts the desktop never
+  stores, so they are absent from those rows rather than guessed, and the desktop's count
+  includes child attachments, notes and trashed items, so it is not the cloud's figure; the
+  answer carries a note saying both. Where a key and a local Zotero are both present the
+  two lists merge into one row per group, each marked `source: "cloud"`, `"local"` or
+  `"both"`, with the cloud's richer fields kept for a group that appears in both. The
+  answer for a key with no local Zotero is unchanged, down to its wording. The refusal
+  survives only when neither source has anything to list, and it now says which one was
+  missing. Listing also refreshes the set of locally held groups, so a group joined (or a
+  Zotero started) after the server was launched becomes readable without a restart.
+  Writing to a group still goes through the cloud and still needs a key with write access
+  to it.
+
 ## [1.17.0] - 2026-09-09
 
 ### Added
