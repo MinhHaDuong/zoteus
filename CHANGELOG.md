@@ -15,6 +15,7 @@ All notable changes to Zoteus are documented here. The format is based on
   tool that does require an argument still refuses, but the refusal names the field it wanted
   and the values it accepts, rather than complaining that the envelope was undefined.
 
+
 - **A desktop write whose grant has gone now falls back to the cloud instead of failing.**
   Zotero gates local-API writes behind a grant the user accepts in a dialog, and a "Allow"
   grant is single-use: Zotero deletes it on first successful use. `LocalWriteClient` answers
@@ -25,6 +26,7 @@ All notable changes to Zoteus are documented here. The format is based on
   holding a cloud key that could have served the write. It now falls back. An explicit
   denial deliberately still does not: Zotero answers "Deny" with 403 and its own error, and
   someone who has just refused a write is not asking for it to be routed somewhere else.
+
 
 - **Every tool now refuses an argument it does not know, instead of dropping it and answering
   a different question.** Each tool hands the MCP SDK a `ZodRawShape` and the SDK builds a
@@ -59,6 +61,7 @@ All notable changes to Zoteus are documented here. The format is based on
   validated, so they come back as ordinary tool results with `isError` set but never reach the
   usage log or the metrics counters, which has always been true of a malformed argument.
 
+
 - **A key the protocol reserves for itself is accepted and ignored rather than refused, and
   the last two tools that dropped arguments in silence now refuse them.** Two gaps left by
   the entry above. MCP carries its own bookkeeping in `_meta`, on the request's `params` and
@@ -92,6 +95,7 @@ All notable changes to Zoteus are documented here. The format is based on
   tool takes no arguments. Nothing ran, because the key would have been dropped and the
   answer would have read as though it had been honoured. Call this tool with no arguments."
 
+
 - **`zotero_tag_audit` no longer audits something other than what it was asked about.**
   `scope`, the `vocabulary` object and each of its `tags` and `tiers` entries were plain
   `z.object`s with optional members, so a key one letter out was stripped by Zod before the
@@ -118,6 +122,7 @@ All notable changes to Zoteus are documented here. The format is based on
   (an out-of-range `limit`, say) and is not new here; a vocabulary file rejected for the same
   reason is refused by the handler and is recorded like any other tool error.
 
+
 - **An item Zoteus had just written no longer reads back as missing.** Writes go to the
   cloud Web API: always for a group library, and for the personal library too from
   `zotero_create_items` and `zotero_update_item`, which both require a cloud key. Reads go
@@ -135,11 +140,13 @@ All notable changes to Zoteus are documented here. The format is based on
   desktop); the desktop is compared against its own earlier answer instead. Still stale
   until Zotero syncs: full text stored with `zotero_fulltext action:"set"`, which the
   desktop files beside the attachment rather than in it, so there is nothing to watch for.
+
 - **`zotero_manage_tags action:"list"` reached the cloud too.** The same defect as
   `zotero_list_tags` and `zotero_sync`, one tool further along: the list action read
   `ctx.web` directly, so a desktop-only install asked api.zotero.org for `users/0` and got
   "Invalid user ID" back, while the desktop had been serving the tags all along. It is
   routed now, and an explicit `library_id` still picks the group it names.
+
 - **A desktop write that landed nothing no longer reports success (#77).** Every write path
   collects per-item outcomes instead of throwing, so a payload Zotero refused came back as
   `Trashed 0 item(s) via the Zotero desktop app.` with no error flag and the 400 buried in
@@ -151,6 +158,7 @@ All notable changes to Zoteus are documented here. The format is based on
   the first reason, and a partial write stays a success but names the failure count in the
   summary rather than only in the payload. The check is one shared helper, so `zotero_import`
   and these two cannot drift apart again.
+
 
 - **A build whose attachment map stopped early no longer stamps a full-text cursor over the
   attachments it never reached (#78).** The map that turns Zotero's full-text keys into item
@@ -169,6 +177,7 @@ All notable changes to Zoteus are documented here. The format is based on
   deliberately still recorded: the metadata pass really does finish, and withholding it
   would turn every later update into a full rebuild on exactly the libraries that cannot
   finish one.
+
 - **The update that recovers from such a build now reads the items it skipped, instead of
   sealing them (#78).** With no cursor to work from, an update asks `/fulltext?since=0` and
   gets the whole census back, and it narrows that to the index's coverage *gap*: the items
@@ -201,6 +210,7 @@ All notable changes to Zoteus are documented here. The format is based on
   `fresh:true`) and what a plain `action:"build"` does too unless it is resuming an interrupted
   build's checkpoint. From this release on, such a build records no cursor and the next
   ordinary `action:"update"` fills the missing body text in by itself.
+
 - **That recovery is bounded, so one unreadable attachment cannot cost a body crawl on every
   update (#78).** Body-text reads are caught per attachment, so a file that can never be read
   (moved out from under Zotero, a 403, a linked file the server will not serve) leaves the
@@ -216,6 +226,7 @@ All notable changes to Zoteus are documented here. The format is based on
   failure still recovers, because the count only rises on a re-read that was actually paid
   for; `action:"refresh"` with `fulltext:true` (or any build that starts over) clears both the
   count and the mark.
+
 - **`action:"status"` says when an index holds partial full-text coverage (#78).** The mark
   is persisted and outlives the process that recorded it; the per-pass `fulltextReason` does
   not, so after a restart an index that still owed a full body re-read said nothing about it.
@@ -224,6 +235,7 @@ All notable changes to Zoteus are documented here. The format is based on
   cursor was ever earned, or one earned before the gap still stands) and
   what the next full-text update may cost (one whole body crawl), or that the re-read has
   stopped being attempted. Indexes whose coverage is whole report neither.
+
 - **An update that indexed no body text no longer stamps a full-text cursor (#78).**
   `action:"update"` deliberately leaves a metadata-only index alone rather than turning into
   the hours-long full-text crawl nobody asked for, but it handed the whole census's
@@ -246,6 +258,7 @@ All notable changes to Zoteus are documented here. The format is based on
   they want searchable in Zotero, which is what makes Zotero extract the text, then run
   `action:"build"` with `fulltext:true`), and one build fills in the whole library rather
   than the tail of it.
+
 - **Time queued behind Zoteus's own other requests is no longer charged to a request's
   budget, or blamed on Zotero (#78).** The per-request time budget is a statement about how
   long Zotero took to answer, and its error says so; the clock started when the call was
@@ -254,18 +267,6 @@ All notable changes to Zoteus are documented here. The format is based on
   then report a desktop app answering in under a second as one that had hung. The clock now
   starts when the request does. Abort behaviour is otherwise unchanged.
 
-### Added
-- **`ZOTEUS_ZOTERO_DEADLINE_MS`: the per-request budget for desktop reads is configurable
-  (#78).** The 25 s default is right for a local API that normally answers a listing in under
-  a second, and it is what turns a stuck read into an actionable message instead of a hang
-  until the MCP client's own timeout. It is not right everywhere: on a 9,000-attachment
-  library some machines answer an attachment listing slowly enough that an index build's map
-  aborts every time, at the same page every time. Accepted between `5000` and `600000` ms;
-  a value outside that is ignored with a warning and the default stands. It applies to
-  listings and item reads against the **desktop app** only, so raising it cannot make a cloud
-  Web API call hang that long, and it leaves the 1.5 s liveness probe, file uploads (which
-  pass their own, longer budgets) and attachment downloads (which stay on the 25 s default)
-  alone.
 - **`zotero_import` wrote an item type Zotero does not have, and called it success (#77).**
   With no translation-server running, a DOI resolves through OpenAlex and the Zotero item
   type was chosen from whether OpenAlex reported a venue: `journalArticle` if it did,
@@ -277,6 +278,7 @@ All notable changes to Zoteus are documented here. The format is based on
   `conferencePaper`, `book` to `book`, `dissertation` to `thesis`, and so on), a venue still
   means `journalArticle`, and anything unmapped falls to `document`, which is a real Zotero
   type. The arXiv path was never affected.
+
 - **A save that wrote nothing no longer reports success.** The write paths collect per-item
   outcomes rather than throwing, so a payload Zotero rejected outright came back as
   `Imported 0 of 1` with no error flag, and a model reading that summary reported success
@@ -284,6 +286,7 @@ All notable changes to Zoteus are documented here. The format is based on
   month. An import that resolves items and creates none of them now returns an error and
   quotes the first reason. Partial success is still success: `failed` already carries the
   rest.
+
 
 - **`zotero_groups` lists the groups the Zotero desktop app holds, instead of demanding a
   cloud key it does not need (found while investigating #77).** Group libraries have been readable without a cloud key
@@ -306,6 +309,7 @@ All notable changes to Zoteus are documented here. The format is based on
   Writing to a group still goes through the cloud and still needs a key with write access
   to it.
 
+
 - **A collection key the library does not have is refused, instead of being answered with
   the whole library.** `zotero_search_items` and `zotero_export` pass `collectionKey`
   straight to Zotero, and the desktop app does not refuse an unknown one: measured against a
@@ -323,6 +327,7 @@ All notable changes to Zoteus are documented here. The format is based on
   are unchanged. A check that itself fails (the app going away between the two calls) is not
   read as absence: the read goes ahead and reports its own failure.
 
+
 - **An empty DOI no longer fabricates a successful lookup.** `zotero_scholar {action:
   "lookup", doi: ""}` answered `isError: false` with an untitled work, no authors and
   "0 citations". Traced: `https://api.openalex.org/works/` 404s, the Crossref fallback then
@@ -333,12 +338,14 @@ All notable changes to Zoteus are documented here. The format is based on
   rather than refused), and the Crossref parser now requires a single-work payload, so a 200
   from the wrong endpoint is never read as a result. `doi: "hello world not a doi"` already
   errored; the empty string was the hole.
+
 - **`references`, `citations` and `related` report an upstream miss in the same words as
   `lookup`.** They reach OpenAlex directly, so a DOI it does not hold came back as
   `OpenAlex 404 for https://api.openalex.org/works/doi:...`, a raw request URL where `lookup`
   says `No scholarly record found for DOI ...`. They now give that same sentence. A status
   other than 404 is reported as the provider failing rather than as an absent record, because
   a throttled or broken OpenAlex is not evidence that a paper does not exist.
+
 
 - **An export that rendered nothing says so, instead of handing back a blank body as
   success.** `zotero_export {format: "bibtex", item_keys: ["ZZZZZZZZ"]}` returned
@@ -350,6 +357,7 @@ All notable changes to Zoteus are documented here. The format is based on
   "no entries" and is reported as one, carrying `empty: true` and a `notice` in
   `structuredContent`, the way `zotero_format_bibliography` reports `(empty bibliography)`.
   A non-empty export is unchanged, down to the bytes.
+
 
 - **A 403 now depends on the request that drew it, instead of describing a situation the
   caller is not in.** Zotero spends one status on several unrelated refusals whose remedies
@@ -365,6 +373,7 @@ All notable changes to Zoteus are documented here. The format is based on
   offer write access as the fix; a keyed group write keeps the three gates it has named
   since #74; and a 403 on `/keys/current` says the key itself was rejected. Where the
   context is unknown the message says only what is certain of any 403.
+
 - **`zotero_bibliography` reports the entries Zotero rendered, not the keys it was asked
   for.** `itemCount` was `item_keys.length`, so it echoed the request: a key the library
   does not have came back as `itemCount: 1` over an empty `csl-bib-body`, a number no
@@ -375,6 +384,7 @@ All notable changes to Zoteus are documented here. The format is based on
   renders nothing (the library does not have it, or it names an attachment or note rather
   than a regular item). An empty result reads `(empty bibliography)` like its sibling
   instead of an empty wrapper. `itemCount` is gone from the structured content.
+
 - **An empty `identifier` is no longer blamed on the translation-server.** `zotero_import
   {action:"by_identifier", identifier:""}` answered "No Zotero translation-server reachable
   at http://127.0.0.1:1969" and suggested installing Docker: a missing identifier and a
@@ -384,6 +394,7 @@ All notable changes to Zoteus are documented here. The format is based on
   one looks like, and which action to use instead. The generic translation-server refusal
   it used to reach was reachable only through this bug and is gone; the URL one, which has
   no built-in fallback, is unchanged.
+
 - **`zotero_fulltext action:"set"` says why it cannot run locally, instead of calling a
   personal-library call cloud/group.** With no key, a `set` on the personal library was
   refused with "This operation writes to a cloud/group library and requires a cloud API
@@ -395,6 +406,7 @@ All notable changes to Zoteus are documented here. The format is based on
   what is unaffected: the desktop app keeps its own full-text index, which `action:"get"`
   and `action:"since"` read with no key. The group refusal, which was already accurate, is
   unchanged.
+
 - **`zotero_list_tags`, `zotero_tag_audit` and `zotero_sync` read from the Zotero desktop
   app instead of failing with "Invalid user ID" (same cause as #64, #26 and #67).** All
   three called the cloud Web API directly rather than the router, and with no cloud key the
@@ -407,6 +419,7 @@ All notable changes to Zoteus are documented here. The format is based on
   unexpected request to zotero.org (it carried no key and no library content, but it is not
   what a local-only user expects). Tags, the version census and the deletion log now route
   like every other read, so a group the desktop holds is served locally too.
+
 - **What the desktop app cannot answer is named, never returned as an empty result.** Zotero
   10.0.1 serves item and collection versions but answers `/tags?format=versions` with `{}`
   while the same response's header counts every tag in the library, and it has no `/deleted`
@@ -418,6 +431,7 @@ All notable changes to Zoteus are documented here. The format is based on
   `backend`, and takes the whole delta from that one API: the desktop app and the cloud
   number their library versions independently, so a delta answered half from each would be
   handed back under a single `since` belonging to neither sequence.
+
 - **A hand-placed highlight sorts where it sits, instead of at the top of its page.**
   `zotero_annotate` derives `annotationSortIndex` from the topmost rect's distance to the
   BOTTOM of the page, so it cannot be computed without the page height, and the only thing
@@ -437,6 +451,7 @@ All notable changes to Zoteus are documented here. The format is based on
   the top of their page and that `page_height` fixes it, rather than leaving it to be
   discovered in the sidebar.
 
+
 - **An annotation field this tool does not know is refused, not silently dropped.** The
   annotation schema was a plain `z.object`, which strips unrecognised keys before a handler
   ever sees them, while the JSON Schema it advertised said `additionalProperties: false`.
@@ -449,6 +464,7 @@ All notable changes to Zoteus are documented here. The format is based on
   field it was probably meant to be: `pageLabel`, `page-label` and `annotationPageLabel` all
   resolve to `page_label`, and a key that resembles nothing gets the list of fields. The
   advertised schema is unchanged, and so is every documented field.
+
 
 - **A malformed `position` is refused, and the refusal says so.** A rect that was not four
   finite numbers was filtered out of `position.rects`, which left the position empty, which
@@ -465,6 +481,18 @@ All notable changes to Zoteus are documented here. The format is based on
   shorthand, and a `pageIndex` that is not a whole page number. `{"pageIndex": N}` with no
   rects is accepted as the page-only position it reads as, rather than discarded.
 
+### Added
+- **`ZOTEUS_ZOTERO_DEADLINE_MS`: the per-request budget for desktop reads is configurable
+  (#78).** The 25 s default is right for a local API that normally answers a listing in under
+  a second, and it is what turns a stuck read into an actionable message instead of a hang
+  until the MCP client's own timeout. It is not right everywhere: on a 9,000-attachment
+  library some machines answer an attachment listing slowly enough that an index build's map
+  aborts every time, at the same page every time. Accepted between `5000` and `600000` ms;
+  a value outside that is ignored with a warning and the default stands. It applies to
+  listings and item reads against the **desktop app** only, so raising it cannot make a cloud
+  Web API call hang that long, and it leaves the 1.5 s liveness probe, file uploads (which
+  pass their own, longer budgets) and attachment downloads (which stay on the 25 s default)
+  alone.
 ## [1.17.0] - 2026-09-09
 
 ### Added
