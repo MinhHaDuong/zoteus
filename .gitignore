@@ -1,5 +1,8 @@
 # Dependencies
-node_modules/
+# Matches the directory and, deliberately, a symlink of the same name: a trailing
+# slash matches only a directory, so a symlink called node_modules slipped past it
+# once and was committed by `git add -A`.
+node_modules
 .pnp.*
 .yarn/*
 
