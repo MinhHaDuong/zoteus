@@ -88,7 +88,7 @@ Zoteus detects a running Zotero desktop app and talks to it directly: the key-fr
 | `ZOTEUS_INDEX_BACKEND` | `auto` | `auto\|sqlite\|memory`: where the search index lives. `auto` uses SQLite (FTS5) on Node 22.13+, which is what a large library needs |
 | `ZOTEUS_TRANSFORMERS_PATH` | none | Where to find `@huggingface/transformers` for `local` embeddings when the install can't see it (desktop extension) |
 | `ZOTEUS_LOG_FILE` | none | Append every log line to this file, for a server that runs without a terminal |
-| `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose permanent deletion |
+| `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` or `zotero_delete_items` refuses every call; the tool stays listed unless `ZOTEUS_READ_ONLY=true` |
 
 Full table in [`docs/configuration.md`](./docs/configuration.md). To run a shared or remote instance, see [`docs/remote-oauth.md`](./docs/remote-oauth.md) (self-host the OAuth remote on loopback or behind your own proxy).
 

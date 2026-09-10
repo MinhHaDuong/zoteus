@@ -37,7 +37,7 @@ A variable left blank counts as **unset**: a bare `KEY=` line in a `.env` file, 
 | `ZOTEUS_DATA_DIR` | OS data dir | Index + caches location. |
 | `ZOTEUS_CONTACT_EMAIL` | — | Contact address for external scholarly APIs: Crossref's polite-pool `mailto=`, and the User-Agent on OpenAlex requests. |
 | `ZOTEUS_OPENALEX_API_KEY` | — | Free OpenAlex API key for `zotero_scholar`, sent as a bearer header and never in a URL. Optional: keyless calls work on a small daily budget, a key raises it. OpenAlex ignores the old polite-pool parameter since early 2026. |
-| `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` to expose `zotero_delete_items` (permanent delete). Trash is always available. |
+| `ZOTEUS_ALLOW_DELETE` | `false` | Must be `true` or `zotero_delete_items` (permanent delete) refuses every call with an error naming this variable. The tool stays in the tool list either way, so a client may still show it; only `ZOTEUS_READ_ONLY=true` takes it off the list. Trash is always available. |
 | `ZOTEUS_READ_ONLY` | `false` | Expose only non-mutating tools. Recommended for public/remote endpoints. |
 | `ZOTEUS_CONFIRM_BULK_WRITES` | `0` (off) | Items above which a bulk write refuses unless the call also passes `confirm: true`: `zotero_trash_items` (trashing, not restoring), `zotero_manage_tags` add/remove, `zotero_manage_collections action:"remove_items"`. Single-item edits stay fluent. A deliberation step at the scale where a bad decision does real damage, not a human in the loop, since the model can re-call with `confirm: true`. See [the threat model](./threat-model.md). |
 | `ZOTEUS_LOG_LEVEL` | `info` | `debug\|info\|warn\|error` (stderr only — stdout carries the JSON-RPC stream). |
