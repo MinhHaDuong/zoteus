@@ -16,6 +16,7 @@ function makeCtx(overrides: any = {}): any {
     router: {
       defaultLibrary: () => ({ type: 'user', id: 19552201 }),
       listCollections: vi.fn(async () => ({ data: [], totalResults: 0, lastModifiedVersion: 1 })),
+      listTags: vi.fn(async () => ({ data: [{ tag: 'ml' }, { tag: 'robotics' }], totalResults: 2, lastModifiedVersion: 1 })),
     },
     web: {
       writeItems: vi.fn(async () => ({ successful: [{ index: 0, key: 'NEW1', version: 5 }], unchanged: [], failed: [], newLibraryVersion: 5 })),
@@ -212,6 +213,26 @@ describe('zotero_manage_tags', () => {
     const ctx = makeCtx();
     const res = await manageTags.handler({ action: 'list' }, ctx);
     expect(res.structuredContent?.tags).toEqual(['ml', 'robotics']);
+  });
+
+  // The list action read ctx.web directly, so on a desktop-only setup it asked
+  // api.zotero.org for users/0 and came back "Invalid user ID" for the one group of users
+  // whose desktop was serving the tags all along. Same cause as #64, #26 and #67.
+  it('lists tags through the router, never straight at the cloud', async () => {
+    const ctx = makeCtx();
+    await manageTags.handler({ action: 'list', limit: 5 }, ctx);
+    expect(ctx.router.listTags).toHaveBeenCalledWith(
+      expect.objectContaining({ library: { type: 'user', id: 19552201 }, limit: 5 }),
+    );
+    expect(ctx.web.listTags).not.toHaveBeenCalled();
+  });
+
+  it('keeps an explicit group library on the list action', async () => {
+    const ctx = makeCtx();
+    await manageTags.handler({ action: 'list', library_type: 'group', library_id: 6666644 }, ctx);
+    expect(ctx.router.listTags).toHaveBeenCalledWith(
+      expect.objectContaining({ library: { type: 'group', id: 6666644 } }),
+    );
   });
 
   it('adds a tag by patching the item', async () => {

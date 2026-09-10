@@ -36,7 +36,11 @@ const manageTags: ToolDefinition = {
       // personal library's tags for a call that named a group is a wrong answer, not a
       // default (#74).
       const lib = resolveLibrary(ctx, args);
-      const r = await ctx.web.listTags(lib, { q: args.q, limit: args.limit ?? 100 });
+      // Routed, not `ctx.web`: on a desktop-only setup the cloud call goes to
+      // api.zotero.org as users/0 and comes back "Invalid user ID", so listing tags here
+      // was unreachable for exactly the users whose desktop was serving them all along.
+      // Same cause as zotero_list_tags and zotero_sync (#64, #26, #67).
+      const r = await ctx.router.listTags({ library: lib, q: args.q, limit: args.limit ?? 100 });
       const tags = r.data.map((t: any) => (typeof t === 'string' ? t : t.tag));
       return ok({ tags, totalResults: r.totalResults }, `${tags.length} tag(s) returned.`);
     }

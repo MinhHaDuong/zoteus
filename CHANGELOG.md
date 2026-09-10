@@ -7,6 +7,12 @@ All notable changes to Zoteus are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **`zotero_manage_tags action:"list"` reached the cloud too.** The same defect as
+  `zotero_list_tags` and `zotero_sync`, one tool further along: the list action read
+  `ctx.web` directly, so a desktop-only install asked api.zotero.org for `users/0` and got
+  "Invalid user ID" back, while the desktop had been serving the tags all along. It is
+  routed now, and an explicit `library_id` still picks the group it names.
+
 - **A build whose attachment map stopped early no longer stamps a full-text cursor over the
   attachments it never reached (#78).** The map that turns Zotero's full-text keys into item
   keys is a paged crawl of every attachment in the library, and on a large library it can
