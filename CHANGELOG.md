@@ -290,6 +290,53 @@ All notable changes to Zoteus are documented here. The format is based on
   `backend`, and takes the whole delta from that one API: the desktop app and the cloud
   number their library versions independently, so a delta answered half from each would be
   handed back under a single `since` belonging to neither sequence.
+- **A hand-placed highlight sorts where it sits, instead of at the top of its page.**
+  `zotero_annotate` derives `annotationSortIndex` from the topmost rect's distance to the
+  BOTTOM of the page, so it cannot be computed without the page height, and the only thing
+  that ever reported one was the passage-anchoring pass. A caller who passed `position`
+  skips that pass by definition, so every hand-positioned highlight was stored with
+  `00000|000000|00000` and jumped to the top of its page in the reader sidebar, whatever
+  page coordinates it carried. Measured against a real Zotero desktop: rects
+  `[[72, 696, 300, 712]]` on a US Letter page stored `00000|000000|00000` where the reader
+  wants `00000|000000|00080`. The page height is now read out of the PDF for that path too,
+  which costs opening a file the call would otherwise not open, so it is asked for only for
+  the annotations whose sort index actually turns on it, never for a call that is about to
+  be refused, never when `sort_index` or `page_height` was given, and it shares one read
+  with the anchoring pass. Only page viewports are parsed, never page text: on four real
+  papers (1 to 17 MB) that is 1 to 5 ms, against 142 to 449 ms for the anchoring pass on the
+  same files, plus the file read. Where the PDF cannot be read at all the annotation is
+  still written with its position intact, and the summary says which annotations sort to
+  the top of their page and that `page_height` fixes it, rather than leaving it to be
+  discovered in the sidebar.
+
+- **An annotation field this tool does not know is refused, not silently dropped.** The
+  annotation schema was a plain `z.object`, which strips unrecognised keys before a handler
+  ever sees them, while the JSON Schema it advertised said `additionalProperties: false`.
+  So `pageLabel: "xx"` and `sortIndex: "09999|000999|00999"` (Zotero's own camelCase
+  spellings; this tool's are `page_label` and `sort_index`) produced `isError: false`, a
+  cheerful summary, and an annotation stored with a page label of `"1"` and a computed sort
+  index. Measured on a real Zotero desktop, and a test harness had been writing exactly that
+  and reading the success as proof it worked. A silently ignored argument is the one failure
+  a caller cannot detect, so an unknown key now fails the call, names itself, and names the
+  field it was probably meant to be: `pageLabel`, `page-label` and `annotationPageLabel` all
+  resolve to `page_label`, and a key that resembles nothing gets the list of fields. The
+  advertised schema is unchanged, and so is every documented field.
+
+- **A malformed `position` is refused, and the refusal says so.** A rect that was not four
+  finite numbers was filtered out of `position.rects`, which left the position empty, which
+  the handler read as "no position given" and answered by locating the passage in the PDF
+  and writing entirely different coordinates, as a success. Measured: `rects: [[10, 20, 30]]`
+  stored a text-anchored rect nothing in the request had asked for. With text that is not in
+  the PDF the same input was refused with `passage not found in the PDF` and told the caller
+  to re-quote it, and the generic form of that message says "no `position` was given" when
+  one had been. A position that was given and cannot be read is now a caller error naming
+  the annotation index and what was wrong with it (which rect, and whether it had the wrong
+  number of values or a value that is not a finite number), and nothing is written and no
+  passage is looked up. The same now holds for the other unreadable positions that used to
+  vanish: a non-JSON string, an array that is not the `[pageIndex, [x1, y1, x2, y2]]`
+  shorthand, and a `pageIndex` that is not a whole page number. `{"pageIndex": N}` with no
+  rects is accepted as the page-only position it reads as, rather than discarded.
+
 
 ## [1.17.0] - 2026-09-09
 

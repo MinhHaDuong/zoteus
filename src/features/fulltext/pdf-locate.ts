@@ -222,6 +222,52 @@ export interface LocateOptions {
 }
 
 /**
+ * Height in points of each of the given 0-based pages, for pages the document has.
+ *
+ * The reader's sort index measures a highlight from the BOTTOM of its page, so a rect can
+ * only be turned into a sidebar position once the page height is known. `locatePassages`
+ * reports it for every passage it anchors; this answers the same question for a rect the
+ * caller supplied, which needs no anchoring and would otherwise sort as if it sat at the
+ * very top of the page.
+ *
+ * Only page viewports are read, never page text, so this is a fraction of the work
+ * `locatePassages` does on the same document. Returns null (never throws) when the document
+ * cannot be read at all, mirroring `locatePassages`, and omits any page index the document
+ * does not have.
+ */
+export async function pageHeights(
+  bytes: Uint8Array,
+  pageIndexes: number[],
+  opts: { maxBytes?: number } = {},
+): Promise<Map<number, number> | null> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_PRECISE_MAX_BYTES;
+  if (bytes.byteLength > maxBytes) return null;
+  const wanted = [...new Set(pageIndexes)].filter((n) => Number.isInteger(n) && n >= 0);
+  if (!wanted.length) return new Map();
+
+  let pdfjs: any;
+  try {
+    pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs' as any);
+  } catch {
+    return null; // optional dependency absent, degrade
+  }
+  try {
+    const doc = await pdfjs.getDocument({ data: bytes.slice(), useSystemFonts: true, isEvalSupported: false })
+      .promise;
+    const heights = new Map<number, number>();
+    for (const pageIndex of wanted) {
+      if (pageIndex >= doc.numPages) continue;
+      const page = await doc.getPage(pageIndex + 1);
+      const height = page.getViewport({ scale: 1 }).height;
+      if (Number.isFinite(height) && height > 0) heights.set(pageIndex, height);
+    }
+    return heights;
+  } catch {
+    return null; // corrupt PDF / parse failure, degrade
+  }
+}
+
+/**
  * Find every place each passage occurs, with the geometry Zotero needs to draw it.
  *
  * One pdfjs pass serves all the passages, because annotating a paper means anchoring a

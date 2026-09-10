@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { compactPassage, charsToRects, locatePassages } from '../../src/features/fulltext/pdf-locate.js';
+import { compactPassage, charsToRects, locatePassages, pageHeights } from '../../src/features/fulltext/pdf-locate.js';
 
 // One page, one line of Helvetica text, so pdfjs reports real geometry to anchor against.
 const MINIMAL_PDF = `%PDF-1.4
@@ -85,5 +85,31 @@ describe('locatePassages', () => {
   it('degrades to null rather than throwing on an unparseable or oversized PDF', async () => {
     await expect(locatePassages(new Uint8Array([1, 2, 3]), [{ text: 'x' }])).resolves.toBeNull();
     await expect(locatePassages(PDF_BYTES, [{ text: 'Hello' }], { maxBytes: 10 })).resolves.toBeNull();
+  });
+});
+
+describe('pageHeights', () => {
+  it('reports the height a sort index is measured against', async () => {
+    const heights = await pageHeights(PDF_BYTES, [0]);
+    if (heights === null) return; // pdfjs-dist is optional; absent means degrade, not fail
+    expect(heights.get(0)).toBe(200);
+    // The same number locatePassages reports, since both read the page's viewport.
+    const hits = await locatePassages(PDF_BYTES, [{ text: 'Hello PDF' }]);
+    expect(hits?.[0]?.[0]?.pageHeight).toBe(heights.get(0));
+  });
+
+  it('omits a page the document does not have, rather than inventing one', async () => {
+    const heights = await pageHeights(PDF_BYTES, [0, 7, -1]);
+    if (heights === null) return;
+    expect([...heights.keys()]).toEqual([0]);
+  });
+
+  it('asks nothing of pdfjs when no page was asked for', async () => {
+    await expect(pageHeights(new Uint8Array([1, 2, 3]), [])).resolves.toEqual(new Map());
+  });
+
+  it('degrades to null rather than throwing on an unparseable or oversized PDF', async () => {
+    await expect(pageHeights(new Uint8Array([1, 2, 3]), [0])).resolves.toBeNull();
+    await expect(pageHeights(PDF_BYTES, [0], { maxBytes: 10 })).resolves.toBeNull();
   });
 });

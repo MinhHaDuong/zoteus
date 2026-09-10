@@ -129,7 +129,9 @@ Quote the passage as `zotero_get_fulltext` returns it. Line breaks, hyphenation,
 
 Reading the PDF needs the file: a Zoteus running beside Zotero reads it from the desktop app's own storage, and a hosted one downloads it from Zotero storage, so a hosted Zoteus cannot anchor an attachment that has never synced.
 
-Passing `position` yourself still works and skips all of the above: it is Zotero's stored form, `pageIndex` 0-based and `rects` as `[x1, y1, x2, y2]` in **native PDF points with a bottom-left origin** (`char_offset` and `page_height` refine the sort index, `sort_index` sets it outright).
+Passing `position` yourself still works and skips all of the above: it is Zotero's stored form, `pageIndex` 0-based and `rects` as `[x1, y1, x2, y2]` in **native PDF points with a bottom-left origin** (`char_offset` and `page_height` refine the sort index, `sort_index` sets it outright). The sidebar order is measured from the bottom of the page, so the page height is read out of the PDF for this path too unless you pass `page_height` or `sort_index`; if it cannot be read the highlight is still placed, and the reply says which annotations therefore sort to the top of their page.
+
+A rect that is not four finite numbers, or any other `position` that cannot be read, is refused, naming the annotation and what was wrong with it. It is never quietly replaced by anchoring the passage instead. Annotation field names are snake_case, and a key this tool does not know is refused rather than ignored: `pageLabel` and `sortIndex` are `page_label` and `sort_index`.
 
 ```jsonc
 // zotero_annotate, explicit placement
