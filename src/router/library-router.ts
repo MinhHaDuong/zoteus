@@ -7,9 +7,11 @@ import type {
   ListResult,
   KeyInfo,
   VersionsResult,
+  WrittenObjectType,
 } from '../api/web-client.js';
 import type { LocalApiClient, SyncObjectType } from '../api/local-client.js';
 import type { VersionBackend } from '../features/search/backend.js';
+import { PendingCloudWrites, type PendingWrite } from './pending-writes.js';
 
 export interface LibraryRouterOptions {
   config: ZoteusConfig;
@@ -53,6 +55,7 @@ export class LibraryRouter {
   private readonly capabilities: Capabilities;
   private readonly web: WebApiClient;
   private readonly local?: LocalApiClient;
+  private readonly pending = new PendingCloudWrites();
 
   constructor(opts: LibraryRouterOptions) {
     this.config = opts.config;
@@ -91,9 +94,117 @@ export class LibraryRouter {
    * because the two APIs number their library versions independently: anything that STORES
    * a version (the search index's stamp) has to record which sequence it came from, and a
    * routing change between runs must invalidate it rather than diff across the two.
+   *
+   * Answers the standing rule, deliberately ignoring the pending-write override below. The
+   * callers are the ones that pin a whole crawl and stamp the result, and a write would
+   * otherwise flip their answer for a few minutes, changing the recorded backend and
+   * forcing the index to be rebuilt from scratch. They keep reading the desktop and stay a
+   * write behind, which is what an index that stamps its own as-of version already means.
    */
   servesLocally(library?: LibraryRef): boolean {
     return this.useLocal(library ?? this.defaultLibrary());
+  }
+
+  /**
+   * The library slot a pending write is filed under. The personal library has two
+   * spellings, users/0 on the desktop and users/<cloud id> on the Web API, and a write
+   * addressed one way has to be found again by a read addressed the other. Mirrors the
+   * personal-library test in `useLocal`.
+   */
+  private librarySlot(library: LibraryRef): string {
+    const def = this.defaultLibrary();
+    if (library.type === 'user' && (library.id === def.id || library.id === 0)) return 'user:default';
+    return `${library.type}:${library.id}`;
+  }
+
+  /**
+   * Record a cloud write so that reads of that library stop being answered by a desktop app
+   * that has not synced it yet.
+   *
+   * The bug this closes: group writes always go to the cloud, and personal-library writes
+   * from zotero_create_items and zotero_update_item do too, while reads of both go to the
+   * desktop whenever it holds the library. Measured against a real Zotero 10 and a real
+   * cloud key, an item created in either library came back "Wrote 1 item(s)" with its key,
+   * and the very next zotero_search_items found nothing and zotero_get_item answered
+   * "Local API 404". An agent that verifies its own writes is told they did not happen, and
+   * writes them again.
+   *
+   * The obvious repair, holding the library version the write returned and reading from the
+   * cloud until the desktop reaches it, does not work: the sequences are unrelated. On this
+   * machine the personal library was at cloud version 3476 and desktop version 681, and the
+   * test group at cloud 15 and desktop 5, so the desktop never "reaches" a cloud version and
+   * every library would stay pinned to the cloud forever after one write. What IS comparable
+   * is the desktop against itself, so the witness is the written object: reads go to the
+   * cloud until the desktop can show it has that object, and has it at a version newer than
+   * the one it held before the write.
+   *
+   * The entry is recorded synchronously, before the baseline is measured, because the entry
+   * is what pins reads; a read arriving in the meantime must find it already there.
+   */
+  noteCloudWrite(
+    lib: LibraryRef,
+    type: WrittenObjectType,
+    keys: string[],
+    removed = false,
+  ): void {
+    // Any one key witnesses the whole write, and the last is the newest.
+    const key = keys[keys.length - 1];
+    if (!key) return;
+    const slot = this.librarySlot(lib);
+    this.pending.note(slot, { type, key, removed, before: undefined });
+    // A delete is watched for the object disappearing, so it needs no baseline; and a
+    // library the desktop does not serve has nothing to compare against.
+    if (removed || !this.local || !this.useLocal(lib)) return;
+    void this.local
+      .objectVersion(type, key, lib)
+      .then((before) => this.pending.setBaseline(slot, key, before))
+      .catch(() => {
+        // Without a baseline the write clears as soon as the desktop has the key at all.
+        // That is exact for a create and weak for an update, which is the right way round:
+        // it is the create whose absence sends an agent round the loop again.
+      });
+  }
+
+  /**
+   * The routing decision for one read: the standing rule, then the pending-write override.
+   *
+   * The override costs nothing on a library nobody has written to, which is every read on
+   * the common path: with no entry for the library this returns after the same test
+   * `servesLocally` makes, and issues no request of its own.
+   */
+  private async route(library: LibraryRef, pinned?: VersionBackend): Promise<boolean> {
+    if (pinned) return pinned === 'local';
+    if (!this.useLocal(library)) return false;
+    const slot = this.librarySlot(library);
+    const write = this.pending.get(slot);
+    if (!write) return true;
+    if (!(await this.desktopHasCaughtUp(library, write))) return false;
+    this.pending.clear(slot);
+    return true;
+  }
+
+  /**
+   * Whether the desktop app now holds the pending write. One request to 127.0.0.1, and only
+   * while a write is outstanding: it stops for good the moment Zotero syncs (measured at a
+   * few minutes on this machine), and there is no timeout that gives up before then, because
+   * until the desktop has the write the cloud is simply where the data is.
+   */
+  private async desktopHasCaughtUp(library: LibraryRef, write: PendingWrite): Promise<boolean> {
+    if (!this.local) return false;
+    let now: number | null;
+    try {
+      now = await this.local.objectVersion(write.type, write.key, library);
+    } catch {
+      // An app that cannot answer cannot be shown to hold the write. The cloud took the
+      // write and can take the read.
+      return false;
+    }
+    if (write.removed) return now === null;
+    if (now === null) return false;
+    // No baseline, or none to have: presence is the whole signal for a created object.
+    if (write.before === undefined || write.before === null) return true;
+    // It already had the object, so only its own version moving proves the write landed.
+    return now > write.before;
   }
 
   /** Item keys and versions (`?format=versions`), routed like every other read. */
@@ -102,14 +213,14 @@ export class LibraryRouter {
   ): Promise<VersionsResult> {
     const { library, backend, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib, backend)) return this.local!.itemVersions(rest, lib);
+    if (await this.route(lib, backend)) return this.local!.itemVersions(rest, lib);
     return this.web.itemVersions(lib, rest);
   }
 
   async searchItems(query: ItemQuery & ReadOpts = {}): Promise<ListResult> {
     const { library, backend, ...q } = query;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib, backend)) return this.local!.listItems(q, lib);
+    if (await this.route(lib, backend)) return this.local!.listItems(q, lib);
     return this.web.listItems(lib, q);
   }
 
@@ -119,7 +230,7 @@ export class LibraryRouter {
   ): Promise<any> {
     const { library, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.getItem(key, rest, lib);
+    if (await this.route(lib)) return this.local!.getItem(key, rest, lib);
     return this.web.getItem(lib, key, rest);
   }
 
@@ -128,7 +239,7 @@ export class LibraryRouter {
     const lib = library ?? this.defaultLibrary();
     // Prefer the desktop app for the personal library (local-only mode has no cloud
     // fallback — hitting api.zotero.org with user id 0 yields "Invalid user ID").
-    if (this.useLocal(lib)) return this.local!.getItemChildren(key, rest, lib);
+    if (await this.route(lib)) return this.local!.getItemChildren(key, rest, lib);
     return this.web.getItemChildren(lib, key, rest);
   }
 
@@ -142,14 +253,14 @@ export class LibraryRouter {
    */
   async getFullText(key: string, opts: ReadOpts = {}): Promise<any | null> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib, opts.backend)) return this.local!.getFullText(key, lib);
+    if (await this.route(lib, opts.backend)) return this.local!.getFullText(key, lib);
     return this.web.getFullText(lib, key);
   }
 
   /** Attachment keys whose full text changed after `version`, mapped to that version. */
   async fullTextSince(version: number, opts: ReadOpts = {}): Promise<Record<string, number>> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib, opts.backend)) return this.local!.fullTextSince(version, lib);
+    if (await this.route(lib, opts.backend)) return this.local!.fullTextSince(version, lib);
     return this.web.fullTextSince(lib, version);
   }
 
@@ -165,7 +276,7 @@ export class LibraryRouter {
   ): Promise<ListResult> {
     const { library, backend, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib, backend)) return this.local!.listTags(rest, lib);
+    if (await this.route(lib, backend)) return this.local!.listTags(rest, lib);
     return this.web.listTags(lib, rest);
   }
 
@@ -185,7 +296,7 @@ export class LibraryRouter {
     opts: ReadOpts = {},
   ): Promise<Record<string, number>> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib, opts.backend)) return this.local!.objectVersions(type, since, lib);
+    if (await this.route(lib, opts.backend)) return this.local!.objectVersions(type, since, lib);
     return this.web.versions(lib, type, since);
   }
 
@@ -196,7 +307,7 @@ export class LibraryRouter {
    */
   async deleted(since: number, opts: ReadOpts = {}): Promise<Record<string, string[]>> {
     const lib = opts.library ?? this.defaultLibrary();
-    if (this.useLocal(lib, opts.backend)) return this.local!.deleted(since, lib);
+    if (await this.route(lib, opts.backend)) return this.local!.deleted(since, lib);
     return this.web.deleted(lib, since);
   }
 
@@ -205,7 +316,7 @@ export class LibraryRouter {
   ): Promise<ListResult> {
     const { library, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib)) return this.local!.listCollections(rest, lib);
+    if (await this.route(lib)) return this.local!.listCollections(rest, lib);
     return this.web.listCollections(lib, rest);
   }
 
@@ -227,7 +338,7 @@ export class LibraryRouter {
   ): Promise<string> {
     const { library, backend, ...rest } = params;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib, backend)) return this.local!.exportItems(rest, lib);
+    if (await this.route(lib, backend)) return this.local!.exportItems(rest, lib);
     return this.web.exportItems(lib, rest);
   }
 
@@ -242,7 +353,7 @@ export class LibraryRouter {
   ): Promise<string> {
     const { library, backend, ...rest } = opts;
     const lib = library ?? this.defaultLibrary();
-    if (this.useLocal(lib, backend)) return this.local!.getBibliography(itemKeys, rest, lib);
+    if (await this.route(lib, backend)) return this.local!.getBibliography(itemKeys, rest, lib);
     return this.web.getBibliography(lib, itemKeys, rest);
   }
 }

@@ -55,6 +55,8 @@ To make a group the default for every call instead of repeating it, pin it in th
 
 Items written to a group appear in the desktop app on its next sync, not instantly: the write went to zotero.org, and the app pulls it down on its own schedule (or when you hit Sync).
 
+**Reading one back does not wait for that sync.** Reads normally go to the desktop app for any library it holds, which for the interval between the write and the sync would answer that the item does not exist. So Zoteus keeps reads of a library on the API that took the last write to it, until it can see that the desktop app holds that write. The same applies to the personal library, whose `zotero_create_items` and `zotero_update_item` writes are cloud-only too. Reads of a library nobody has written to are routed exactly as before. The one thing still stale until Zotero syncs is full text stored with `zotero_fulltext action:"set"`, which the desktop files beside the attachment rather than in it.
+
 ## Desktop write paths
 
 Zoteus picks one of two desktop paths automatically, both against the running app on `127.0.0.1:23119` (the same local API used for key-free reads — see [`configuration.md`](./configuration.md)).

@@ -104,6 +104,11 @@ export async function buildContext(
   // #22). This keeps `capabilities` live, re-asking lazily on the way in to a tool call.
   const localStatus = new LocalApiStatus({ config, client: local, capabilities, logger });
   const router = new LibraryRouter({ config, capabilities, web, local });
+  // Every cloud write tells the router, so reads of that library stop being answered by a
+  // desktop app that has not synced it yet. Wired at the client rather than in each write
+  // tool: writes reach api.zotero.org through exactly this object, and a tool cannot forget
+  // to report one.
+  web.onWrite = (lib, type, keys, removed) => router.noteCloudWrite(lib, type, keys, removed);
   // Zotero 10+ accepts local-API writes behind a user-granted key. Only the operator
   // context (never per-user tenants) talks to the desktop app. The client is created
   // eagerly but authorizes lazily, on first write.

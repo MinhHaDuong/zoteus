@@ -56,6 +56,35 @@ d('Zoteus e2e writes (live, self-cleaning)', () => {
     }
   }, 60_000);
 
+  it('finds an item it has just written, without waiting for the desktop app to sync', async () => {
+    // The regression this guards: the write goes to the cloud and the read goes to the
+    // running desktop app, so for as long as Zotero had not synced, the call right after
+    // "Wrote 1 item(s)" answered "Local API 404" for the key it had just been given.
+    // Needs a desktop app actually serving this library, or there is nothing to race.
+    const config = loadConfig(process.env);
+    const { ctx } = await buildServer(config);
+    const lib = ctx.router.defaultLibrary();
+    if (!ctx.router.servesLocally(lib)) return;
+    const title = `ZOTEUS_E2E readback ${new Date().toISOString()}`;
+    let key: string | undefined;
+
+    try {
+      const created = await createItems.handler({ items: [{ itemType: 'journalArticle', title }] }, ctx);
+      key = (created.structuredContent?.created as Array<{ key: string }>)[0]?.key;
+      expect(key).toBeTruthy();
+
+      const item = await ctx.router.getItem(key!, { library: lib });
+      expect(item?.data?.title ?? item?.title).toBe(title);
+      const found = await ctx.router.searchItems({ q: title, library: lib, limit: 5 });
+      expect(found.data.some((i: any) => i.key === key)).toBe(true);
+    } finally {
+      if (key) {
+        const v = await ctx.web.currentLibraryVersion(lib);
+        await ctx.web.deleteItems(lib, [key], v);
+      }
+    }
+  }, 60_000);
+
   it('uploads and downloads an attachment file via the full protocol (self-cleaning)', async () => {
     const config = loadConfig(process.env);
     const { ctx } = await buildServer(config);

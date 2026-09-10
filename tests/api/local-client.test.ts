@@ -556,4 +556,40 @@ describe('LocalApiClient tag and sync-delta reads', () => {
     );
     expect(await makeLocal(fetchImpl).deleted(12)).toEqual({ items: ['GONE1'], tags: [] });
   });
+
+  it('objectVersion answers with the app own version, and null for what it does not hold', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      const path = new URL(url).pathname;
+      if (path === '/api/groups/6666644/items/SXD9FX9K') {
+        return new Response(JSON.stringify({ key: 'SXD9FX9K', version: 7, data: { version: 7 } }), { status: 200 });
+      }
+      return new Response('Not found', { status: 404 });
+    });
+    const local = makeLocal(fetchImpl);
+    const group = { type: 'group' as const, id: 6666644 };
+    expect(await local.objectVersion('items', 'SXD9FX9K', group)).toBe(7);
+    expect(await local.objectVersion('items', 'ZZZZZZZZ', group)).toBeNull();
+  });
+
+  it('objectVersion asks by key so a trashed object still counts as present', async () => {
+    // The local API leaves trashed items out of an ?itemKey= listing even with
+    // includeTrashed, while GET /items/<key> answers 200 with deleted:true. Anyone asking
+    // whether the app has caught up with a write has to see the trash as present, or a
+    // trashed item would hold every read of the library on the cloud forever.
+    const fetchImpl = vi.fn(async (url: string) => {
+      expect(new URL(url).pathname).toBe('/api/users/0/items/WMAESDCV');
+      return new Response(JSON.stringify({ key: 'WMAESDCV', version: 687, data: { deleted: true } }), {
+        status: 200,
+      });
+    });
+    expect(await makeLocal(fetchImpl).objectVersion('items', 'WMAESDCV')).toBe(687);
+  });
+
+  it('objectVersion lets a real failure through rather than reporting absence', async () => {
+    const fetchImpl = vi.fn(async () => new Response('boom', { status: 500 }));
+    await expect(makeLocal(fetchImpl).objectVersion('collections', 'COLL1234')).rejects.toMatchObject({
+      name: 'LocalApiError',
+      status: 500,
+    });
+  });
 });

@@ -36,6 +36,27 @@ export interface WriteResult {
   newLibraryVersion: number;
 }
 
+/**
+ * The object types a cloud write produces that BOTH APIs address by key, so a write of one
+ * can be looked for on the desktop app afterwards. Tags are absent on purpose: they have no
+ * per-key endpoint, and a tag write always rewrites the items carrying it anyway.
+ */
+export type WrittenObjectType = 'items' | 'collections' | 'searches';
+
+/**
+ * Told about every write this client makes: which library, which objects, and whether they
+ * were removed rather than written.
+ *
+ * `removed` matters because it inverts what "the desktop has caught up" means: for a write
+ * the desktop catches up by GAINING the object, for a delete by losing it.
+ */
+export type WriteObserver = (
+  lib: LibraryRef,
+  type: WrittenObjectType,
+  keys: string[],
+  removed: boolean,
+) => void;
+
 export interface ItemQuery {
   q?: string;
   qmode?: 'titleCreatorYear' | 'everything';
@@ -86,6 +107,15 @@ export class WebApiClient {
   private readonly baseUrl: string;
   private readonly fetcher: RateLimitedFetcher;
   private readonly contactEmail?: string;
+
+  /**
+   * Notified after every write below. Set by whoever wires a context together (server.ts
+   * hands it to the router), and deliberately a hook HERE rather than a call in each write
+   * tool: a tool that forgot to report its write would silently reintroduce the staleness
+   * this exists to close, and nothing would catch it until a user read back an item they
+   * had just created and was told it does not exist.
+   */
+  onWrite?: WriteObserver;
 
   constructor(opts: WebApiClientOptions = {}) {
     this.apiKey = opts.apiKey;
@@ -302,6 +332,15 @@ export class WebApiClient {
     }
   }
 
+  /**
+   * Store extracted full text for an attachment.
+   *
+   * Deliberately NOT reported to `onWrite`. Full text is stored beside the attachment
+   * rather than in it, so the desktop app's version for that key does not move when it
+   * syncs the text down, and there is nothing to watch for: an observer told about this
+   * write could never see it arrive, and would pin the library's reads to the cloud for
+   * the rest of the process. A stale full-text read is the smaller of the two harms.
+   */
   async setFullText(
     lib: LibraryRef,
     key: string,
@@ -472,13 +511,33 @@ export class WebApiClient {
     return numOrUndef(headers.get('last-modified-version')) ?? 0;
   }
 
+  /**
+   * Report a finished write to `onWrite`. Never lets an observer's failure surface as a
+   * failed write: the write already happened, and reporting it is bookkeeping.
+   */
+  private reported(
+    lib: LibraryRef,
+    type: WrittenObjectType,
+    keys: string[],
+    removed: boolean,
+  ): void {
+    if (!this.onWrite || keys.length === 0) return;
+    try {
+      this.onWrite(lib, type, keys, removed);
+    } catch {
+      // Bookkeeping only; a write that succeeded must not be reported as failed.
+    }
+  }
+
   /** Create/update items (batch POST /items). Objects with key+version update; without key create. */
   async writeItems(
     lib: LibraryRef,
     objects: any[],
     opts: { libraryVersion?: number } = {},
   ): Promise<WriteResult> {
-    return this.postArray(this.prefix(lib) + '/items', objects, opts.libraryVersion);
+    const result = await this.postArray(this.prefix(lib) + '/items', objects, opts.libraryVersion);
+    this.reported(lib, 'items', result.successful.map((s) => s.key), false);
+    return result;
   }
 
   async writeCollections(
@@ -486,7 +545,9 @@ export class WebApiClient {
     objects: any[],
     opts: { libraryVersion?: number } = {},
   ): Promise<WriteResult> {
-    return this.postArray(this.prefix(lib) + '/collections', objects, opts.libraryVersion);
+    const result = await this.postArray(this.prefix(lib) + '/collections', objects, opts.libraryVersion);
+    this.reported(lib, 'collections', result.successful.map((s) => s.key), false);
+    return result;
   }
 
   async writeSearches(
@@ -494,7 +555,9 @@ export class WebApiClient {
     objects: any[],
     opts: { libraryVersion?: number } = {},
   ): Promise<WriteResult> {
-    return this.postArray(this.prefix(lib) + '/searches', objects, opts.libraryVersion);
+    const result = await this.postArray(this.prefix(lib) + '/searches', objects, opts.libraryVersion);
+    this.reported(lib, 'searches', result.successful.map((s) => s.key), false);
+    return result;
   }
 
   /** Partial single-item update (PATCH). Returns the new library version. 412 on stale version. */
@@ -518,19 +581,24 @@ export class WebApiClient {
         body,
       });
     }
-    return numOrUndef(res.headers.get('last-modified-version')) ?? version;
+    const newVersion = numOrUndef(res.headers.get('last-modified-version')) ?? version;
+    this.reported(lib, 'items', [key], false);
+    return newVersion;
   }
 
   async deleteItems(lib: LibraryRef, keys: string[], libraryVersion: number): Promise<void> {
     await this.deleteByKeys(this.prefix(lib) + '/items', 'itemKey', keys, libraryVersion);
+    this.reported(lib, 'items', keys, true);
   }
 
   async deleteCollections(lib: LibraryRef, keys: string[], libraryVersion: number): Promise<void> {
     await this.deleteByKeys(this.prefix(lib) + '/collections', 'collectionKey', keys, libraryVersion);
+    this.reported(lib, 'collections', keys, true);
   }
 
   async deleteSearches(lib: LibraryRef, keys: string[], libraryVersion: number): Promise<void> {
     await this.deleteByKeys(this.prefix(lib) + '/searches', 'searchKey', keys, libraryVersion);
+    this.reported(lib, 'searches', keys, true);
   }
 
   private writeToken(): string {

@@ -33,6 +33,23 @@ All notable changes to Zoteus are documented here. The format is based on
   (an out-of-range `limit`, say) and is not new here; a vocabulary file rejected for the same
   reason is refused by the handler and is recorded like any other tool error.
 
+- **An item Zoteus had just written no longer reads back as missing.** Writes go to the
+  cloud Web API: always for a group library, and for the personal library too from
+  `zotero_create_items` and `zotero_update_item`, which both require a cloud key. Reads go
+  to the running Zotero desktop app for any library it holds. So between the write and
+  Zotero's next sync the two disagreed, and the call that had just answered "Wrote 1
+  item(s)" with a key was followed by `zotero_search_items` finding nothing and
+  `zotero_get_item` answering "Local API 404". Measured on both libraries, and worst for an
+  agent that verifies its own work: told the item does not exist, it writes it again, and
+  the library fills with duplicates. Reads of a library now go to the API that took the last
+  write to it, until the desktop app can be shown to hold that write. Nothing changes for a
+  library nobody has written to: those reads are routed exactly as before, and cost no extra
+  request. Comparing the two APIs' library versions would have been the tidier fix and does
+  not work, because they number their libraries independently (on the machine this was
+  measured on, the same personal library was at version 3476 on the cloud and 681 on the
+  desktop); the desktop is compared against its own earlier answer instead. Still stale
+  until Zotero syncs: full text stored with `zotero_fulltext action:"set"`, which the
+  desktop files beside the attachment rather than in it, so there is nothing to watch for.
 - **`zotero_manage_tags action:"list"` reached the cloud too.** The same defect as
   `zotero_list_tags` and `zotero_sync`, one tool further along: the list action read
   `ctx.web` directly, so a desktop-only install asked api.zotero.org for `users/0` and got
@@ -362,7 +379,6 @@ All notable changes to Zoteus are documented here. The format is based on
   vanish: a non-JSON string, an array that is not the `[pageIndex, [x1, y1, x2, y2]]`
   shorthand, and a `pageIndex` that is not a whole page number. `{"pageIndex": N}` with no
   rects is accepted as the page-only position it reads as, rather than discarded.
-
 
 ## [1.17.0] - 2026-09-09
 

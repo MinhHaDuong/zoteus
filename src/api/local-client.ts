@@ -396,6 +396,35 @@ export class LocalApiClient {
     };
   }
 
+  /**
+   * The desktop's own version for one object, or null when it does not have it.
+   *
+   * Addressed by key rather than through a filtered listing on purpose: the local API
+   * leaves trashed objects out of `?itemKey=` listings even with `includeTrashed`
+   * (measured against Zotero 10: a trashed item answers `[]` there while `GET
+   * /items/<key>` answers 200 with `deleted: true`), and "in the trash" has to read as
+   * present, not missing, for anyone asking whether the app has caught up with a write.
+   *
+   * The number belongs to the DESKTOP's sequence, so it is comparable only with other
+   * answers from this method, never with a cloud version.
+   */
+  async objectVersion(
+    type: 'items' | 'collections' | 'searches',
+    key: string,
+    lib?: LibraryRef,
+  ): Promise<number | null> {
+    try {
+      const { json } = await this.getJson(`${localLibraryPrefix(lib)}/${type}/${key}`);
+      const version = json?.version ?? json?.data?.version;
+      // Present but versionless should still count as present, so fall back to 0 rather
+      // than to null, which is this method's word for "the app does not have it".
+      return typeof version === 'number' ? version : 0;
+    } catch (err) {
+      if (err instanceof LocalApiError && err.status === 404) return null;
+      throw err;
+    }
+  }
+
   /** Map of attachment key -> library version for full text changed after `since`. */
   async fullTextSince(since: number, lib?: LibraryRef): Promise<Record<string, number>> {
     const { json } = await this.getJson(

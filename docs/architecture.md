@@ -14,7 +14,9 @@ Tool Registry      single source of truth (name, zod schema, annotations, handle
       │
 LibraryRouter      startup capability probe → per-operation routing
       │              reads  → local API when up (personal library, plus any group the
-      │                       desktop app holds, Zotero 10+), else cloud
+      │                       desktop app holds, Zotero 10+), else cloud; but a library
+      │                       just written on the cloud stays on the cloud until the
+      │                       desktop app is seen to hold that write
       │              writes → desktop app for the personal library when up, else cloud
       │                       (group libraries and unsupported ops always cloud)
       │

@@ -92,4 +92,75 @@ describe('WebApiClient writes', () => {
     await makeClient(fetchImpl).deleteItems(lib, ['AAA', 'BBB'], 100);
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
+
+  // The router listens here so that reads of a library stop going to a desktop app that has
+  // not synced the write yet. Reporting from the client rather than from each write tool is
+  // the point: a tool that forgot would put the staleness back with nothing to catch it.
+  it('reports every write to onWrite, with the keys it actually wrote', async () => {
+    const seen: any[] = [];
+    const client = makeClient(
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ successful: { '0': { key: 'NEW1', version: 5 } } }), {
+            status: 200,
+            headers: { 'Last-Modified-Version': '5' },
+          }),
+      ),
+    );
+    client.onWrite = (l, type, keys, removed) => seen.push({ l, type, keys, removed });
+    await client.writeItems(lib, [{ itemType: 'book', title: 'T' }]);
+    await client.writeCollections(lib, [{ name: 'C' }]);
+    await client.writeSearches(lib, [{ name: 'S', conditions: [] }]);
+    expect(seen).toEqual([
+      { l: lib, type: 'items', keys: ['NEW1'], removed: false },
+      { l: lib, type: 'collections', keys: ['NEW1'], removed: false },
+      { l: lib, type: 'searches', keys: ['NEW1'], removed: false },
+    ]);
+  });
+
+  it('reports a patch, and reports a delete as a removal', async () => {
+    const seen: any[] = [];
+    const client = makeClient(vi.fn(async () => new Response(null, { status: 204, headers: { 'Last-Modified-Version': '4' } })));
+    client.onWrite = (_l, type, keys, removed) => seen.push({ type, keys, removed });
+    await client.patchItem(lib, 'ABCD', { title: 'New' }, 3);
+    await client.deleteItems(lib, ['AAA', 'BBB'], 100);
+    expect(seen).toEqual([
+      { type: 'items', keys: ['ABCD'], removed: false },
+      // A delete inverts what catching up means: the desktop is level once it has LOST them.
+      { type: 'items', keys: ['AAA', 'BBB'], removed: true },
+    ]);
+  });
+
+  it('reports nothing for a batch where every object failed', async () => {
+    const seen: any[] = [];
+    const client = makeClient(
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ failed: { '0': { key: 'K1', code: 412, message: 'conflict' } } }), {
+            status: 200,
+            headers: { 'Last-Modified-Version': '9' },
+          }),
+      ),
+    );
+    client.onWrite = (...args) => seen.push(args);
+    await client.writeItems(lib, [{ key: 'K1', version: 3, title: 'x' }]);
+    expect(seen).toEqual([]);
+  });
+
+  it('does not fail a write because the observer threw', async () => {
+    const client = makeClient(
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ successful: { '0': { key: 'NEW1', version: 5 } } }), {
+            status: 200,
+            headers: { 'Last-Modified-Version': '5' },
+          }),
+      ),
+    );
+    client.onWrite = () => {
+      throw new Error('bookkeeping blew up');
+    };
+    const r = await client.writeItems(lib, [{ itemType: 'book', title: 'T' }]);
+    expect(r.successful[0].key).toBe('NEW1');
+  });
 });
