@@ -76,20 +76,32 @@ const importTool: ToolDefinition = {
   },
   annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   handler: async (args, ctx) => {
-    const tsUp = await ctx.translation.isUp();
-    if (!tsUp && !args.identifier) {
-      // A URL with no translation-server is unresolvable server-side; say so plainly.
-      if (args.action === 'by_url') {
-        return err(
-          `No Zotero translation-server reachable at ${ctx.config.translationServerUrl}, and URL scraping has no built-in fallback. Start one with \`docker run -d -p 1969:1969 zotero/translation-server\` (or set ZOTEUS_TRANSLATION_SERVER_URL), then retry.`,
-        );
-      }
+    // Check what the caller sent before probing the translation-server. An empty
+    // `identifier` used to fall through the guard below (a missing identifier and a blank
+    // one are both falsy) and was reported as "no translation-server reachable", which sent
+    // the caller off to install Docker for a request that named nothing to resolve.
+    if (args.action === 'by_identifier' && !args.identifier?.trim()) {
       return err(
-        `No Zotero translation-server reachable at ${ctx.config.translationServerUrl}. DOI/arXiv ids can still be resolved via built-in fallbacks; ISBN/PMID/bibcode and URLs need the server (start it with \`docker run -d -p 1969:1969 zotero/translation-server\`, or set ZOTEUS_TRANSLATION_SERVER_URL).`,
+        '`identifier` is empty; action:"by_identifier" has nothing to resolve. Pass a DOI (10.1109/…), an arXiv id ' +
+          '(2301.12345), an ISBN, a PMID, or an ADS bibcode. To import a web page instead, use action:"by_url" with `url`.',
+      );
+    }
+    if (args.action === 'by_url' && !args.url?.trim()) {
+      return err(
+        '`url` is empty; action:"by_url" has nothing to scrape. Pass the page URL (https://…). To import a known ' +
+          'identifier instead, use action:"by_identifier" with `identifier`.',
+      );
+    }
+    const tsUp = await ctx.translation.isUp();
+    // A URL with no translation-server is unresolvable server-side; say so plainly. An
+    // identifier is not in that position: DOIs and arXiv ids have built-in fallbacks below,
+    // and the ones that do not (ISBN/PMID/bibcode) are named as such by resolveBuiltin.
+    if (!tsUp && args.action === 'by_url') {
+      return err(
+        `No Zotero translation-server reachable at ${ctx.config.translationServerUrl}, and URL scraping has no built-in fallback. Start one with \`docker run -d -p 1969:1969 zotero/translation-server\` (or set ZOTEUS_TRANSLATION_SERVER_URL), then retry.`,
       );
     }
     if (args.action === 'by_identifier') {
-      if (!args.identifier) return err('`identifier` is required for by_identifier.');
       if (tsUp) {
         const items = await ctx.translation.search(args.identifier);
         if (items.length) return await maybeSave(ctx, args, items, 'translation-server');

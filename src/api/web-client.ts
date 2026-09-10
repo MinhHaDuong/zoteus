@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { RateLimitedFetcher } from './http.js';
-import { ZoteroApiError, actionableMessage } from './errors.js';
+import { ZoteroApiError, actionableMessage, type RequestContext } from './errors.js';
 import type { Logger } from '../lib/logger.js';
 
 export interface LibraryRef {
@@ -98,6 +98,18 @@ export class WebApiClient {
     return Boolean(this.apiKey);
   }
 
+  /**
+   * What a refusal has to know about the request that drew it: the library the URL
+   * addressed, whether the method reads or writes, and whether a key was sent at all. See
+   * `actionableMessage` for why a 403 cannot be explained without those three.
+   *
+   * Passed explicitly rather than read back off the Response, so it is the URL this client
+   * asked for rather than whatever a redirect left behind.
+   */
+  private reqCtx(method: string, url: string): RequestContext {
+    return { method, url, hasKey: Boolean(this.apiKey) };
+  }
+
   private headers(): Record<string, string> {
     const h: Record<string, string> = { 'Zotero-API-Version': '3' };
     if (this.apiKey) h['Zotero-API-Key'] = this.apiKey;
@@ -129,7 +141,7 @@ export class WebApiClient {
       const body = await res.text().catch(() => '');
       throw new ZoteroApiError({
         status: res.status,
-        message: actionableMessage(res.status, body, res.headers),
+        message: actionableMessage(res.status, body, res.headers, this.reqCtx('GET', url)),
         retryAfter: numOrUndef(res.headers.get('retry-after')),
         currentVersion: numOrUndef(res.headers.get('last-modified-version')),
         body,
@@ -153,12 +165,13 @@ export class WebApiClient {
 
   async getSchema(): Promise<any> {
     // The global schema endpoint takes no auth.
-    const res = await this.fetcher.fetch(`${this.baseUrl}/schema`, { method: 'GET' });
+    const url = `${this.baseUrl}/schema`;
+    const res = await this.fetcher.fetch(url, { method: 'GET' });
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new ZoteroApiError({
         status: res.status,
-        message: actionableMessage(res.status, body, res.headers),
+        message: actionableMessage(res.status, body, res.headers, this.reqCtx('GET', url)),
       });
     }
     return res.json();
@@ -227,7 +240,8 @@ export class WebApiClient {
   }
 
   private async getRaw(path: string, query = ''): Promise<{ text: string; headers: Headers }> {
-    const res = await this.fetcher.fetch(`${this.baseUrl}${path}${query}`, {
+    const url = `${this.baseUrl}${path}${query}`;
+    const res = await this.fetcher.fetch(url, {
       method: 'GET',
       headers: this.headers(),
     });
@@ -235,7 +249,7 @@ export class WebApiClient {
       const body = await res.text().catch(() => '');
       throw new ZoteroApiError({
         status: res.status,
-        message: actionableMessage(res.status, body, res.headers),
+        message: actionableMessage(res.status, body, res.headers, this.reqCtx('GET', url)),
         body,
       });
     }
@@ -293,14 +307,19 @@ export class WebApiClient {
     key: string,
     body: { content: string; indexedChars?: number; totalChars?: number; indexedPages?: number; totalPages?: number },
   ): Promise<void> {
-    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/fulltext`, {
+    const url = `${this.baseUrl}${this.prefix(lib)}/items/${key}/fulltext`;
+    const res = await this.fetcher.fetch(url, {
       method: 'PUT',
       headers: { ...this.headers(), 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
       const b = await res.text().catch(() => '');
-      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+      throw new ZoteroApiError({
+        status: res.status,
+        message: actionableMessage(res.status, b, res.headers, this.reqCtx('PUT', url)),
+        body: b,
+      });
     }
   }
 
@@ -368,14 +387,19 @@ export class WebApiClient {
       filesize: String(info.filesize),
       mtime: String(info.mtime),
     }).toString();
-    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/file`, {
+    const url = `${this.baseUrl}${this.prefix(lib)}/items/${key}/file`;
+    const res = await this.fetcher.fetch(url, {
       method: 'POST',
       headers,
       body,
     });
     if (!res.ok) {
       const b = await res.text().catch(() => '');
-      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+      throw new ZoteroApiError({
+        status: res.status,
+        message: actionableMessage(res.status, b, res.headers, this.reqCtx('POST', url)),
+        body: b,
+      });
     }
     return res.json();
   }
@@ -403,14 +427,19 @@ export class WebApiClient {
     };
     if (replaceMd5) headers['If-Match'] = replaceMd5;
     else headers['If-None-Match'] = '*';
-    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}/file`, {
+    const url = `${this.baseUrl}${this.prefix(lib)}/items/${key}/file`;
+    const res = await this.fetcher.fetch(url, {
       method: 'POST',
       headers,
       body: `upload=${encodeURIComponent(uploadKey)}`,
     });
     if (!res.ok) {
       const b = await res.text().catch(() => '');
-      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+      throw new ZoteroApiError({
+        status: res.status,
+        message: actionableMessage(res.status, b, res.headers, this.reqCtx('POST', url)),
+        body: b,
+      });
     }
   }
 
@@ -418,14 +447,15 @@ export class WebApiClient {
     lib: LibraryRef,
     key: string,
   ): Promise<{ bytes: Uint8Array; contentType?: string; etag?: string }> {
-    const res = await this.fetcher.fetch(
-      `${this.baseUrl}${this.prefix(lib)}/items/${key}/file`,
-      { method: 'GET', headers: this.headers() },
-      FILE_TRANSFER,
-    );
+    const url = `${this.baseUrl}${this.prefix(lib)}/items/${key}/file`;
+    const res = await this.fetcher.fetch(url, { method: 'GET', headers: this.headers() }, FILE_TRANSFER);
     if (!res.ok) {
       const b = await res.text().catch(() => '');
-      throw new ZoteroApiError({ status: res.status, message: actionableMessage(res.status, b, res.headers), body: b });
+      throw new ZoteroApiError({
+        status: res.status,
+        message: actionableMessage(res.status, b, res.headers, this.reqCtx('GET', url)),
+        body: b,
+      });
     }
     return {
       bytes: new Uint8Array(await res.arrayBuffer()),
@@ -469,7 +499,8 @@ export class WebApiClient {
 
   /** Partial single-item update (PATCH). Returns the new library version. 412 on stale version. */
   async patchItem(lib: LibraryRef, key: string, patch: Record<string, unknown>, version: number): Promise<number> {
-    const res = await this.fetcher.fetch(`${this.baseUrl}${this.prefix(lib)}/items/${key}`, {
+    const url = `${this.baseUrl}${this.prefix(lib)}/items/${key}`;
+    const res = await this.fetcher.fetch(url, {
       method: 'PATCH',
       headers: {
         ...this.headers(),
@@ -482,7 +513,7 @@ export class WebApiClient {
       const body = await res.text().catch(() => '');
       throw new ZoteroApiError({
         status: res.status,
-        message: actionableMessage(res.status, body, res.headers),
+        message: actionableMessage(res.status, body, res.headers, this.reqCtx('PATCH', url)),
         currentVersion: numOrUndef(res.headers.get('last-modified-version')),
         body,
       });
@@ -525,7 +556,8 @@ export class WebApiClient {
       } else {
         headers['If-Unmodified-Since-Version'] = String(currentVersion);
       }
-      const res = await this.fetcher.fetch(`${this.baseUrl}${path}`, {
+      const url = `${this.baseUrl}${path}`;
+      const res = await this.fetcher.fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(c),
@@ -534,7 +566,7 @@ export class WebApiClient {
         const body = await res.text().catch(() => '');
         throw new ZoteroApiError({
           status: res.status,
-          message: actionableMessage(res.status, body, res.headers),
+          message: actionableMessage(res.status, body, res.headers, this.reqCtx('POST', url)),
           currentVersion: numOrUndef(res.headers.get('last-modified-version')),
           body,
         });
@@ -586,7 +618,7 @@ export class WebApiClient {
         const body = await res.text().catch(() => '');
         throw new ZoteroApiError({
           status: res.status,
-          message: actionableMessage(res.status, body, res.headers),
+          message: actionableMessage(res.status, body, res.headers, this.reqCtx('DELETE', url)),
           currentVersion: numOrUndef(res.headers.get('last-modified-version')),
           body,
         });

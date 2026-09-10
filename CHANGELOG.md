@@ -206,6 +206,51 @@ All notable changes to Zoteus are documented here. The format is based on
   `structuredContent`, the way `zotero_format_bibliography` reports `(empty bibliography)`.
   A non-empty export is unchanged, down to the bytes.
 
+- **A 403 now depends on the request that drew it, instead of describing a situation the
+  caller is not in.** Zotero spends one status on several unrelated refusals whose remedies
+  contradict each other, and the response says nothing about which applies, so the message
+  listed them all. A read of the caller's own personal library, by its real user id, on an
+  install with no API key at all, was answered with four clauses about group write
+  permissions and one about a read-only key: every one of them wrong, and the true answer
+  (in key-free local mode the personal library is `library_id: 0`, and any other id is sent
+  to the cloud) was not among them. The three facts that decide the remedy now travel with
+  the failure: which library the request addressed, whether it was a read or a write, and
+  whether a key was sent at all. A key-free failure names local addressing and never
+  mentions key permissions; a keyed read says the key cannot READ that library and does not
+  offer write access as the fix; a keyed group write keeps the three gates it has named
+  since #74; and a 403 on `/keys/current` says the key itself was rejected. Where the
+  context is unknown the message says only what is certain of any 403.
+- **`zotero_bibliography` reports the entries Zotero rendered, not the keys it was asked
+  for.** `itemCount` was `item_keys.length`, so it echoed the request: a key the library
+  does not have came back as `itemCount: 1` over an empty `csl-bib-body`, a number no
+  rendering could contradict. Zotero drops a key it cannot render and still answers 200, so
+  the count now comes from the rendering (`entryCount`, as `zotero_format_bibliography`
+  already reported it, alongside `requestedCount`), and a shortfall is stated: how many of
+  the requested keys produced no entry, from which library, and the two reasons a key
+  renders nothing (the library does not have it, or it names an attachment or note rather
+  than a regular item). An empty result reads `(empty bibliography)` like its sibling
+  instead of an empty wrapper. `itemCount` is gone from the structured content.
+- **An empty `identifier` is no longer blamed on the translation-server.** `zotero_import
+  {action:"by_identifier", identifier:""}` answered "No Zotero translation-server reachable
+  at http://127.0.0.1:1969" and suggested installing Docker: a missing identifier and a
+  blank one are both falsy, so the empty argument fell through the guard meant for the case
+  where there is nothing to resolve *with*. Arguments are now checked before the server is
+  probed, and an empty `identifier` (or `url`) says which argument was empty, what a valid
+  one looks like, and which action to use instead. The generic translation-server refusal
+  it used to reach was reachable only through this bug and is gone; the URL one, which has
+  no built-in fallback, is unchanged.
+- **`zotero_fulltext action:"set"` says why it cannot run locally, instead of calling a
+  personal-library call cloud/group.** With no key, a `set` on the personal library was
+  refused with "This operation writes to a cloud/group library and requires a cloud API
+  key", which described neither the library asked for nor the reason. The reason is the
+  operation: storing full text is a PUT to the Web API, and neither desktop write path (the
+  Zotero 10+ local API, the connector protocol) has a full-text endpoint for it to route
+  to, so a running desktop app cannot stand in for the key here as it does for item writes.
+  The refusal now names the library it was given, the operation's cloud-only nature, and
+  what is unaffected: the desktop app keeps its own full-text index, which `action:"get"`
+  and `action:"since"` read with no key. The group refusal, which was already accurate, is
+  unchanged.
+
 
 ## [1.17.0] - 2026-09-09
 
