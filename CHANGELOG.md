@@ -7,6 +7,17 @@ All notable changes to Zoteus are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **A desktop write whose grant has gone now falls back to the cloud instead of failing.**
+  Zotero gates local-API writes behind a grant the user accepts in a dialog, and a "Allow"
+  grant is single-use: Zotero deletes it on first successful use. `LocalWriteClient` answers
+  the first 401 by re-authorizing and retrying, but a 401 that survived that reached the
+  caller as a plain write failure, and the predicate deciding whether to try the cloud
+  instead only recognised the Zotero 9 shape (404, 501, unreachable). So a run whose
+  re-authorization dialog nobody answered stopped with "Invalid or expired API key" while
+  holding a cloud key that could have served the write. It now falls back. An explicit
+  denial deliberately still does not: Zotero answers "Deny" with 403 and its own error, and
+  someone who has just refused a write is not asking for it to be routed somewhere else.
+
 - **`zotero_tag_audit` no longer audits something other than what it was asked about.**
   `scope`, the `vocabulary` object and each of its `tags` and `tiers` entries were plain
   `z.object`s with optional members, so a key one letter out was stripped by Zod before the

@@ -494,18 +494,33 @@ export function registerAllTools(
 }
 
 /**
- * True when a local-API write failure means the running Zotero simply does not have
- * (or accept) local writes — i.e. Zotero 9 and earlier, whose local API is GET-only, so
- * write paths answer "No endpoint found" (404) or 501 "Endpoint does not support
- * method" and no response carries a Zotero-Server-ID header — as opposed to a real
- * write failure (denied grant, validation error, stale version). Callers use this to
- * fall back to the connector protocol or the cloud Web API.
+ * True when a local-API write failure means the running Zotero simply does not have (or
+ * accept) local writes, as opposed to a real write failure (validation error, stale
+ * version). Callers use this to fall back to the connector protocol or the cloud Web API.
+ *
+ * Two shapes qualify. Zotero 9 and earlier have a GET-only local API, so write paths answer
+ * "No endpoint found" (404) or 501 "Endpoint does not support method". And a 401 that
+ * reaches a caller at all means the grant is gone: `LocalWriteClient.request` answers the
+ * first 401 by dropping its key, re-authorizing and retrying once (local-writes.ts), so a
+ * 401 arriving here has already survived that. Its key is stale or was consumed and Zotero
+ * would not issue another, which the cloud can serve instead. Before this, such a write
+ * failed outright even with a working cloud key: an unattended run whose re-authorization
+ * dialog nobody answered got "Invalid or expired API key" and stopped, having a perfectly
+ * good path it never tried.
+ *
+ * A DENIED grant deliberately does not qualify. Zotero answers a user pressing "Deny" with
+ * 403 `{"denied":true}`, which `authorize()` turns into its own "local write access was
+ * denied" error, and that must keep failing hard: someone who just refused a write is not
+ * asking for it to be routed somewhere else instead.
  */
 export function isLocalWritesUnavailable(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
+  if (/denied/i.test(msg)) return false;
   return (
     /local api/i.test(msg) &&
-    /404|no endpoint|not implemented|not supported|does not support|unreachable/i.test(msg)
+    /\b401\b|expired api key|404|no endpoint|not implemented|not supported|does not support|unreachable/i.test(
+      msg,
+    )
   );
 }
 
