@@ -162,6 +162,14 @@ const isProtocolKey = (key: string): boolean => key.startsWith('_');
 class ProtocolTolerantObject<T extends ZodRawShape> extends z.ZodObject<T, 'strict'> {
   _parse(input: z.ParseInput): z.ParseReturnType<this['_output']> {
     const data: unknown = input.data;
+    // `arguments` is optional in tools/call: the SDK types it
+    // `z.record(z.string(), z.unknown()).optional()`, so a spec-abiding client may omit it
+    // for a tool that needs nothing. Zoteus answered every such call with a JSON-RPC -32602
+    // "expected object, received undefined", on all 30 tools, including zotero_whoami, which
+    // the docs tell callers to reach for first. An absent argument object is an empty one,
+    // and a tool with required arguments still refuses it, now naming the fields it wanted
+    // rather than the shape of the envelope.
+    if (data === undefined) return super._parse({ ...input, data: {} });
     if (!data || typeof data !== 'object' || Array.isArray(data)) return super._parse(input);
     const declared = this.shape;
     const drop = (key: string): boolean => isProtocolKey(key) && !(key in declared);

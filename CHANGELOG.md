@@ -7,6 +7,14 @@ All notable changes to Zoteus are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **A `tools/call` that omits `arguments` no longer fails.** `arguments` is optional in the
+  MCP spec, and the SDK types it that way, so a client calling a tool that needs nothing may
+  leave it out. Every one of the 30 tools answered such a call with a JSON-RPC -32602 about
+  the shape of the envelope, `zotero_whoami` included, which is the tool the documentation
+  tells callers to reach for first. An absent argument object is now read as an empty one. A
+  tool that does require an argument still refuses, but the refusal names the field it wanted
+  and the values it accepts, rather than complaining that the envelope was undefined.
+
 - **A desktop write whose grant has gone now falls back to the cloud instead of failing.**
   Zotero gates local-API writes behind a grant the user accepts in a dialog, and a "Allow"
   grant is single-use: Zotero deletes it on first successful use. `LocalWriteClient` answers

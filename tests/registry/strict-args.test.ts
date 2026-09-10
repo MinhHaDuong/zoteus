@@ -373,3 +373,28 @@ describe('through the MCP SDK', () => {
     expect(usage.record).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * `arguments` is optional in tools/call. A client omitting it for a tool that needs nothing
+ * used to get a JSON-RPC -32602 about the envelope's shape, on all 30 tools.
+ */
+describe('a tools/call that omits arguments entirely', () => {
+  it('is treated as an empty argument object', () => {
+    const schema = closedArgumentSchema({});
+    const parsed = schema.safeParse(undefined);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).toEqual({});
+  });
+
+  it('still refuses a tool that needs an argument, naming the field not the envelope', () => {
+    const schema = closedArgumentSchema({ action: z.enum(['list', 'resolve']) });
+    const parsed = schema.safeParse(undefined);
+    expect(parsed.success).toBe(false);
+    expect(parsed.success === false && parsed.error.issues[0].path).toEqual(['action']);
+  });
+
+  it('leaves optional-only shapes usable with nothing supplied', () => {
+    const schema = closedArgumentSchema({ q: z.string().optional() });
+    expect(schema.safeParse(undefined).success).toBe(true);
+  });
+});
