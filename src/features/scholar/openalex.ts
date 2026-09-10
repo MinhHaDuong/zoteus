@@ -36,6 +36,23 @@ export interface OpenAlexOptions {
 
 const BASE = 'https://api.openalex.org';
 
+/**
+ * A non-OK response from OpenAlex, carrying the status so a caller can tell the two apart:
+ * 404 is OpenAlex answering that it has no such work, anything else is the service failing
+ * and must never be reported as an absent record. Same idiom as LocalApiError. The URL
+ * stays in the message for logs; callers that speak to a model format their own line from
+ * the status instead of quoting it.
+ */
+export class OpenAlexError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'OpenAlexError';
+  }
+}
+
 function stripDoi(doi: string): string {
   return doi.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').trim();
 }
@@ -65,7 +82,7 @@ export class OpenAlexClient {
 
   private async getJson(url: string): Promise<any> {
     const res = await this.fetcher.fetch(url, { method: 'GET', headers: this.headers }, { maxRetries: 1 });
-    if (!res.ok) throw new Error(`OpenAlex ${res.status} for ${url}`);
+    if (!res.ok) throw new OpenAlexError(res.status, `OpenAlex ${res.status} for ${url}`);
     return res.json();
   }
 

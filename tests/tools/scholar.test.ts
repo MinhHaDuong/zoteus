@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import scholar from '../../src/tools/scholar.js';
+import { OpenAlexError } from '../../src/features/scholar/openalex.js';
 
 function ctx(overrides: Record<string, unknown> = {}) {
   const work = {
@@ -91,5 +92,77 @@ describe('zotero_scholar says when a list was cut', () => {
     expect(sc.total).toBe(2);
     expect(sc.truncated).toBe(false);
     expect((res.content?.[0] as any)?.text).toMatch(/^2 citations for/);
+  });
+});
+
+// An empty DOI used to reach the providers, where OpenAlex 404s on `works/` and Crossref
+// answers its works-LIST route 200; the list envelope then read as a found paper with no
+// title, no authors and no citations.
+describe('zotero_scholar refuses an empty DOI instead of inventing a result', () => {
+  for (const doi of ['', '   ', '\t\n']) {
+    it(`refuses ${JSON.stringify(doi)} without asking any provider`, async () => {
+      const c = ctx();
+      const res = await scholar.handler({ action: 'lookup', doi }, c);
+      expect(res.isError).toBe(true);
+      expect((res.content?.[0] as any)?.text).toMatch(/DOI is required/i);
+      expect(c.scholar.lookup).not.toHaveBeenCalled();
+    });
+  }
+
+  it('refuses an empty DOI for the list actions too', async () => {
+    const c = ctx();
+    const res = await scholar.handler({ action: 'references', doi: '' }, c);
+    expect(res.isError).toBe(true);
+    expect(c.scholar.references).not.toHaveBeenCalled();
+  });
+
+  it('trims a padded DOI rather than refusing it', async () => {
+    const c = ctx();
+    const res = await scholar.handler({ action: 'lookup', doi: '  10.1109/ICRA.2019.8794293 ' }, c);
+    expect(res.isError).toBeFalsy();
+    expect(c.scholar.lookup).toHaveBeenCalledWith('10.1109/ICRA.2019.8794293');
+  });
+});
+
+// references/citations/related reach OpenAlex directly, and used to answer with the raw
+// "OpenAlex 404 for https://api.openalex.org/works/doi:..." where lookup says "No
+// scholarly record found for DOI ...".
+describe('zotero_scholar reports an upstream failure in one clean voice', () => {
+  function failing(e: unknown) {
+    return ctx({
+      scholar: {
+        lookup: vi.fn(),
+        references: vi.fn(async () => {
+          throw e;
+        }),
+        citations: vi.fn(),
+        related: vi.fn(),
+      },
+    });
+  }
+
+  it('turns a 404 into the same sentence lookup gives, with no URL', async () => {
+    const e = new OpenAlexError(404, 'OpenAlex 404 for https://api.openalex.org/works/doi:10.9/zzz');
+    const res = await scholar.handler({ action: 'references', doi: '10.9/zzz' }, failing(e));
+    expect(res.isError).toBe(true);
+    const text = (res.content?.[0] as any)?.text as string;
+    expect(text).toBe('No scholarly record found for DOI 10.9/zzz.');
+    expect(text).not.toContain('http');
+  });
+
+  // A throttled or broken provider is not evidence that the paper does not exist.
+  it('does not report a 429 as an absent record', async () => {
+    const e = new OpenAlexError(429, 'OpenAlex 429 for https://api.openalex.org/works/doi:10.9/zzz');
+    const res = await scholar.handler({ action: 'references', doi: '10.9/zzz' }, failing(e));
+    expect(res.isError).toBe(true);
+    const text = (res.content?.[0] as any)?.text as string;
+    expect(text).toMatch(/429/);
+    expect(text).not.toMatch(/No scholarly record/);
+    expect(text).not.toContain('http');
+  });
+
+  it('lets anything that is not an OpenAlex status through unchanged', async () => {
+    const c = failing(new Error('Zotero took longer than the 25s budget'));
+    await expect(scholar.handler({ action: 'references', doi: '10.9/zzz' }, c)).rejects.toThrow(/budget/);
   });
 });

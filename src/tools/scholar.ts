@@ -1,9 +1,14 @@
 import { z } from 'zod';
-import type { ToolDefinition, ToolContext } from '../registry/registry.js';
+import type { ToolDefinition, ToolContext, ToolHandlerResult } from '../registry/registry.js';
 import { ok } from '../registry/registry.js';
 import { markInLibrary, type ScholarList } from '../features/scholar/graph.js';
+import { OpenAlexError } from '../features/scholar/openalex.js';
 
 const MAX_LIB_ITEMS = 5000;
+
+function err(text: string): ToolHandlerResult {
+  return { content: [{ type: 'text', text }], isError: true };
+}
 
 async function libraryDoiSet(ctx: ToolContext): Promise<Set<string>> {
   const set = new Set<string>();
@@ -34,25 +39,54 @@ const scholar: ToolDefinition = {
   annotations: { readOnlyHint: true, openWorldHint: true },
   handler: async (args, ctx) => {
     const limit = args.limit ?? 20;
+    // An empty DOI is not a question anyone can answer, and asking it anyway produced a
+    // fabricated answer: `works/` with no DOI is OpenAlex's 404 but Crossref's works-LIST
+    // route, which answers 200, and that list envelope read as one untitled work with no
+    // authors and no citations. Refused here, before either provider is asked.
+    const doi = args.doi.trim();
+    if (!doi) {
+      return err(
+        'A DOI is required, and `doi` was empty. Pass the paper\'s DOI, with or without the ' +
+          'https://doi.org/ prefix. (zotero_scholar queries the scholarly web, not your library: ' +
+          'to search your own items use zotero_search_items or zotero_semantic_search.)',
+      );
+    }
 
     if (args.action === 'lookup') {
-      let primary = await ctx.scholar.lookup(args.doi);
+      let primary = await ctx.scholar.lookup(doi);
       if (!primary) {
-        return { content: [{ type: 'text', text: `No scholarly record found for DOI ${args.doi}.` }], isError: true };
+        return err(`No scholarly record found for DOI ${doi}.`);
       }
       const canMatch = ctx.capabilities.cloud != null || ctx.capabilities.localApi;
       if (args.include_in_library === true && canMatch) {
         primary = markInLibrary([primary], await libraryDoiSet(ctx))[0]!;
       }
-      return ok({ action: args.action, work: primary }, `${primary.title ?? args.doi} — ${primary.citationCount ?? 0} citations.`);
+      return ok({ action: args.action, work: primary }, `${primary.title ?? doi}: ${primary.citationCount ?? 0} citations.`);
     }
 
-    const list: ScholarList =
-      args.action === 'references'
-        ? await ctx.scholar.references(args.doi, limit)
-        : args.action === 'citations'
-          ? await ctx.scholar.citations(args.doi, limit)
-          : await ctx.scholar.related(args.doi, limit);
+    let list: ScholarList;
+    try {
+      list =
+        args.action === 'references'
+          ? await ctx.scholar.references(doi, limit)
+          : args.action === 'citations'
+            ? await ctx.scholar.citations(doi, limit)
+            : await ctx.scholar.related(doi, limit);
+    } catch (e) {
+      // These three actions reach OpenAlex directly, with no Crossref fallback to swallow
+      // the failure, so the raw "OpenAlex 404 for https://api.openalex.org/works/doi:..."
+      // used to be the answer where `lookup` gives a clean sentence. A 404 is OpenAlex
+      // saying it has no such work; any other status is the service failing, and reporting
+      // that as an absent record would be the same lie in the other direction.
+      if (e instanceof OpenAlexError) {
+        if (e.status === 404) return err(`No scholarly record found for DOI ${doi}.`);
+        return err(
+          `OpenAlex could not answer for DOI ${doi} (HTTP ${e.status}). That is the provider ` +
+            'failing, not evidence that the record is absent. Retry shortly.',
+        );
+      }
+      throw e;
+    }
     let results = list.works;
 
     const canMatch = ctx.capabilities.cloud != null || ctx.capabilities.localApi;
@@ -67,12 +101,12 @@ const scholar: ToolDefinition = {
     const truncated = list.total > results.length;
     const shown = truncated ? `${results.length} of ${list.total}` : `${results.length}`;
     const inLib = results.filter((w) => w.inLibrary).length;
-    const summary = `${shown} ${args.action} for ${args.doi}` +
+    const summary = `${shown} ${args.action} for ${doi}` +
       (args.include_in_library === true && canMatch ? ` (${inLib} already in your library, ${results.length - inLib} not).` : '.');
     return ok(
       {
         action: args.action,
-        doi: args.doi,
+        doi,
         results,
         count: results.length,
         total: list.total,

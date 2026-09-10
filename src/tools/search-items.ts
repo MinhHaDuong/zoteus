@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../registry/registry.js';
 import { okLibraryContent, optionalLibrary } from '../registry/registry.js';
+import { refuseUnknownCollection } from './collection-guard.js';
 
 const MAX_LIMIT = 100;
 
@@ -40,7 +41,12 @@ const searchItems: ToolDefinition = {
     qmode: z.enum(['titleCreatorYear', 'everything']).optional(),
     itemType: z.string().optional().describe('Boolean itemType filter, e.g. "journalArticle || book".'),
     tag: z.string().optional().describe('Boolean tag filter, e.g. "to-read && 2024".'),
-    collectionKey: z.string().optional().describe('Restrict to a collection by key.'),
+    collectionKey: z
+      .string()
+      .optional()
+      .describe(
+        'Restrict to a collection by key. A key this library does not have is refused, never answered with the whole library.',
+      ),
     top: z.boolean().optional().describe('Only top-level items (exclude child notes/attachments).'),
     since: z.number().int().optional().describe('Return items modified after this library version.'),
     includeTrashed: z.boolean().optional(),
@@ -56,6 +62,16 @@ const searchItems: ToolDefinition = {
   handler: async (args, ctx) => {
     const detailed = args.response_format === 'detailed';
     const library = optionalLibrary(args);
+    // A collection key the library does not have would otherwise be answered with the whole
+    // library by the desktop app, so a scoped search would report every item in the library
+    // as the collection's contents. Checked only when a key was given.
+    const unknownCollection = await refuseUnknownCollection(
+      ctx,
+      args.collectionKey,
+      library ?? ctx.router.defaultLibrary(),
+      'searched',
+    );
+    if (unknownCollection) return unknownCollection;
     const baseQuery = {
       q: args.q,
       qmode: args.qmode,

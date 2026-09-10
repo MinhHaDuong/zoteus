@@ -134,6 +134,32 @@ describe('ScholarGraph', () => {
     const r = await g.lookup('10.1/x');
     expect(r?.title).toBe('Crossref Title');
   });
+
+  // `/works/` with no DOI is Crossref's works-LIST route and answers 200. Read as a work,
+  // that envelope was an untitled paper with no authors, which is how an empty DOI came
+  // back as a successful lookup.
+  it('refuses a Crossref work-LIST payload instead of reading it as one work', async () => {
+    const workList = {
+      status: 'ok',
+      'message-type': 'work-list',
+      message: { facets: {}, 'total-results': 186439611, items: [{ DOI: '10.1/first' }] },
+    };
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('openalex.org')) return new Response('not found', { status: 404 });
+      return new Response(JSON.stringify(workList), { status: 200 });
+    });
+    const g = new ScholarGraph({ fetcher: fetcher(fetchImpl) });
+    expect(await g.lookup('')).toBeNull();
+  });
+
+  it('refuses a 200 that carries no work at all', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('openalex.org')) return new Response('not found', { status: 404 });
+      return new Response(JSON.stringify({ status: 'ok', 'message-type': 'journal', message: { title: 'Nature' } }), { status: 200 });
+    });
+    const g = new ScholarGraph({ fetcher: fetcher(fetchImpl) });
+    expect(await g.lookup('1234-5678')).toBeNull();
+  });
 });
 
 describe('markInLibrary', () => {

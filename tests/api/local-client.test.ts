@@ -366,6 +366,40 @@ describe('LocalApiClient bibliography and export reads', () => {
     expect(seen).toEqual(['/api/users/0/collections/ABC/items', '/api/users/0/items']);
   });
 
+  // The desktop app answers /collections/<unknown>/items with the WHOLE library, so the
+  // collection itself is the only place it admits a key is unknown.
+  it('reports a collection as existing on 200 and as absent on 404', async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      const path = new URL(url).pathname;
+      seen.push(path);
+      return path.endsWith('/ZZZZZZZZ')
+        ? new Response('Not found', { status: 404 })
+        : new Response(JSON.stringify({ key: 'DDMMTKDW' }), { status: 200 });
+    });
+    const local = makeLocal(fetchImpl);
+    expect(await local.collectionExists('DDMMTKDW')).toBe(true);
+    expect(await local.collectionExists('ZZZZZZZZ')).toBe(false);
+    expect(seen).toEqual([
+      '/api/users/0/collections/DDMMTKDW',
+      '/api/users/0/collections/ZZZZZZZZ',
+    ]);
+  });
+
+  it('asks the group prefix for a group collection, and rethrows anything but a 404', async () => {
+    const seen: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      seen.push(new URL(url).pathname);
+      return new Response('boom', { status: 500 });
+    });
+    const local = makeLocal(fetchImpl);
+    await expect(local.collectionExists('ABCD1234', { type: 'group', id: 42 })).rejects.toMatchObject({
+      name: 'LocalApiError',
+      status: 500,
+    });
+    expect(seen).toEqual(['/api/groups/42/collections/ABCD1234']);
+  });
+
   it('carries the body of a failed render, which is where Zotero names the bad style', async () => {
     const fetchImpl = vi.fn(async () => new Response('Invalid style: nope', { status: 400 }));
     const render = makeLocal(fetchImpl).getBibliography(['AAAA'], { style: 'nope' });

@@ -140,6 +140,73 @@ All notable changes to Zoteus are documented here. The format is based on
   quotes the first reason. Partial success is still success: `failed` already carries the
   rest.
 
+- **`zotero_groups` lists the groups the Zotero desktop app holds, instead of demanding a
+  cloud key it does not need (found while investigating #77).** Group libraries have been readable without a cloud key
+  since Zotero 10 began serving `/groups/<id>` locally: the router sends a read for a group
+  the desktop holds to the desktop, keyless, and only a group it does not hold goes to the
+  Web API. The one tool that would tell a user a group's id refused outright without
+  `ZOTERO_API_KEY`, so a local-API-only user could not learn the id that every other tool
+  needs, and the refusal named a cloud key as the requirement. With no key the tool now
+  lists what the desktop serves: `id`, `name`, `description` and the desktop's own item
+  count. The cloud's `type` and `libraryEditing` are membership facts the desktop never
+  stores, so they are absent from those rows rather than guessed, and the desktop's count
+  includes child attachments, notes and trashed items, so it is not the cloud's figure; the
+  answer carries a note saying both. Where a key and a local Zotero are both present the
+  two lists merge into one row per group, each marked `source: "cloud"`, `"local"` or
+  `"both"`, with the cloud's richer fields kept for a group that appears in both. The
+  answer for a key with no local Zotero is unchanged, down to its wording. The refusal
+  survives only when neither source has anything to list, and it now says which one was
+  missing. Listing also refreshes the set of locally held groups, so a group joined (or a
+  Zotero started) after the server was launched becomes readable without a restart.
+  Writing to a group still goes through the cloud and still needs a key with write access
+  to it.
+
+- **A collection key the library does not have is refused, instead of being answered with
+  the whole library.** `zotero_search_items` and `zotero_export` pass `collectionKey`
+  straight to Zotero, and the desktop app does not refuse an unknown one: measured against a
+  running Zotero 10, `/collections/ZZZZZZZZ/items` answers `200 Total-Results: 723`, which is
+  the entire library, where a real collection answers 14. A scoped search was therefore
+  byte-for-byte identical to an unscoped one (`collectionKey:"ZZZZZZZZ", q:"attention"`
+  returned exactly the same two items as `q:"attention"` alone), and an export scoped to a
+  mistyped or deleted key returned the whole library's RIS with nothing to say so. It hit
+  exactly the key-free desktop user: the cloud Web API 404s that same sub-route, so the cloud
+  path was never wrong. The collection itself does 404 on the desktop, which is the one place
+  the app admits the key is unknown, so a read that names a collection asks that first and
+  refuses by name when it is absent, pointing at `zotero_list_collections` for the right key.
+  The extra request is paid only when a collection key was given and only when the desktop
+  app serves that library, so unscoped searches, cloud reads and reads of a real collection
+  are unchanged. A check that itself fails (the app going away between the two calls) is not
+  read as absence: the read goes ahead and reports its own failure.
+
+- **An empty DOI no longer fabricates a successful lookup.** `zotero_scholar {action:
+  "lookup", doi: ""}` answered `isError: false` with an untitled work, no authors and
+  "0 citations". Traced: `https://api.openalex.org/works/` 404s, the Crossref fallback then
+  fetches `https://api.crossref.org/works/`, and that is Crossref's works-LIST endpoint,
+  which answers 200 with `"message-type": "work-list"` and 186 million results. The list
+  envelope was parsed as though it were one work. Both halves are fixed: a blank or
+  whitespace-only `doi` is refused before any provider is asked (a padded one is trimmed
+  rather than refused), and the Crossref parser now requires a single-work payload, so a 200
+  from the wrong endpoint is never read as a result. `doi: "hello world not a doi"` already
+  errored; the empty string was the hole.
+- **`references`, `citations` and `related` report an upstream miss in the same words as
+  `lookup`.** They reach OpenAlex directly, so a DOI it does not hold came back as
+  `OpenAlex 404 for https://api.openalex.org/works/doi:...`, a raw request URL where `lookup`
+  says `No scholarly record found for DOI ...`. They now give that same sentence. A status
+  other than 404 is reported as the provider failing rather than as an absent record, because
+  a throttled or broken OpenAlex is not evidence that a paper does not exist.
+
+- **An export that rendered nothing says so, instead of handing back a blank body as
+  success.** `zotero_export {format: "bibtex", item_keys: ["ZZZZZZZZ"]}` returned
+  `isError: false` and the text `"\n\n"`, with no summary and no notice, so an agent could
+  not tell an empty export from a failed one. Named `item_keys` that render not one entry are
+  now an error that quotes the keys and says what else would explain it (only top-level items
+  are exported, so a child attachment, note or annotation renders nothing). An export
+  narrowed by a collection, a `q` or an `item_type` that renders nothing is a real answer of
+  "no entries" and is reported as one, carrying `empty: true` and a `notice` in
+  `structuredContent`, the way `zotero_format_bibliography` reports `(empty bibliography)`.
+  A non-empty export is unchanged, down to the bytes.
+
+
 ## [1.17.0] - 2026-09-09
 
 ### Added

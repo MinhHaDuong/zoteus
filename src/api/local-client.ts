@@ -407,6 +407,26 @@ export class LocalApiClient {
     );
     return this.toListResult(json, headers);
   }
+
+  /**
+   * Whether this library really has that collection key.
+   *
+   * Asked because the desktop app does NOT refuse an unknown collection on the route that
+   * matters: `/collections/<unknown>/items` answers 200 with the WHOLE library (measured:
+   * 723 items for a key that does not exist, against 14 for one that does), so a scoped
+   * read comes back looking exactly like an unscoped one. The collection itself does 404,
+   * which is the only place the desktop admits the key is unknown. The cloud Web API 404s
+   * the `/items` sub-route directly and needs no such question.
+   */
+  async collectionExists(key: string, lib?: LibraryRef): Promise<boolean> {
+    try {
+      await this.getJson(`${localLibraryPrefix(lib)}/collections/${encodeURIComponent(key)}`);
+      return true;
+    } catch (e) {
+      if (e instanceof LocalApiError && e.status === 404) return false;
+      throw e;
+    }
+  }
 }
 
 function numOrUndef(v: string | null): number | undefined {

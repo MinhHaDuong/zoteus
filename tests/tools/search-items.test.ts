@@ -107,3 +107,54 @@ describe('zotero_search_items', () => {
     expect(text).toMatch(/not conclusive evidence of absence/i);
   });
 });
+
+// The desktop local API answers /collections/<unknown>/items with the WHOLE library
+// (measured: 723 items for a key that does not exist, 14 for one that does), so a scoped
+// search used to be byte-for-byte indistinguishable from an unscoped one.
+describe('zotero_search_items refuses a collection key the library does not have', () => {
+  function localCtx(exists: boolean) {
+    const searchImpl = vi.fn(async () => ({ data: [sampleItem], totalResults: 723, lastModifiedVersion: 666 }));
+    return {
+      router: {
+        searchItems: searchImpl,
+        defaultLibrary: () => ({ type: 'user', id: 19552201 }),
+        servesLocally: () => true,
+      },
+      local: { collectionExists: vi.fn(async () => exists) },
+    } as any;
+  }
+
+  it('refuses, names the key, and searches nothing', async () => {
+    const c = localCtx(false);
+    const res = await searchItems.handler({ collectionKey: 'ZZZZZZZZ', limit: 3 }, c);
+    expect(res.isError).toBe(true);
+    expect((res.content?.[0] as any)?.text).toContain('ZZZZZZZZ');
+    expect(c.router.searchItems).not.toHaveBeenCalled();
+  });
+
+  it('searches normally when the collection is real', async () => {
+    const c = localCtx(true);
+    const res = await searchItems.handler({ collectionKey: 'DDMMTKDW', limit: 3 }, c);
+    expect(res.isError).toBeFalsy();
+    expect(c.router.searchItems).toHaveBeenCalledWith(
+      expect.objectContaining({ collectionKey: 'DDMMTKDW' }),
+    );
+  });
+
+  it('asks nothing extra of an unscoped search', async () => {
+    const c = localCtx(false);
+    const res = await searchItems.handler({ q: 'attention' }, c);
+    expect(res.isError).toBeFalsy();
+    expect(c.local.collectionExists).not.toHaveBeenCalled();
+  });
+
+  it('answers the search anyway when the existence check itself fails', async () => {
+    const c = localCtx(true);
+    c.local.collectionExists = vi.fn(async () => {
+      throw new Error('desktop went away');
+    });
+    const res = await searchItems.handler({ collectionKey: 'DDMMTKDW' }, c);
+    expect(res.isError).toBeFalsy();
+    expect(c.router.searchItems).toHaveBeenCalled();
+  });
+});
