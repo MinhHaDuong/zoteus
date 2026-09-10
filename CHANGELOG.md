@@ -7,6 +7,32 @@ All notable changes to Zoteus are documented here. The format is based on
 ## [Unreleased]
 
 ### Fixed
+- **`zotero_tag_audit` no longer audits something other than what it was asked about.**
+  `scope`, the `vocabulary` object and each of its `tags` and `tiers` entries were plain
+  `z.object`s with optional members, so a key one letter out was stripped by Zod before the
+  handler saw it and the audit ran on as if it had never been sent. `scope:
+  {"collections": [...]}`, a near miss for `collection_keys`, produced a whole-library audit
+  with no per-collection coverage in it: measured against a 211-tag, 285-item library, the
+  right spelling and the wrong one both answered "Audited 211 tag(s) over 285 item(s): 89
+  off-taxonomy, 119 auto, 284 required-tier gap(s)", the first carrying coverage for the two
+  collections asked about and the second carrying none, with nothing in either to say which
+  question had been answered. Three more keys did the same. `Tier` on a vocabulary tag lost
+  that tag's tier, so every item holding it counted as missing the tier (284 gaps became
+  285). `require` on a tier left the tier unrequired, so the audit reported no gaps at all.
+  `tier` for `tiers` on the vocabulary itself dropped the entire tier list, likewise no gaps.
+  All four now fail the call, naming the key that was not understood and, where only its
+  spelling was wrong, the one it was probably meant to be (`collections` is answered with
+  `collection_keys`, `require` with `required`). The JSON Schema the tool advertises already
+  said `additionalProperties: false` at every one of those levels and is unchanged; only the
+  runtime had never enforced it, and no documented field moved. A vocabulary read from
+  `vocabulary_path` is parsed by the same schema and now reports the same sentences with the
+  file named, in place of a dump of Zod's issue objects. One consequence worth knowing: a
+  refusal over an inline `vocabulary` or `scope` is raised while the arguments are being
+  validated, so it comes back as an ordinary tool result with `isError` set but never reaches
+  the usage log or the metrics counters. That has always been true of a malformed argument
+  (an out-of-range `limit`, say) and is not new here; a vocabulary file rejected for the same
+  reason is refused by the handler and is recorded like any other tool error.
+
 - **`zotero_manage_tags action:"list"` reached the cloud too.** The same defect as
   `zotero_list_tags` and `zotero_sync`, one tool further along: the list action read
   `ctx.web` directly, so a desktop-only install asked api.zotero.org for `users/0` and got
