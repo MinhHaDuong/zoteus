@@ -238,6 +238,43 @@ export function requireBulkConfirm(
 }
 
 /**
+ * The result of a write that reports per-item outcomes: an error when none of them landed.
+ *
+ * Every write path in this server collects per-item outcomes instead of throwing, so a
+ * payload the far side refused came back as `Imported 0 of 1` or `Trashed 0 item(s)` with no
+ * error flag at all, and only `structuredContent.failed` carried the reason. A model reading
+ * the summary reports success while nothing happened. That is how an item type Zotero does
+ * not have shipped unnoticed for a month (#77), and the same shape sat in the local branches
+ * of `zotero_trash_items` and `zotero_annotate`, which are the tools an agent uses to undo
+ * its own work.
+ *
+ * Partial success stays a success: some items landing is a real outcome the caller can act
+ * on, and `failed` carries the rest. It is only surfaced in the summary, because a caller
+ * reading prose should not have to open the payload to learn that half of it failed.
+ */
+export function writeResult(
+  structured: Record<string, unknown>,
+  summary: string,
+  succeeded: number,
+  attempted: number,
+  failed?: { message?: string }[],
+): ToolHandlerResult {
+  const failures = failed?.length ?? 0;
+  if (attempted > 0 && succeeded === 0) {
+    const why = failed?.[0]?.message;
+    return {
+      content: [
+        { type: 'text', text: `${summary} Nothing succeeded${why ? `: ${why}` : ''}.` },
+        { type: 'text', text: JSON.stringify(structured, null, 2) },
+      ],
+      structuredContent: structured,
+      isError: true,
+    };
+  }
+  return ok(structured, failures ? `${summary} ${failures} failed.` : summary);
+}
+
+/**
  * The library an operation acts on, decided once so that every step of it (the parent and
  * children reads, the attachment lookup, the write) names the same one: the caller's
  * explicit `library_type`/`library_id` when given, otherwise the configured default

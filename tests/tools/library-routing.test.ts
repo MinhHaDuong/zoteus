@@ -99,8 +99,10 @@ function makeCtx(
     })),
     setDeleted: vi.fn(async (keys: string[]) => ({
       successful: keys.map((key, i) => ({ index: i, key, version: 9 })),
-      unchanged: [],
-      failed: [],
+      unchanged: [] as string[],
+      // Typed rather than inferred: an empty literal infers never[], which stops a test
+      // overriding this mock with a run that actually fails.
+      failed: [] as { index: number; code: number; message: string; key: string }[],
       newLibraryVersion: 9,
     })),
     deleteItems: vi.fn(async () => undefined),
@@ -313,6 +315,37 @@ describe('zotero_trash_items and zotero_delete_items follow the resolved library
     );
     expect(localWrites.setDeleted).toHaveBeenCalledWith(['K1'], 1);
     expect(web.writeItems).not.toHaveBeenCalled();
+  });
+
+  // The desktop branch built `updated` from the per-item outcomes and returned it as
+  // success, so a key Zotero refused came back as "Trashed 0 item(s)" with no error flag and
+  // the 400 only in `failed`. An agent trashing its own test data read that as done.
+  it('reports a desktop trash where every key failed as an error', async () => {
+    const { ctx, localWrites } = makeCtx({ desktop: true });
+    localWrites.setDeleted.mockImplementationOnce(async () => ({
+      successful: [],
+      unchanged: [],
+      failed: [{ index: 0, code: 400, message: 'itemType property not provided', key: 'ZZZZZZZZ' }],
+      newLibraryVersion: 9,
+    }));
+    const res = await trashItems.handler({ item_keys: ['ZZZZZZZZ'] }, ctx);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('Nothing succeeded');
+    expect(res.content[0].text).toContain('itemType property not provided');
+    expect((res.structuredContent as any).updated).toEqual([]);
+  });
+
+  it('keeps a partial desktop trash a success and names the failure count', async () => {
+    const { ctx, localWrites } = makeCtx({ desktop: true });
+    localWrites.setDeleted.mockImplementationOnce(async () => ({
+      successful: [{ index: 0, key: 'K1', version: 9 }],
+      unchanged: [],
+      failed: [{ index: 1, code: 400, message: 'nope', key: 'ZZZZZZZZ' }],
+      newLibraryVersion: 9,
+    }));
+    const res = await trashItems.handler({ item_keys: ['K1', 'ZZZZZZZZ'] }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('1 failed.');
   });
 
   it('delete with a group default skips the desktop app and deletes in the group', async () => {

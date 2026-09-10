@@ -356,7 +356,7 @@ describe('zotero_import reports a save that wrote nothing as an error', () => {
       ctx,
     );
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain('Nothing was written');
+    expect(res.content[0].text).toContain('Nothing succeeded');
     expect(res.content[0].text).toContain("Unknown itemType 'generic'");
     expect((res.structuredContent as any).created).toEqual([]);
   });
@@ -371,7 +371,7 @@ describe('zotero_import reports a save that wrote nothing as an error', () => {
       ctx,
     );
     expect(res.isError).toBe(true);
-    expect(res.content[0].text).toContain('Nothing was written');
+    expect(res.content[0].text).toContain('Nothing succeeded');
   });
 
   it('leaves a partial success alone, since some items really did land', async () => {

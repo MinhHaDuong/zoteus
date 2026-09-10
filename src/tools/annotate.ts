@@ -8,6 +8,7 @@ import {
   requireCloud,
   isLocalWritesUnavailable,
   ensureLocalApi,
+  writeResult,
 } from '../registry/registry.js';
 import { locatePassages, type PassageAnchor } from '../features/fulltext/pdf-locate.js';
 import { DEFAULT_PRECISE_MAX_BYTES } from '../features/fulltext/pdf-pages.js';
@@ -125,9 +126,12 @@ const annotateTool: ToolDefinition = {
           // `deleted: 1` (reversible trash), not DELETE — the local API's DELETE erases.
           const result = await ctx.localWrites.setDeleted(keys, 1);
           const trashed = [...result.successful.map((s) => s.key), ...result.unchanged];
-          return ok(
+          return writeResult(
             { trashed, failed: result.failed, target: 'local' },
             `Trashed ${trashed.length} annotation(s) via the Zotero desktop app.`,
+            trashed.length,
+            keys.length,
+            result.failed,
           );
         } catch (e) {
           if (!isLocalWritesUnavailable(e)) throw e;

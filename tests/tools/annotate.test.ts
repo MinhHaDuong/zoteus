@@ -48,6 +48,50 @@ describe('zotero_annotate action:"delete"', () => {
     expect(deleteItems).not.toHaveBeenCalled();
     expect(res.structuredContent?.trashed).toEqual(['ANN1']);
   });
+
+  // The local branch collected per-item outcomes and returned them as success, so a key
+  // Zotero refused read as "Trashed 0 annotation(s)" with no error flag and the 400 buried
+  // in `failed`. The cloud branch already said "; N failed."; this one said nothing.
+  it('reports a delete where every key failed as an error, not as "Trashed 0"', async () => {
+    const ctx: any = {
+      capabilities: { cloud: null, localApi: true },
+      localWrites: {
+        setDeleted: vi.fn(async () => ({
+          successful: [],
+          unchanged: [],
+          failed: [{ index: 0, code: 400, message: 'itemType property not provided', key: 'ZZZZZZZZ' }],
+          newLibraryVersion: 4,
+        })),
+        deleteItems: vi.fn(),
+      },
+      router: { defaultLibrary: () => ({ type: 'user', id: 0 }) },
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    };
+    const res = await annotate.handler({ action: 'delete', annotation_keys: ['ZZZZZZZZ'] }, ctx);
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('Nothing succeeded');
+    expect(res.content[0].text).toContain('itemType property not provided');
+  });
+
+  it('keeps a partial delete a success but says how many failed', async () => {
+    const ctx: any = {
+      capabilities: { cloud: null, localApi: true },
+      localWrites: {
+        setDeleted: vi.fn(async () => ({
+          successful: [{ index: 0, key: 'ANN1', version: 4 }],
+          unchanged: [],
+          failed: [{ index: 1, code: 400, message: 'nope', key: 'ZZZZZZZZ' }],
+          newLibraryVersion: 4,
+        })),
+        deleteItems: vi.fn(),
+      },
+      router: { defaultLibrary: () => ({ type: 'user', id: 0 }) },
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    };
+    const res = await annotate.handler({ action: 'delete', annotation_keys: ['ANN1', 'ZZZZZZZZ'] }, ctx);
+    expect(res.isError).toBeFalsy();
+    expect(res.content[0].text).toContain('1 failed.');
+  });
 });
 
 // One page of Helvetica, so the anchoring path runs against real pdfjs geometry.

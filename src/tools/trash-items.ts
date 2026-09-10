@@ -8,6 +8,7 @@ import {
   isLocalWritesUnavailable,
   ensureLocalApi,
   requireBulkConfirm,
+  writeResult,
 } from '../registry/registry.js';
 
 function versionOf(item: any): number | undefined {
@@ -45,9 +46,12 @@ const trashItems: ToolDefinition = {
         // like the Web API's, erases items outright, which is not what "trash" means.
         const result = await ctx.localWrites.setDeleted(args.item_keys, deleted);
         const updated = [...result.successful.map((s) => s.key), ...result.unchanged];
-        return ok(
+        return writeResult(
           { updated, failed: result.failed, target: 'local' },
           `${deleted ? 'Trashed' : 'Restored'} ${updated.length} item(s) via the Zotero desktop app.`,
+          updated.length,
+          args.item_keys.length,
+          result.failed,
         );
       } catch (e) {
         if (!isLocalWritesUnavailable(e)) throw e;

@@ -12,6 +12,17 @@ All notable changes to Zoteus are documented here. The format is based on
   `ctx.web` directly, so a desktop-only install asked api.zotero.org for `users/0` and got
   "Invalid user ID" back, while the desktop had been serving the tags all along. It is
   routed now, and an explicit `library_id` still picks the group it names.
+- **A desktop write that landed nothing no longer reports success (#77).** Every write path
+  collects per-item outcomes instead of throwing, so a payload Zotero refused came back as
+  `Trashed 0 item(s) via the Zotero desktop app.` with no error flag and the 400 buried in
+  `failed`. `zotero_trash_items` and `zotero_annotate action:"delete"` both did this on their
+  local branch, which is the default on a desktop setup, and both are what an agent reaches
+  for to undo its own work: it would read the summary, believe the item was gone, and move
+  on. The cloud branch of `zotero_trash_items` already appended `; N failed.`; the local one
+  said nothing. A write that attempted items and landed none of them is now an error quoting
+  the first reason, and a partial write stays a success but names the failure count in the
+  summary rather than only in the payload. The check is one shared helper, so `zotero_import`
+  and these two cannot drift apart again.
 
 - **A build whose attachment map stopped early no longer stamps a full-text cursor over the
   attachments it never reached (#78).** The map that turns Zotero's full-text keys into item
@@ -279,7 +290,6 @@ All notable changes to Zoteus are documented here. The format is based on
   `backend`, and takes the whole delta from that one API: the desktop app and the cloud
   number their library versions independently, so a delta answered half from each would be
   handed back under a single `since` belonging to neither sequence.
-
 
 ## [1.17.0] - 2026-09-09
 
