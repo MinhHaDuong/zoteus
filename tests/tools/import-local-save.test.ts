@@ -332,3 +332,63 @@ describe('zotero_import attach_url on the cloud save path', () => {
     expect(ctx.web.writeItems).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * A write that Zotero refuses item by item does not throw, so `Imported 0 of 1` used to come
+ * back with no error flag and a model reading it reported success (#77). The real case was an
+ * invalid `generic` item type, but the guard is about the shape of the outcome, not the cause.
+ */
+describe('zotero_import reports a save that wrote nothing as an error', () => {
+  const rejected = {
+    successful: [],
+    unchanged: [],
+    failed: [{ index: 0, code: 400, message: "Unknown itemType 'generic'", key: '' }],
+    newLibraryVersion: 7,
+  };
+
+  it('flags isError on the local path and quotes the reason', async () => {
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems: vi.fn(async () => rejected) },
+    });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('Nothing was written');
+    expect(res.content[0].text).toContain("Unknown itemType 'generic'");
+    expect((res.structuredContent as any).created).toEqual([]);
+  });
+
+  it('flags isError on the cloud path too', async () => {
+    const ctx = makeCtx({
+      capabilities: { cloud: { userID: 1 }, localApi: false },
+      web: { writeItems: vi.fn(async () => rejected) },
+    });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBe(true);
+    expect(res.content[0].text).toContain('Nothing was written');
+  });
+
+  it('leaves a partial success alone, since some items really did land', async () => {
+    const partial = {
+      successful: [{ index: 0, key: 'LOCALKEY1', version: 7 }],
+      unchanged: [],
+      failed: [{ index: 1, code: 400, message: 'nope', key: '' }],
+      newLibraryVersion: 7,
+    };
+    const ctx = makeCtx({
+      capabilities: { cloud: null, localApi: true },
+      localWrites: { hasStoredKey: () => true, writeItems: vi.fn(async () => partial) },
+    });
+    const res = await importTool.handler(
+      { action: 'by_identifier', identifier: '10.1234/example', save_to_library: true },
+      ctx,
+    );
+    expect(res.isError).toBeFalsy();
+  });
+});

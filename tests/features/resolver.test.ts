@@ -62,9 +62,49 @@ describe('fromScholarWork', () => {
     expect(item.extra).toContain('source:scholar');
   });
 
-  it('falls back to generic without a venue', () => {
+  // `generic` is not one of Zotero's 40 item types, so this used to be a save Zotero
+  // refused with 400 "Unknown itemType 'generic'" (#77). Every replacement below has to be
+  // a real type or the write fails the same way.
+  it('falls back to document, a real Zotero type, without a venue or a mappable type', () => {
     const item = fromScholarWork({ title: 'B', authors: [], year: 2020 }, '10.9/x');
-    expect(item.itemType).toBe('generic');
+    expect(item.itemType).toBe('document');
+  });
+
+  it("maps OpenAlex's own work type when it has a Zotero counterpart", () => {
+    const cases: [string, string][] = [
+      ['conference-paper', 'conferencePaper'],
+      ['book', 'book'],
+      ['book-chapter', 'bookSection'],
+      ['dataset', 'dataset'],
+      ['dissertation', 'thesis'],
+      ['preprint', 'preprint'],
+      ['report', 'report'],
+      ['article', 'journalArticle'],
+    ];
+    for (const [openalex, zotero] of cases) {
+      const item = fromScholarWork({ title: 'B', authors: [], type: openalex }, '10.9/x');
+      expect(item.itemType, `OpenAlex type ${openalex}`).toBe(zotero);
+    }
+  });
+
+  // OpenAlex reports no venue for most conference papers, which is why the broken fallback
+  // was the common path rather than the rare one.
+  it('prefers the declared type over the venue heuristic', () => {
+    const item = fromScholarWork(
+      { title: 'B', authors: [], venue: 'Some Proceedings', type: 'conference-paper' },
+      '10.9/x',
+    );
+    expect(item.itemType).toBe('conferencePaper');
+  });
+
+  it('falls back to journalArticle when a venue is all we have', () => {
+    const item = fromScholarWork({ title: 'B', authors: [], venue: 'Nature' }, '10.9/x');
+    expect(item.itemType).toBe('journalArticle');
+  });
+
+  it('does not invent a type for an OpenAlex type it does not know', () => {
+    const item = fromScholarWork({ title: 'B', authors: [], type: 'peer-review' }, '10.9/x');
+    expect(item.itemType).toBe('document');
   });
 });
 

@@ -117,6 +117,37 @@ const importTool: ToolDefinition = {
   },
 };
 
+/**
+ * A save that resolved items and then wrote none of them is a failure, whatever the
+ * transport reported.
+ *
+ * The write paths here collect per-item outcomes instead of throwing, so a payload Zotero
+ * refused outright came back as `Imported 0 of 1` with no error flag at all. A model reading
+ * that summary reports success and the item is not in the library, which is how an invalid
+ * item type went unnoticed for a month (#77). Partial success stays a success: some items
+ * landing is a real outcome the caller can act on, and `failed` already carries the rest.
+ */
+function saveResult(
+  structured: Record<string, unknown>,
+  summary: string,
+  created: number,
+  resolved: number,
+  failed?: { message?: string }[],
+): ToolHandlerResult {
+  if (resolved > 0 && created === 0) {
+    const why = failed?.[0]?.message;
+    return {
+      content: [
+        { type: 'text', text: `${summary} Nothing was written${why ? `: ${why}` : ''}.` },
+        { type: 'text', text: JSON.stringify(structured, null, 2) },
+      ],
+      structuredContent: structured,
+      isError: true,
+    };
+  }
+  return ok(structured, summary);
+}
+
 /** Save resolved items, tagging the resolution source for provenance. */
 async function maybeSave(ctx: ToolContext, args: any, items: any[], source: string): Promise<ToolHandlerResult> {
   const tagged = items.map((it) => ({
@@ -160,12 +191,15 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
           }
         }
       }
-      return ok(
+      return saveResult(
         { created, failed: result.failed, resolved: payload.length, source, target: 'local', attached, warning },
         `Imported ${result.successful.length} of ${payload.length} resolved item(s) via ${source} into the library (Zotero desktop)` +
           (attached ? `, with ${attached.bytes}-byte ${attached.filename} attached` : '') +
           '.' +
           (warning ? ` ${warning}` : ''),
+        result.successful.length,
+        payload.length,
+        result.failed,
       );
     } catch (e) {
       if (!isLocalWritesUnavailable(e)) throw e;
@@ -272,7 +306,7 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
       }
     }
   }
-  return ok(
+  return saveResult(
     {
       created,
       failed: result.failed,
@@ -286,6 +320,9 @@ async function maybeSave(ctx: ToolContext, args: any, items: any[], source: stri
       (attached ? `, with ${attached.bytes}-byte ${attached.filename} attached` : '') +
       '.' +
       (warning ? ` ${warning}` : ''),
+    result.successful.length,
+    payload.length,
+    result.failed,
   );
 }
 

@@ -121,6 +121,24 @@ All notable changes to Zoteus are documented here. The format is based on
   Web API call hang that long, and it leaves the 1.5 s liveness probe, file uploads (which
   pass their own, longer budgets) and attachment downloads (which stay on the 25 s default)
   alone.
+- **`zotero_import` wrote an item type Zotero does not have, and called it success (#77).**
+  With no translation-server running, a DOI resolves through OpenAlex and the Zotero item
+  type was chosen from whether OpenAlex reported a venue: `journalArticle` if it did,
+  `generic` if it did not. `generic` is not one of Zotero's 40 item types, so Zotero refused
+  every such save with `400 Unknown itemType 'generic'`. OpenAlex reports no venue for most
+  conference papers and many books, so this was the common path, not a corner: ResNet,
+  XGBoost, the DSM-5 and the CRC Handbook all fail to import on any release from 1.1.0 to
+  1.17.0. OpenAlex's own `type` now picks the Zotero type (`conference-paper` to
+  `conferencePaper`, `book` to `book`, `dissertation` to `thesis`, and so on), a venue still
+  means `journalArticle`, and anything unmapped falls to `document`, which is a real Zotero
+  type. The arXiv path was never affected.
+- **A save that wrote nothing no longer reports success.** The write paths collect per-item
+  outcomes rather than throwing, so a payload Zotero rejected outright came back as
+  `Imported 0 of 1` with no error flag, and a model reading that summary reported success
+  while the library stayed empty. That is why the item type above went unnoticed for a
+  month. An import that resolves items and creates none of them now returns an error and
+  quotes the first reason. Partial success is still success: `failed` already carries the
+  rest.
 
 ## [1.17.0] - 2026-09-09
 
