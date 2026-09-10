@@ -18,6 +18,40 @@ All notable changes to Zoteus are documented here. The format is based on
   denial deliberately still does not: Zotero answers "Deny" with 403 and its own error, and
   someone who has just refused a write is not asking for it to be routed somewhere else.
 
+- **Every tool now refuses an argument it does not know, instead of dropping it and answering
+  a different question.** Each tool hands the MCP SDK a `ZodRawShape` and the SDK builds a
+  plain `z.object` from it, which strips what it does not recognise, so an argument one letter
+  out never reached a handler and the call ran as though it had never been sent. Measured
+  against a 285-item, 211-tag library before the fix: `zotero_search_items {q:"kalman"}`
+  answered "found 55 full-text match(es)", while `{query:"kalman"}` and `{search:"kalman"}`
+  both answered "Found 1266 item(s); showing 3", which is the whole library reported as a
+  success; `zotero_list_tags {filter:"core"}` returned 50 tags where `{q:"core"}` returns 1;
+  `zotero_list_collections {top_level:true}` returned all 46 collections where `{top:true}`
+  returns 3; `search_tools {q:"bibliography"}` returned the full 30-tool catalog where
+  `{query:"bibliography"}` returns 5; `zotero_schema {itemType:"journalArticle"}` returned the
+  whole 40-type schema instead of that one type's fields; `zotero_get_fulltext {item_key,
+  passages:1}` returned 12000 characters instead of one passage; `zotero_export {format,
+  limit, query:"kalman"}` exported the unfiltered library; and `zotero_tag_audit
+  {collection_keys:[...]}` ran a full-library audit with the scope dropped. `query` for `q` is
+  the single likeliest mistake a language model makes against this API. The JSON Schema those
+  tools advertise already said `additionalProperties: false`, and it is unchanged byte for
+  byte for all thirty; only the runtime had never enforced it, and no documented argument
+  moved. A refusal names the argument that was not understood and, where its only fault was
+  how it was spelled, the one it was probably meant to be (`query` is answered with `q`,
+  `itemtype` with `itemType`, `passages` with `max_passages`, `include_automatic` with
+  `include_auto`); where it was a nested field hoisted to the top level, the path it belongs
+  at (`collection_keys` with `scope.collection_keys`, `itemType` on `zotero_create_items` with
+  `items[].itemType`). An argument that resembles two of them at once is answered with the
+  list of arguments rather than with a guess. Objects that are deliberately open stay open:
+  item data (`patch`, `items[]`) keeps its catchall, because Zotero item fields are an open
+  set, and `zotero_format_bibliography` still takes any CSL-JSON. `zotero_whoami` and
+  `zotero_groups` take no arguments, advertise an open object and have one answer each, so
+  they are left as they were rather than made to refuse `zotero_groups
+  {library_type:"group"}`, which answers correctly today. Same consequence as the
+  `zotero_tag_audit` fix below: these refusals are raised while the arguments are being
+  validated, so they come back as ordinary tool results with `isError` set but never reach the
+  usage log or the metrics counters, which has always been true of a malformed argument.
+
 - **`zotero_tag_audit` no longer audits something other than what it was asked about.**
   `scope`, the `vocabulary` object and each of its `tags` and `tiers` entries were plain
   `z.object`s with optional members, so a key one letter out was stripped by Zod before the

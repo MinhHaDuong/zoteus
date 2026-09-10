@@ -19,6 +19,7 @@ import type { ScholarGraph } from '../features/scholar/graph.js';
 import type { RateLimitedFetcher } from '../api/http.js';
 import type { UpdateChecker } from '../lib/update-check.js';
 import { ZoteroApiError } from '../api/errors.js';
+import { closedArgumentSchema } from './strict-args.js';
 
 export interface ToolContext {
   config: ZoteusConfig;
@@ -450,7 +451,12 @@ export function registerAllTools(
       {
         title: def.title,
         description: def.description,
-        inputSchema: def.inputSchema,
+        // Closed here rather than in thirty tool files: a tool declares the shape it takes,
+        // and every tool gets the same refusal for an argument outside it. Until this, the
+        // SDK built a plain `z.object` from the raw shape and stripped what it did not
+        // recognise, so `zotero_search_items {query:"kalman"}` searched for nothing and
+        // reported the whole library as a success. See ./strict-args.ts.
+        inputSchema: closedArgumentSchema(def.inputSchema),
         outputSchema: def.outputSchema,
         annotations: { title: def.title, openWorldHint: true, ...def.annotations },
       },
