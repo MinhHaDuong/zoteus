@@ -35,8 +35,8 @@ All notable changes to Zoteus are documented here. The format is based on
   {collection_keys:[...]}` ran a full-library audit with the scope dropped. `query` for `q` is
   the single likeliest mistake a language model makes against this API. The JSON Schema those
   tools advertise already said `additionalProperties: false`, and it is unchanged byte for
-  byte for all thirty; only the runtime had never enforced it, and no documented argument
-  moved. A refusal names the argument that was not understood and, where its only fault was
+  byte for all twenty-eight of them; only the runtime had never enforced it, and no documented
+  argument moved. A refusal names the argument that was not understood and, where its only fault was
   how it was spelled, the one it was probably meant to be (`query` is answered with `q`,
   `itemtype` with `itemType`, `passages` with `max_passages`, `include_automatic` with
   `include_auto`); where it was a nested field hoisted to the top level, the path it belongs
@@ -45,12 +45,44 @@ All notable changes to Zoteus are documented here. The format is based on
   list of arguments rather than with a guess. Objects that are deliberately open stay open:
   item data (`patch`, `items[]`) keeps its catchall, because Zotero item fields are an open
   set, and `zotero_format_bibliography` still takes any CSL-JSON. `zotero_whoami` and
-  `zotero_groups` take no arguments, advertise an open object and have one answer each, so
-  they are left as they were rather than made to refuse `zotero_groups
-  {library_type:"group"}`, which answers correctly today. Same consequence as the
+  `zotero_groups` declare no arguments and were left open here; the entry below closes them
+  too. Same consequence as the
   `zotero_tag_audit` fix below: these refusals are raised while the arguments are being
   validated, so they come back as ordinary tool results with `isError` set but never reach the
   usage log or the metrics counters, which has always been true of a malformed argument.
+
+- **A key the protocol reserves for itself is accepted and ignored rather than refused, and
+  the last two tools that dropped arguments in silence now refuse them.** Two gaps left by
+  the entry above. MCP carries its own bookkeeping in `_meta`, on the request's `params` and
+  never inside a tool's `arguments`, and nothing in this server puts anything else in
+  `arguments` either. But strict arguments meant that a client which ever did would have had
+  every call refused at once, which is the whole hosted user base failing together over a key
+  nobody meant as an argument. Any top-level key beginning with `_` is now removed before the
+  arguments are checked. Measured over stdio against the desktop app: `zotero_search_items
+  {q:"kalman", _meta:{progressToken:7}}` answered "found 55 full-text match(es)" where it had
+  answered "unknown argument `_meta`", and the handler was handed `{"q":"kalman"}` with the
+  key gone, so no handler can read protocol bookkeeping as though a user had sent it. Nothing
+  else moved: `{query:"kalman"}` is still refused with "this tool spells it `q`", and all
+  eight refusals measured for the entry above come back word for word, including one sent
+  alongside a `_meta` that is now tolerated.
+
+  `zotero_whoami` and `zotero_groups` were the two tools still dropping an argument in
+  silence, because an empty raw shape is the one input here that reaches the SDK through Zod
+  v4-mini rather than v3, and that dialect emits no `additionalProperties` line at all, so
+  those two had never advertised a strictness there was anything to enforce. Handing the SDK
+  a built object instead of an empty shape puts them on the same path as the other
+  twenty-eight: their published schema gains `"additionalProperties": false` and nothing else
+  in `tools/list` changes, verified by diffing full dumps from builds either side of the
+  change, which differ in exactly those two lines. `zotero_groups {library_type:"group"}`
+  stops working as a result, deliberately. That tool's own description names `library_type`
+  and `library_id` as parameters of other tools, and the same sentence invites
+  `{library_type:"user"}` and `{library_id:5678}` just as strongly; both of those returned
+  every group as though the filter had been applied, which is the failure the entry above
+  exists to end. A key cannot be tolerated for one of its values, so the choice was between
+  one spelling that reads correctly by luck and every spelling corrected in a turn. Both
+  tools now answer an argument they do not take with "unknown argument `library_type`: this
+  tool takes no arguments. Nothing ran, because the key would have been dropped and the
+  answer would have read as though it had been honoured. Call this tool with no arguments."
 
 - **`zotero_tag_audit` no longer audits something other than what it was asked about.**
   `scope`, the `vocabulary` object and each of its `tags` and `tiers` entries were plain

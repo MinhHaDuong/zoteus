@@ -50,11 +50,15 @@ function sample(schema: any, depth = 0): unknown {
 }
 
 function issuesFor(shape: z.ZodRawShape, args: Record<string, unknown>): z.ZodIssue[] {
-  const closed = closedArgumentSchema(shape);
-  // A tool that declares no arguments comes back as the raw shape it went in as, still open.
-  if (!(closed instanceof z.ZodType)) return [];
-  const parsed = closed.safeParse(args);
+  const parsed = closedArgumentSchema(shape).safeParse(args);
   return parsed.success ? [] : parsed.error.issues;
+}
+
+/** What a handler would have been handed, for the calls that are meant to get through. */
+function parsedArgs(shape: z.ZodRawShape, args: Record<string, unknown>): unknown {
+  const parsed = closedArgumentSchema(shape).safeParse(args);
+  expect(parsed.success, JSON.stringify(parsed.success ? {} : parsed.error.issues)).toBe(true);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function unknownKeyMessage(shape: z.ZodRawShape, args: Record<string, unknown>): string {
@@ -107,11 +111,43 @@ describe('closedArgumentSchema', () => {
     );
   });
 
-  it('says where protocol bookkeeping belongs instead of listing Zotero fields', () => {
+  it('accepts a key the protocol reserves, and does not pass it on', () => {
     const shape = { q: z.string().optional() };
-    expect(unknownKeyMessage(shape, { _meta: { progressToken: 1 } })).toContain(
-      "protocol metadata belongs on the request's `params._meta`",
+    // `_meta` belongs on the request's `params`, not in `arguments`, and nothing here puts it
+    // in `arguments`. But a client that ever did would otherwise have every call refused, so
+    // an underscore-prefixed key is dropped rather than refused. Dropped, not forwarded: a
+    // handler must never read protocol bookkeeping as though a user had sent it.
+    expect(issuesFor(shape, { q: 'kalman', _meta: { progressToken: 1 } })).toEqual([]);
+    expect(parsedArgs(shape, { q: 'kalman', _meta: { progressToken: 1 } })).toEqual({ q: 'kalman' });
+    expect(parsedArgs(shape, { _progressToken: 'abc' })).toEqual({});
+  });
+
+  it('does not eat an underscore key a tool actually declares', () => {
+    // No tool declares one and none should, but the valve asks the shape rather than trusting
+    // that: eating a documented argument is the failure this whole file exists to end.
+    const shape = { _internal: z.string().optional(), q: z.string().optional() };
+    expect(parsedArgs(shape, { _internal: 'kept', _meta: { x: 1 } })).toEqual({ _internal: 'kept' });
+  });
+
+  it('still refuses an ordinary typo sent alongside a protocol key', () => {
+    const shape = { q: z.string().optional() };
+    expect(unknownKeyMessage(shape, { query: 'kalman', _meta: {} })).toContain(
+      'unknown argument `query`: this tool spells it `q`.',
     );
+    expect(unknownKeyMessage(shape, { query: 'kalman', _meta: {} })).not.toContain('_meta');
+  });
+
+  it('leaves a nested underscore key to the object it was sent to', () => {
+    // The valve is top-level only. MCP's `_meta` rides on the request's `params`, one level
+    // above `arguments`, so it can only ever land at the top of `arguments`; an underscore key
+    // two levels down is an invented one, and the nested matchers in zotero_annotate and
+    // zotero_tag_audit answer it the way they answer any other key they do not know.
+    const shape = { scope: z.object({ collection_keys: z.array(z.string()).optional() }).optional() };
+    const parsed = closedArgumentSchema(shape).safeParse({ scope: { _meta: 1 } });
+    expect(parsed.success).toBe(true);
+    // A plain nested z.object still strips; what matters here is that the top-level valve did
+    // not reach down and rewrite it.
+    expect(parsed.success && parsed.data).toEqual({ scope: {} });
   });
 
   it('names every unknown argument, not just the first', () => {
@@ -121,11 +157,25 @@ describe('closedArgumentSchema', () => {
     expect(message).toContain('`filter`');
   });
 
-  it('leaves a tool that declares no arguments exactly as it was', () => {
+  it('closes a tool that declares no arguments, and says so without a list', () => {
     const shape = {};
-    // Returned unchanged: zotero_whoami and zotero_groups advertise an open object, have one
-    // answer each, and would otherwise start refusing `zotero_groups {library_type:"group"}`.
-    expect(closedArgumentSchema(shape)).toBe(shape);
+    // zotero_whoami and zotero_groups. The general wording would end "The arguments are: .",
+    // and what a dropped key costs them is different: the answer does not change, only what it
+    // looks like it means.
+    expect(unknownKeyMessage(shape, { library_type: 'group' })).toBe(
+      'unknown argument `library_type`: this tool takes no arguments. ' +
+        'Nothing ran, because the key would have been dropped and the answer would have read ' +
+        'as though it had been honoured. Call this tool with no arguments.',
+    );
+    expect(issuesFor(shape, {})).toEqual([]);
+    // The protocol valve reaches them too, or the hosted risk would just move to these two.
+    expect(parsedArgs(shape, { _meta: { progressToken: 1 } })).toEqual({});
+  });
+
+  it('names every unknown argument on a tool that declares none', () => {
+    const message = unknownKeyMessage({}, { library_type: 'group', library_id: 5678 });
+    expect(message).toContain('unknown argument `library_type`: this tool takes no arguments.');
+    expect(message).toContain('unknown argument `library_id`: this tool takes no arguments.');
   });
 
   it('does not close nested objects that are deliberately open', () => {
@@ -152,13 +202,26 @@ describe('every registered tool', () => {
     expect(issuesFor(shape, args).filter((i) => i.code === 'unrecognized_keys')).toEqual([]);
   });
 
-  it.each(tools.filter((t) => Object.keys(t.inputSchema).length > 0).map((t) => [t.name, t] as const))(
+  it.each(tools.map((t) => [t.name, t] as const))(
     '%s refuses an argument it does not declare',
     (_name, def) => {
       const message = unknownKeyMessage(def.inputSchema, { not_a_real_argument: 1 });
       expect(message).toContain('unknown argument `not_a_real_argument`');
     },
   );
+
+  it.each(tools.map((t) => [t.name, t] as const))('%s tolerates a protocol key', (_name, def) => {
+    const shape = def.inputSchema;
+    const args = Object.fromEntries(Object.entries(shape).map(([k, v]) => [k, sample(v)]));
+    // Alongside the tool's own arguments, so a required one missing cannot be mistaken for the
+    // valve failing. Values are generated, so a value-level issue is possible and beside the
+    // point; what must never appear is a complaint about `_meta` itself.
+    const issues = issuesFor(shape, { ...args, _meta: { progressToken: 1 } });
+    expect(issues.filter((i) => i.code === 'unrecognized_keys')).toEqual([]);
+    // And it never arrives as data.
+    const parsed = closedArgumentSchema(shape).safeParse({ ...args, _meta: { progressToken: 1 } });
+    if (parsed.success) expect(Object.keys(parsed.data as object)).not.toContain('_meta');
+  });
 
   it('names the twin for the mistakes measured against the real library', () => {
     const byName = new Map(tools.map((t) => [t.name, t]));
@@ -205,7 +268,7 @@ async function connect(defs: ToolDefinition[], ctx: ToolContext) {
 }
 
 describe('through the MCP SDK', () => {
-  it('advertises exactly the schema it advertised before, for all thirty tools', async () => {
+  it('advertises every documented argument and closes all thirty tools', async () => {
     const client = await connect(tools, {} as ToolContext);
     const { tools: listed } = await client.listTools();
     expect(listed.length).toBe(30);
@@ -213,12 +276,66 @@ describe('through the MCP SDK', () => {
       const def = tools.find((d) => d.name === t.name);
       const declared = Object.keys(def!.inputSchema);
       expect(Object.keys(t.inputSchema.properties ?? {}), t.name).toEqual(declared);
-      // A tool with arguments already said additionalProperties:false and now means it; one
-      // with none is left as the open object it has always advertised.
-      expect(t.inputSchema.additionalProperties, t.name).toBe(
-        declared.length > 0 ? false : undefined,
+      // The twenty-eight that declare arguments have said this since long before it was
+      // enforced. zotero_whoami and zotero_groups never did: an empty raw shape was the one
+      // input here that reached the SDK through Zod v4-mini rather than v3, and that dialect
+      // emits no additionalProperties line at all. Handing the SDK a built object puts them on
+      // the same path as the rest.
+      expect(t.inputSchema.additionalProperties, t.name).toBe(false);
+    }
+  });
+
+  it('publishes the same JSON Schema the plain strict object would', async () => {
+    // The protocol valve is a ZodObject subclass precisely so that it is invisible here: the
+    // SDK reads _def, and _def is whatever z.object(...).strict() built. Pinned against the
+    // SDK's own conversion, tool by tool, so a change to it fails rather than ships.
+    const plain = tools.map((t) => ({
+      ...t,
+      name: `${t.name}__plain`,
+      inputSchema: t.inputSchema,
+    }));
+    const client = await connect(tools, {} as ToolContext);
+    const { tools: listed } = await client.listTools();
+    const reference = new McpServer({ name: 'r', version: '0.0.0' }, { capabilities: { tools: {} } });
+    for (const t of plain) {
+      const shape = t.inputSchema;
+      reference.registerTool(
+        t.name,
+        { title: t.title, description: t.description, inputSchema: z.object(shape).strict() },
+        async () => ({ content: [] }),
       );
     }
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const refClient = new Client({ name: 'ref', version: '0.0.0' });
+    await Promise.all([reference.connect(st), refClient.connect(ct)]);
+    const { tools: refListed } = await refClient.listTools();
+    for (const t of listed) {
+      const ref = refListed.find((r) => r.name === `${t.name}__plain`);
+      expect(JSON.stringify(t.inputSchema), t.name).toBe(JSON.stringify(ref!.inputSchema));
+    }
+  });
+
+  it('lets a protocol key through without handing it to the tool', async () => {
+    const handler = vi.fn(async (args: unknown) => ({
+      content: [{ type: 'text' as const, text: JSON.stringify(args) }],
+    }));
+    const def: ToolDefinition = {
+      name: 'probe',
+      title: 'probe',
+      description: 'probe',
+      inputSchema: { q: z.string().optional() },
+      handler,
+    };
+    const client = await connect([def], {
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    } as unknown as ToolContext);
+
+    const r: any = await client.callTool({
+      name: 'probe',
+      arguments: { q: 'kalman', _meta: { progressToken: 1 } },
+    });
+    expect(r.isError).toBeFalsy();
+    expect(r.content[0].text).toBe('{"q":"kalman"}');
   });
 
   it('refuses an unknown argument as a tool result, without running the tool', async () => {

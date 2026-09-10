@@ -25,6 +25,9 @@ import type { ZodRawShape, ZodTypeAny } from 'zod';
  * `unrecognized_keys` issue, which is where the twin can still be named. Nested objects are
  * under no such constraint, which is why the two fixes that came first could take the other
  * road.
+ *
+ * The one key strictness must NOT refuse is the protocol's own, and that is why the strict
+ * object is subclassed rather than used as it comes. See `ProtocolTolerantObject`.
  */
 
 /**
@@ -118,11 +121,55 @@ export function nestedMembers(shape: ZodRawShape): NestedMember[] {
 }
 
 /**
- * MCP keeps its own bookkeeping under `_meta`, on the request's `params`, never inside a
- * tool's `arguments`. One arriving here is a client bug and not a misspelled argument, so it
- * is answered with where it belongs instead of with a list of Zotero fields.
+ * A key the protocol reserves for itself, which this server accepts and then forgets.
+ *
+ * MCP keeps its own bookkeeping under `_meta`, on the request's `params` and never inside a
+ * tool's `arguments`, and nothing in this repo puts anything else in `arguments` either. But
+ * nobody can prove the hosted connector never will, and under a bare `.strict()` one such key
+ * turns every call it appears on into a refusal, all at once, for everyone. An underscore
+ * prefix is what the protocol reserves for its own use, so tolerating one costs nothing a
+ * caller could have meant: no tool here declares an argument beginning with `_`, and none
+ * should.
+ *
+ * Tolerated is not the same as delivered. The key is removed before the object is parsed, so
+ * it is neither refused nor advertised nor visible to a handler, which must never read
+ * protocol bookkeeping as though a user had sent it.
  */
-const isReservedKey = (key: string): boolean => key.startsWith('_');
+const isProtocolKey = (key: string): boolean => key.startsWith('_');
+
+/**
+ * A strict object that drops the protocol's own keys before it counts the ones it does not
+ * know.
+ *
+ * Zod offers no hook between "collect the keys outside the shape" and "refuse them", and both
+ * ways of buying one cost the advertised schema, measured for the commit this extends and
+ * re-measured for this one. A top-level `z.preprocess` is not an object schema, so the SDK
+ * finds no shape in it and `tools/list` publishes `{"type":"object","properties":{}}` with
+ * every argument gone. A `.catchall` that could filter publishes `additionalProperties: {}`,
+ * which advertises the opposite of what this server means, and `.catchall(z.never())`
+ * publishes `additionalProperties: false` and then does nothing at all, because Zod reads a
+ * `ZodNever` catchall as "no catchall" and falls back to plain strip.
+ *
+ * A subclass costs neither. `_def`, `.shape` and `instanceof ZodObject` are whatever the base
+ * class set, so the SDK's `normalizeObjectSchema` and `zod-to-json-schema` both see the strict
+ * object they saw before and publish it byte for byte. Only the parse differs, and only in
+ * what it removes before running.
+ *
+ * A key the tool itself declares is never removed, even if it begins with `_`. No tool
+ * declares one and none should, but a valve that ate a documented argument would be the very
+ * failure this file exists to end, and the shape is right here to be asked.
+ */
+class ProtocolTolerantObject<T extends ZodRawShape> extends z.ZodObject<T, 'strict'> {
+  _parse(input: z.ParseInput): z.ParseReturnType<this['_output']> {
+    const data: unknown = input.data;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return super._parse(input);
+    const declared = this.shape;
+    const drop = (key: string): boolean => isProtocolKey(key) && !(key in declared);
+    const entries = Object.entries(data as Record<string, unknown>);
+    if (!entries.some(([key]) => drop(key))) return super._parse(input);
+    return super._parse({ ...input, data: Object.fromEntries(entries.filter(([k]) => !drop(k))) });
+  }
+}
 
 /** The one nested member `key` could have meant, or undefined when it is none or several. */
 function hoistedFrom(
@@ -146,9 +193,6 @@ function hoistedFrom(
  * spelling rule would otherwise pair it with `items` and claim the tool spells it that way.
  */
 function unknownArgumentProblem(key: string, fields: string[], nested: NestedMember[]): string {
-  if (isReservedKey(key)) {
-    return `unknown argument \`${key}\`: protocol metadata belongs on the request's \`params._meta\`, not in a tool's arguments.`;
-  }
   const exact = hoistedFrom(key, nested, (a, b) => a === b);
   if (exact) {
     return `unknown argument \`${key}\`: this tool takes it inside \`${exact.parent}\`, as \`${exact.path}\`.`;
@@ -166,12 +210,23 @@ function unknownArgumentProblem(key: string, fields: string[], nested: NestedMem
   return `unknown argument \`${key}\`. The arguments are: ${fields.join(', ')}.`;
 }
 
-/** The whole refusal: one sentence per unknown argument, then what it cost, once. */
+/**
+ * The whole refusal: one sentence per unknown argument, then what it cost, once.
+ *
+ * A tool that declares no arguments gets its own wording, because the general one would end
+ * "The arguments are: ." and because what it costs is different. `zotero_groups` always lists
+ * every group library this server can reach, so a dropped key does not change the answer; what
+ * it changes is what the answer appears to mean, and that is the sentence worth spending.
+ */
 export function explainUnknownArguments(
   keys: string[],
   fields: string[],
   nested: NestedMember[],
 ): string {
+  if (fields.length === 0) {
+    const named = keys.map((k) => `unknown argument \`${k}\`: this tool takes no arguments.`).join(' ');
+    return `${named} Nothing ran, because the key would have been dropped and the answer would have read as though it had been honoured. Call this tool with no arguments.`;
+  }
   const named = keys.map((k) => unknownArgumentProblem(k, fields, nested)).join(' ');
   return `${named} Nothing ran, because the value you sent would have been dropped and the call would have answered a different question.`;
 }
@@ -179,16 +234,24 @@ export function explainUnknownArguments(
 /**
  * A tool's arguments as a schema that refuses a key it does not know, instead of dropping it.
  *
- * A tool that declares NO arguments is left exactly as it is. Its advertised schema is the
- * one in this server that does not say `additionalProperties: false` (an empty raw shape
- * reaches the SDK through a different Zod dialect, which emits no such line), and it has one
- * behaviour and one answer, so a key it drops cannot have changed what it replied. Closing it
- * would refuse `zotero_groups {library_type:"group"}`, which answers correctly today, and
- * would tighten a schema this server has never advertised as closed.
+ * Every tool goes through here, the two that declare no arguments included. Handing the SDK an
+ * empty raw shape was what left `zotero_whoami` and `zotero_groups` open: an empty shape is
+ * the one input in this server that reaches the SDK through Zod v4-mini rather than v3, and
+ * that dialect emits no `additionalProperties` line at all, so those two advertised an open
+ * object and then quietly dropped whatever arrived. Handing it a built object instead puts
+ * them back on the v3 path with the other twenty-eight, and their published schema gains the
+ * `additionalProperties: false` it should always have carried. Nothing else about the SDK
+ * changes: a built object is what the other twenty-eight already pass.
+ *
+ * `zotero_groups {library_type:"group"}` answers correctly today and will be refused after
+ * this, and that is the intended trade. The key cannot be tolerated by value: the same
+ * sentence in that tool's own description invites `{library_type:"user"}` and
+ * `{library_id:...}` just as strongly, and those return every group as though the filter had
+ * been applied, which is the failure the enforcement exists to end. A refusal costs one turn
+ * and says what to send instead.
  */
-export function closedArgumentSchema(shape: ZodRawShape): ZodRawShape | ZodTypeAny {
+export function closedArgumentSchema(shape: ZodRawShape): ZodTypeAny {
   const fields = Object.keys(shape);
-  if (fields.length === 0) return shape;
   const nested = nestedMembers(shape);
   const errorMap: z.ZodErrorMap = (issue, ctx) => {
     if (issue.code === z.ZodIssueCode.unrecognized_keys) {
@@ -196,5 +259,5 @@ export function closedArgumentSchema(shape: ZodRawShape): ZodRawShape | ZodTypeA
     }
     return { message: ctx.defaultError };
   };
-  return z.object(shape, { errorMap }).strict();
+  return new ProtocolTolerantObject(z.object(shape, { errorMap }).strict()._def);
 }
