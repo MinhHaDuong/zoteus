@@ -4,6 +4,14 @@ All notable changes to Zoteus are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Reads after a cloud update stay on the cloud while the desktop baseline probe is still
+  pending or has failed. An existing desktop item no longer counts as a synced update
+  merely because its key is present. If the baseline fails, the conservative override
+  lasts until a later write replaces the witness or the process ends.
+
 ## [1.18.0] - 2026-09-10
 
 ### Fixed
